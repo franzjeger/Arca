@@ -26,7 +26,7 @@ pub fn ensure_running(probe: impl FnMut() -> bool) -> Result<(), String> {
     ensure_ready(
         probe,
         launch,
-        |delay| std::thread::sleep(delay),
+        std::thread::sleep,
         Duration::from_secs(15),
     )
 }

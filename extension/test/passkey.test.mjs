@@ -1053,7 +1053,7 @@ console.log("PASS provider capability probes: first key, disconnected, native fa
   await tick();
   assert.equal(typeof releaseUnlock, "function");
   controller.abort();
-  await pending;
+  assert.equal(await pending, "AbortError");
   PROVIDER_CONNECTED = true;
   releaseUnlock({ type: "unlock_requested" });
   await tick();

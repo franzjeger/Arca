@@ -125,7 +125,7 @@
         clearTimeout(timer);
         window.postMessage({ __sybrPasskey: "request", kind: "cancel", id }, window.location.origin);
         signal?.removeEventListener("abort", cancel);
-        resolve({ ok: false, error: "unlock_cancelled" });
+        resolve({ ok: false, error: signal?.aborted ? "request_aborted" : "unlock_cancelled" });
       };
       // Safety timeout: fall back if the app never answers. The ceremony calls
       // get a long one because a real answer waits on the user typing a master
@@ -292,6 +292,7 @@
         userHandle: toArr(pk.user && pk.user.id),
         excludeCredentials: (pk.excludeCredentials || []).map((c) => toArr(c.id)),
       }, undefined, options.signal);
+      if (resp.error === "request_aborted") throw new DOMException("Passkey request aborted", "AbortError");
       if (resp.error === "unlock_cancelled") throw new DOMException("Arca unlock cancelled or unavailable", "NotAllowedError");
       if (!resp.ok) {
         // Spec-correct duplicate handling: the RP listed credentials we already
@@ -329,7 +330,7 @@
     } catch (e) {
       // InvalidStateError is a deliberate, spec-mandated answer (credential
       // already registered) — it must reach the page, not trigger a fallback.
-      if (e && (e.name === "InvalidStateError" || e.name === "NotAllowedError")) throw e;
+      if (e && (e.name === "InvalidStateError" || e.name === "NotAllowedError" || e.name === "AbortError")) throw e;
       return fallback(
         "create",
         `exception:${(e && e.name) || "unknown"}`,
@@ -534,6 +535,7 @@
         rpId: pk.rpId || window.location.hostname,
         allowCredentials: (pk.allowCredentials || []).map((c) => toArr(c.id)),
       }, undefined, options.signal);
+      if (resp.error === "request_aborted") throw new DOMException("Passkey request aborted", "AbortError");
       if (resp.error === "account_selection_cancelled" || resp.error === "unlock_cancelled") {
         throw new DOMException("Arca authentication cancelled or unavailable", "NotAllowedError");
       }
@@ -566,7 +568,7 @@
       });
       return shapedCredential("get", rawId, response);
     } catch (e) {
-      if (e?.name === "NotAllowedError") throw e;
+      if (e?.name === "NotAllowedError" || e?.name === "AbortError") throw e;
       return fallback(
         "get",
         `exception:${(e && e.name) || "unknown"}`,
