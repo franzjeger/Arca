@@ -1761,7 +1761,13 @@ fn dispatch(
                             || error.code == "unlock_cancelled"
                             || error.code == "unlock_in_progress" =>
                     {
-                        return Response::UnlockRequested
+                        return if error.code == "unlock_in_progress" {
+                            Response::UnlockRequested
+                        } else {
+                            Response::Error {
+                                message: "unlock_cancelled".to_string(),
+                            }
+                        }
                     }
                     Err(_) => false,
                 };

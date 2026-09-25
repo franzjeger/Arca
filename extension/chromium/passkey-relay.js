@@ -168,10 +168,35 @@
     );
   }
 
+  const activeCeremonies = new Map();
+  // Only called after spending a real gate approval. Poll metadata, never
+  // replay create/get. The credential operation starts in this document only.
+  async function ensureUnlocked(active) {
+    const probe = () => api.runtime.sendMessage({ cmd: "listLogins", url: location.href || location.origin });
+    const connected = result => result?.ok && result.response?.app_connected;
+    const initial = await probe();
+    if (!initial?.ok) return "provider_unavailable";
+    if (connected(initial)) return null;
+    if (!active() || !contextAlive()) return "unlock_cancelled";
+    const unlock = await api.runtime.sendMessage({ cmd: "requestUnlock" });
+    if (!unlock?.ok || unlock.response?.type !== "unlock_requested") return "unlock_cancelled";
+    const deadline = Date.now() + 30000;
+    while (active() && contextAlive() && Date.now() < deadline) {
+      if (connected(await probe())) return null;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return "unlock_cancelled";
+  }
+
   window.addEventListener("message", async (e) => {
     if (e.source !== window) return;
     const d = e.data;
     if (!d || d.__sybrPasskey !== "request") return;
+    if (d.kind === "cancel") {
+      const active = activeCeremonies.get(d.id);
+      if (active) active.cancelled = true;
+      return;
+    }
 
     if (d.kind === "providerAvailability") {
       let available = false;
@@ -302,33 +327,43 @@
       d.kind === "create" ? "webauthn.create" : "webauthn.get",
       p.challenge,
     );
+    const operation = { cancelled: false };
+    activeCeremonies.set(d.id, operation);
+    const active = () => !operation.cancelled && contextAlive();
     let result;
     try {
-      // Every field named. The page's payload is a request, not a message to
-      // pass on: the origin, the client data hash and `picked` are ours.
-      const message =
-        d.kind === "create"
-          ? {
-              cmd: "passkeyCreate",
-              origin: location.origin,
-              rpId: p.rpId,
-              userName: p.userName,
-              userHandle: p.userHandle,
-              excludeCredentials: p.excludeCredentials,
-            }
-          : {
-              cmd: "passkeyGet",
-              origin: location.origin,
-              rpId: p.rpId,
-              allowCredentials: p.allowCredentials,
-              clientDataHash: Array.from(
-                new Uint8Array(await crypto.subtle.digest("SHA-256", clientData)),
-              ),
-              picked,
-            };
-      result = await api.runtime.sendMessage(message);
+      const error = await ensureUnlocked(active);
+      if (error || !active()) {
+        result = { ok: true, response: { type: "error", message: error || "unlock_cancelled" } };
+      } else {
+        // Every field named. The page's payload is a request, not a message to
+        // pass on: the origin, the client data hash and `picked` are ours.
+        const message =
+          d.kind === "create"
+            ? {
+                cmd: "passkeyCreate",
+                origin: location.origin,
+                rpId: p.rpId,
+                userName: p.userName,
+                userHandle: p.userHandle,
+                excludeCredentials: p.excludeCredentials,
+              }
+            : {
+                cmd: "passkeyGet",
+                origin: location.origin,
+                rpId: p.rpId,
+                allowCredentials: p.allowCredentials,
+                clientDataHash: Array.from(
+                  new Uint8Array(await crypto.subtle.digest("SHA-256", clientData)),
+                ),
+                picked,
+              };
+        if (active()) result = await api.runtime.sendMessage(message);
+      }
     } catch (_e) {
-      result = null;
+      result = { ok: true, response: { type: "error", message: "unlock_cancelled" } };
+    } finally {
+      if (activeCeremonies.get(d.id) === operation) activeCeremonies.delete(d.id);
     }
     const resp = result && result.ok ? result.response : null;
     const reply = { __sybrPasskey: "response", id: d.id, ok: false };

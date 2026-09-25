@@ -53,6 +53,9 @@ const CLAIMED = "app:locked";
 let NATIVE_ANSWER = { type: "error", message: "locked" };
 let PROVIDER_CONNECTED = true;
 let NATIVE_PLATFORM = false;
+let APP_LAUNCHABLE = false;
+let UNLOCK_HANDLER = () => ({ type: "error", message: "unlock_cancelled" });
+const NATIVE_CALLS = [];
 // The last ceremony that reached the native host, as the desktop would read it.
 let LAST_NATIVE = null;
 
@@ -140,11 +143,13 @@ const swChrome = {
     // being perfectly correct in a browser.
     sendNativeMessage: (_host, _msg, cb) => {
       if (_msg.type === "passkey_get" || _msg.type === "passkey_create") LAST_NATIVE = _msg;
+      NATIVE_CALLS.push(_msg.type);
       const answer = _msg.type === 'list_matching_logins'
         ? { type: 'logins', app_connected: PROVIDER_CONNECTED, items: NATIVE_ANSWER.type === 'passkey_assertion' ? [{kind:'passkey'}] : [] }
-        : NATIVE_ANSWER;
+        : _msg.type === "hello" ? { type: "hello", app_connected: PROVIDER_CONNECTED, app_launchable: APP_LAUNCHABLE }
+        : _msg.type === "request_unlock" ? UNLOCK_HANDLER() : NATIVE_ANSWER;
       if (typeof cb === "function") {
-        queueMicrotask(() => cb(answer));
+        Promise.resolve(answer).then(cb);
         return undefined;
       }
       return Promise.resolve(answer);
@@ -1007,3 +1012,52 @@ console.log(`\n${pass} checks passed\n`);
   PROVIDER_CONNECTED = true;
 }
 console.log("PASS provider capability probes: first key, disconnected, native fallback, orphaned relay, unchanged unrelated capabilities");
+
+// An installed, stopped/locked provider remains discoverable without waking it.
+{
+  swVersion = "0.3.0";
+  PROVIDER_CONNECTED = false;
+  APP_LAUNCHABLE = true;
+  NATIVE_CALLS.length = 0;
+  const doc = makeDocument({ host: "startup.example", tabId: 950 });
+  assert.equal(await doc.webauthn.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(), true);
+  assert.equal(NATIVE_CALLS.includes("request_unlock"), false);
+  await doc.get(); // no trusted gesture: cannot wake Arca
+  assert.equal(NATIVE_CALLS.includes("request_unlock"), false);
+
+  UNLOCK_HANDLER = () => { PROVIDER_CONNECTED = true; return { type: "unlock_requested" }; };
+  NATIVE_CALLS.length = 0;
+  doc.gesture();
+  await doc.create();
+  assert.equal(NATIVE_CALLS.filter(x => x === "request_unlock").length, 1);
+  assert.equal(NATIVE_CALLS.filter(x => x === "passkey_create").length, 1);
+  assert.ok(NATIVE_CALLS.indexOf("request_unlock") < NATIVE_CALLS.indexOf("passkey_create"));
+
+  PROVIDER_CONNECTED = false;
+  UNLOCK_HANDLER = () => ({ type: "error", message: "unlock_cancelled" });
+  NATIVE_CALLS.length = 0;
+  const cancelled = makeDocument({ host: "cancel-startup.example", tabId: 951 });
+  cancelled.gesture();
+  assert.equal(await cancelled.get().catch(e => e.name), "NotAllowedError");
+  assert.equal(NATIVE_CALLS.includes("passkey_get"), false);
+  assert.equal(cancelled.realGetCalls(), 0);
+
+  // Abort while the native prompt is open: its eventual success cannot sign.
+  let releaseUnlock;
+  UNLOCK_HANDLER = () => new Promise(resolve => { releaseUnlock = resolve; });
+  NATIVE_CALLS.length = 0;
+  const aborted = makeDocument({ host: "abort-startup.example", tabId: 952 });
+  const controller = new AbortController();
+  aborted.gesture();
+  const pending = aborted.get(undefined, { signal: controller.signal }).catch(e => e.name);
+  await tick();
+  assert.equal(typeof releaseUnlock, "function");
+  controller.abort();
+  assert.equal(await pending, "AbortError");
+  PROVIDER_CONNECTED = true;
+  releaseUnlock({ type: "unlock_requested" });
+  await tick();
+  assert.equal(NATIVE_CALLS.includes("passkey_get"), false);
+  APP_LAUNCHABLE = false;
+}
+console.log("PASS startup: passive discovery, gesture gate, one unlock, one ceremony, cancel/abort without signing");

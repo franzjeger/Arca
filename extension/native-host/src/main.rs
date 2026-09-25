@@ -17,6 +17,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 mod bridge_schema;
+mod launch;
 
 use std::net::TcpStream;
 use std::time::Duration;
@@ -153,8 +154,10 @@ enum Response {
         name: String,
         version: String,
         protocol: u32,
-        /// Whether the desktop app is reachable & unlocked right now.
+        /// Whether the authenticated desktop bridge is reachable (even if locked).
         app_connected: bool,
+        /// Whether an explicit unlock can start a standard installation.
+        app_launchable: bool,
         /// Desktop app version, when its authenticated bridge reports one.
         #[serde(skip_serializing_if = "Option::is_none")]
         app_version: Option<String>,
@@ -245,6 +248,7 @@ fn handle(request: Request) -> Response {
                 version: VERSION.to_string(),
                 protocol: PROTOCOL_VERSION,
                 app_connected: app.is_some(),
+                app_launchable: launch::available(),
                 app_version: app.as_ref().and_then(|a| a.version.clone()),
                 app_build: app.as_ref().and_then(|a| a.build.clone()),
                 app_commit: app.as_ref().and_then(|a| a.commit.clone()),
@@ -406,18 +410,26 @@ fn handle(request: Request) -> Response {
                 }
             }
         }
-        Request::Unlock => match bridge_request(serde_json::json!({ "type": "request_unlock" })) {
-            Some(response) if response["type"] == "unlock_requested" => Response::UnlockRequested,
-            Some(response) => Response::Error {
-                message: response["message"]
-                    .as_str()
-                    .unwrap_or("invalid_response")
-                    .to_string(),
-            },
-            None => Response::Error {
-                message: "Arca is not running.".to_string(),
-            },
-        },
+        Request::Unlock => {
+            if let Err(message) = launch::ensure_running(|| desktop_app_info().is_some()) {
+                return Response::Error { message };
+            }
+            // Send once only: a lost response must never replay a user prompt.
+            match bridge_request(serde_json::json!({ "type": "request_unlock" })) {
+                Some(response) if response["type"] == "unlock_requested" => {
+                    Response::UnlockRequested
+                }
+                Some(response) => Response::Error {
+                    message: response["message"]
+                        .as_str()
+                        .unwrap_or("invalid_response")
+                        .to_string(),
+                },
+                None => Response::Error {
+                    message: "Could not reach Arca after startup. Try again.".to_string(),
+                },
+            }
+        }
         Request::GeneratePassword { length, symbols } => match generate_password(length, symbols) {
             Some(password) => Response::GeneratedPassword { password },
             // Unlike the others this cannot mean "locked": the app generates
@@ -642,6 +654,7 @@ fn bridge_request_at(
 ) -> Option<(serde_json::Value, DesktopBuild)> {
     // Invalid requests or incompatible replies must fail closed, never take
     // down the browser's long-lived native-messaging process.
+    let probe = payload.get("type").and_then(|v| v.as_str()) == Some("match");
     let typed_req: bridge_schema::BridgeRequest = serde_json::from_value(payload).ok()?;
     let payload = serde_json::to_value(typed_req).ok()?;
 
@@ -653,7 +666,7 @@ fn bridge_request_at(
     // Long enough to outlast an in-app autofill-consent prompt (the app blocks
     // the reply until the user answers, up to ~30s) without hanging forever.
     stream
-        .set_read_timeout(Some(Duration::from_secs(90)))
+        .set_read_timeout(Some(Duration::from_secs(if probe { 2 } else { 90 })))
         .ok()?;
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
