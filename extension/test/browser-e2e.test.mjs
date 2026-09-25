@@ -670,25 +670,31 @@ try {
     panel: query('.sybr-panel')?.shadowRoot?.querySelector('.sybr-panel-content')?.textContent, hooked: window.__sybrPasskeyHooked })`)); } catch {}
   failure = error;
 } finally {
-  socket.close();
   const exited = new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) resolve();
     else child.once("exit", resolve);
   });
-  // SIGTERM, then insist. A Chrome still running is a Chrome still writing to
-  // the profile we are about to delete, which is what the ENOTEMPTY was.
-  child.kill("SIGTERM");
-  const died = await Promise.race([
+  // Ask the browser to flush and close its profile before terminating it.
+  // SIGTERM alone can leave Chromium's subprocesses writing during removal.
+  try {
+    await Promise.race([send("Browser.close"), sleep(5000)]);
+  } catch { /* the connection may close before the protocol reply arrives */ }
+  let died = await Promise.race([
     exited.then(() => true),
     sleep(5000).then(() => false),
   ]);
   if (!died) {
+    child.kill("SIGTERM");
+    died = await Promise.race([exited.then(() => true), sleep(5000).then(() => false)]);
+  }
+  if (!died) {
     child.kill("SIGKILL");
     await Promise.race([exited, sleep(5000)]);
   }
+  socket.close();
   await new Promise((resolve) => server.close(resolve));
   try {
-    fs.rmSync(tempRoot, {
+    await fs.promises.rm(tempRoot, {
       recursive: true,
       force: true,
       maxRetries: 10,
