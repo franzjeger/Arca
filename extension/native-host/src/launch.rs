@@ -23,12 +23,7 @@ pub fn available() -> bool {
 
 #[cfg(not(test))]
 pub fn ensure_running(probe: impl FnMut() -> bool) -> Result<(), String> {
-    ensure_ready(
-        probe,
-        launch,
-        std::thread::sleep,
-        Duration::from_secs(15),
-    )
+    ensure_ready(probe, launch, std::thread::sleep, Duration::from_secs(15))
 }
 
 // Unit tests must never start or contact the user's actual vault.
