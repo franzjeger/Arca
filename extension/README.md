@@ -53,8 +53,17 @@ programmatic unpacked installs, by design):
 1. `chrome://extensions` → enable **Developer mode**
 2. **Load unpacked** → select `extension/chromium/`
 
-Keep the desktop app open and unlocked; autofill then works. (Undo: delete the
-`no.sybr.vault.json` files the script printed.)
+Click **Start / unlock Arca** in the extension popup or the locked autofill
+picker. On macOS this starts `/Applications/Arca.app` if necessary, then asks
+for authentication in Arca. An approved passkey sign-in or registration does
+the same before sending the ceremony once. You can use the app's master-password
+screen when quick unlock is not configured. Passive capability probes and page
+loads do not start the app. On Linux, automatic startup supports the local
+installer and the standard `/usr/bin/vault-desktop` package; on other platforms
+or custom install paths, start the desktop app manually first.
+
+Reload the extension and the website tabs after updating its files.
+(Undo: delete the `no.sybr.vault.json` files the script printed.)
 
 Handshake smoke test of the host alone:
 

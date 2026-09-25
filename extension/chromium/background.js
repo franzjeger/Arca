@@ -519,6 +519,21 @@ async function policyFor(host) {
   }
 }
 
+// Coalesce overlapping user requests; never retry an ambiguous unlock response.
+let pendingUnlock = null;
+function requestUnlock() {
+  if (!pendingUnlock) {
+    pendingUnlock = sendNative({ type: "request_unlock" }).finally(() => { pendingUnlock = null; });
+  }
+  return pendingUnlock;
+}
+
+async function providerAvailable() {
+  const result = await sendNative({ type: "hello", protocol: NATIVE_PROTOCOL });
+  return !!(result?.ok && result.response?.type === "hello" &&
+    (result.response.app_connected || result.response.app_launchable));
+}
+
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg.cmd !== "string") return false;
 
@@ -600,8 +615,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // neither consumes a gesture nor asks for registration/verification.
       policyFor(msg.host).then(async (policy) => {
         if (policy === "never") return { available: false };
-        const result = await sendNative({ type: "list_matching_logins", url: msg.url });
-        return { available: !!(result?.ok && result.response?.app_connected) };
+        return { available: await providerAvailable() };
       }).then(sendResponse).catch(() => sendResponse({ available: false }));
       return true;
 
@@ -611,7 +625,12 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       policyFor(msg.host).then(async (policy) => {
         if (policy === "never") return { available: false };
         const result = await sendNative({ type: "list_matching_logins", url: msg.url });
-        return { available: !!(result?.ok && result.response?.items?.some(item => item.kind === "passkey")) };
+        // A locked provider cannot enumerate keys. Keep conditional autofill
+        // available until the user unlocks, without opening or prompting here.
+        if (result?.ok && result.response?.app_connected) {
+          return { available: !!result.response.items?.some(item => item.kind === "passkey") };
+        }
+        return { available: await providerAvailable() };
       }).then(sendResponse).catch(() => sendResponse({ available: false }));
       return true;
 
@@ -755,7 +774,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "requestUnlock":
-      sendNative({ type: "request_unlock" }).then(sendResponse);
+      requestUnlock().then(sendResponse);
       return true;
 
     case "generatePassword":

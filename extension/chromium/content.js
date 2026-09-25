@@ -674,8 +674,8 @@
     row.innerHTML =
       `<span class="sybr-line"><span class="sybr-title"></span>` +
       `<span class="sybr-kind"></span></span><span class="sybr-user"></span>`;
-    row.querySelector(".sybr-title").textContent = "Unlock Arca to autofill";
-    row.querySelector(".sybr-user").textContent = "Arca will ask for Touch ID";
+    row.querySelector(".sybr-title").textContent = "Start / unlock Arca to autofill";
+    row.querySelector(".sybr-user").textContent = "Authenticate in Arca to continue";
     const kindEl = row.querySelector(".sybr-kind");
     kindEl.textContent = "Locked";
     kindEl.classList.add("sybr-kind-password");

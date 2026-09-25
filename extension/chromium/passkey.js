@@ -116,20 +116,26 @@
       request.resolve(d);
     }
   });
-  function ask(kind, payload, timeoutMs = 90000) {
+  function ask(kind, payload, timeoutMs = 180000, signal) {
     return new Promise((resolve) => {
       const id = `${seq++}`;
+      const cancel = () => {
+        if (!pending.has(id)) return;
+        pending.delete(id);
+        clearTimeout(timer);
+        window.postMessage({ __sybrPasskey: "request", kind: "cancel", id }, window.location.origin);
+        signal?.removeEventListener("abort", cancel);
+        resolve({ ok: false, error: "unlock_cancelled" });
+      };
       // Safety timeout: fall back if the app never answers. The ceremony calls
       // get a long one because a real answer waits on the user typing a master
       // password; the gate gets a short one because nothing human is involved
       // and a stalled gate would freeze the site's sign-in button instead.
-      const timer = setTimeout(() => {
-        if (pending.has(id)) {
-          pending.delete(id);
-          resolve({ ok: false });
-        }
-      }, timeoutMs);
-      pending.set(id, { resolve, timer });
+      const timer = setTimeout(cancel, timeoutMs);
+      const finish = result => { signal?.removeEventListener("abort", cancel); resolve(result); };
+      pending.set(id, { resolve: finish, timer });
+      if (signal?.aborted) { cancel(); return; }
+      signal?.addEventListener("abort", cancel, { once: true });
       window.postMessage(
         { __sybrPasskey: "request", kind, id, payload },
         window.location.origin,
@@ -285,7 +291,8 @@
         userName: (pk.user && pk.user.name) || "",
         userHandle: toArr(pk.user && pk.user.id),
         excludeCredentials: (pk.excludeCredentials || []).map((c) => toArr(c.id)),
-      });
+      }, undefined, options.signal);
+      if (resp.error === "unlock_cancelled") throw new DOMException("Arca unlock cancelled or unavailable", "NotAllowedError");
       if (!resp.ok) {
         // Spec-correct duplicate handling: the RP listed credentials we already
         // hold in excludeCredentials, so the authenticator must answer
@@ -322,7 +329,7 @@
     } catch (e) {
       // InvalidStateError is a deliberate, spec-mandated answer (credential
       // already registered) — it must reach the page, not trigger a fallback.
-      if (e && e.name === "InvalidStateError") throw e;
+      if (e && (e.name === "InvalidStateError" || e.name === "NotAllowedError")) throw e;
       return fallback(
         "create",
         `exception:${(e && e.name) || "unknown"}`,
@@ -371,7 +378,7 @@
     let settle;
     const fromArca = new Promise((resolve, reject) => { settle = resolve; rejectArca = reject; });
     liveConditional?.cancel();
-    const request = { pk, settle, done: false, busy: false, cancel: abort };
+    const request = { pk, settle, done: false, busy: false, cancel: abort, signal: controller.signal };
     liveConditional = request;
     const clear = () => {
       if (liveConditional === request) liveConditional = null;
@@ -453,7 +460,7 @@
           credentialId && credentialId.length
             ? [credentialId]
             : (pk.allowCredentials || []).map((c) => toArr(c.id)),
-      });
+      }, undefined, request.signal);
       if (!current()) return refused("request_cancelled");
       if (!resp.ok) {
         console.debug(`[Arca] passkey use → app said no (${resp.error || "no_response"})`);
@@ -526,9 +533,9 @@
         challenge: toArr(pk.challenge),
         rpId: pk.rpId || window.location.hostname,
         allowCredentials: (pk.allowCredentials || []).map((c) => toArr(c.id)),
-      });
-      if (resp.error === "account_selection_cancelled") {
-        throw new DOMException("Account selection cancelled", "NotAllowedError");
+      }, undefined, options.signal);
+      if (resp.error === "account_selection_cancelled" || resp.error === "unlock_cancelled") {
+        throw new DOMException("Arca authentication cancelled or unavailable", "NotAllowedError");
       }
       if (!resp.ok) {
         return fallback(

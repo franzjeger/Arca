@@ -179,8 +179,16 @@ fs.cpSync(extensionSource, extensionDir, { recursive: true });
 fs.mkdirSync(profileDir);
 fs.writeFileSync(
   path.join(extensionDir, "background.js"),
-  `chrome.runtime.onMessage.addListener((message, _sender, reply) => {
-    if (message.cmd === "listLogins") {
+  `let unlocked = false;
+  chrome.runtime.onMessage.addListener((message, _sender, reply) => {
+    if (message.cmd === "requestUnlock") {
+      unlocked = true;
+      reply({ ok: true, response: { type: "unlock_requested" } });
+    } else if (message.cmd === "listLogins") {
+      if (message.url.includes('/locked') && !unlocked) {
+        reply({ ok: true, response: { type: "logins", app_connected: false, items: [] } });
+        return true;
+      }
       const passkey = message.url.includes('passkey');
       const count = message.url.includes('/steps') || message.url.includes('/slow') ? 12 : 1;
       setTimeout(() => reply({ ok: true, response: { type: "logins", app_connected: true,
@@ -662,6 +670,16 @@ try {
   assert.deepEqual([clientData.type, clientData.origin, clientData.challenge],
     ['webauthn.get', `http://localhost:${port}`, 'AQID'],
     'the relying party receives client data the relay built for this origin');
+  // A stopped/locked app is actionable directly from a password field.
+  await send("Page.navigate", { url: pageUrl + 'locked' }, sessionId);
+  await waitFor('document.querySelectorAll(".sybr-badge-host").length >= 5', "locked page badges");
+  await evaluate('query("#sign-password").focus()');
+  await waitFor('query(".sybr-panel .sybr-row")?.textContent.includes("Start / unlock")', "unlock action");
+  await evaluate('query(".sybr-panel .sybr-row").click()');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(await evaluate('query("#sign-password").value'), '', 'synthetic unlock click does not fill');
+  await trustedClick();
+  await waitFor('query("#sign-password").value === "stored-secret"', "unlock then automatic fill");
 } catch (error) {
   // Held, not rethrown yet: teardown runs next, and a failure THERE must not
   // replace this one. It did once — a cleanup ENOTEMPTY on CI was all that

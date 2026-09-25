@@ -23,7 +23,7 @@ api.runtime.sendMessage({ cmd: "hello" }).then((result) => {
       : `Host v${hostVersion} (app not running)`;
     if (!appConnected) {
       detail.textContent =
-        "Native host is installed and responding. Open and unlock the Arca desktop app to enable autofill.";
+        "Choose Start / unlock Arca to open the installed app and authenticate.";
     } else if (!versionsMatch) {
       detail.textContent =
         "Arca components have different versions. The protocol is compatible, but reinstall Arca and reload this extension to keep them in sync.";
@@ -44,6 +44,23 @@ api.runtime.sendMessage({ cmd: "hello" }).then((result) => {
     statusText.textContent = "Native host not found";
     detail.textContent =
       "Install the native messaging host manifest and the vault-native-host binary. See extension/README.md.";
+  }
+});
+
+const unlockButton = document.getElementById("unlock");
+unlockButton.addEventListener("click", async (event) => {
+  if (!event.isTrusted) return;
+  unlockButton.disabled = true;
+  detail.textContent = "Starting Arca. Complete authentication in the app.";
+  try {
+    const result = await api.runtime.sendMessage({ cmd: "requestUnlock" });
+    if (!result?.ok || result.response?.type !== "unlock_requested") {
+      detail.textContent = result?.response?.message || result?.error || "Could not reach Arca.";
+    }
+  } catch (_) {
+    detail.textContent = "Could not reach Arca. Reload the extension and try again.";
+  } finally {
+    unlockButton.disabled = false;
   }
 });
 
