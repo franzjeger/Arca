@@ -1,0 +1,79 @@
+{
+  "manifest_version": 3,
+  "name": "Arca",
+  "version": "0.6.2",
+  "description": "Detects login forms and autofills credentials from your Arca desktop vault.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "nativeMessaging",
+    "storage",
+    "bookmarks",
+    "alarms",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Arca",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "picker-layout.js",
+        "picker-styles.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "passkey-relay.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "passkey.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2nFJ813WwtcSqGddgBLd7q68hF/eUFO65Psi6mTiKqCbYSjs0VZe14ECYdsileMv0/KrSWArxY0LYJGK/eUKQL5JkNKxTHQDeB+wO2684iCW/9uV287iJGkyGx8wJZkFjyT1a6RyjVdKkhn/AUPQxzDQDBLfOSpqLagS8tO1bJKmWyZ+gU+9jSAE69hoztuLp7rUfnRn+zqn1WHgHNZ05RNZeUd78samMa+CCLV76d74q/UFACDpwpv01SRdw2rB1XhA1O9shv1hZBLuGCOatXcTXYDkN5RNSoMXE9c4rvNPzB93MuFwyuikGx3S+gwC4wV7KYKZSYCZyjTYvIuiBwIDAQAB"
+}

@@ -1,0 +1,135 @@
+# XcodeGen project definition — the reviewable source of truth for the Xcode
+# project. Regenerate the .xcodeproj with:  cd apps/macos && xcodegen generate
+#
+# M2: host + AutoFill extension backed by the REAL vault. Both targets link the
+# Rust vault-ffi static library (built by the pre-build script below) and read
+# the encrypted vault from the shared App Group container, unlocking with the
+# device key from the shared keychain group. Passwords + passkeys.
+name: Arca
+options:
+  bundleIdPrefix: no.sybr.vault
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    # Swift 6 language mode: data-race safety is enforced, not suggested. A race
+    # in a credential provider means handing back the wrong password. Kept
+    # alongside the explicit `complete` setting, which is what the count in
+    # scripts/build-apple-ci.sh measured at zero before this was switched on.
+    SWIFT_STRICT_CONCURRENCY: complete
+    # Xcode 16+ wraps Debug builds in a separate <name>.debug.dylib launched via
+    # a thunk. For an app extension the credential-provider loader can fail to
+    # recognize that indirection, so build a conventional single-binary target.
+    ENABLE_DEBUG_DYLIB: "NO"
+    # Project signing team: owns the no.sybr.vault namespace and is the team the
+    # shipped Arca uses (App Groups + keychain groups are team-scoped, so the
+    # extension and the Tauri Arca.app must share one team).
+    DEVELOPMENT_TEAM: LY6LJ395B8
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.6.2"
+    CURRENT_PROJECT_VERSION: "1"
+    # vault-ffi (Rust) linkage, shared by both targets.
+    SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../apple-shared/Arca-Bridging-Header.h"
+    HEADER_SEARCH_PATHS: "$(SRCROOT)/../../crates/vault-ffi/include"
+    LIBRARY_SEARCH_PATHS: "$(SRCROOT)/libs"
+    OTHER_LDFLAGS: "-lvault_ffi"
+
+# Pre-build step reused by both targets: build the Rust static lib for the Mac
+# and stage it where the linker looks. `basedOnDependencyAnalysis: false` so it
+# always runs (cargo itself is incremental).
+scriptDefaults: &buildFfi
+  name: "Build vault-ffi (Rust static lib)"
+  basedOnDependencyAnalysis: false
+  script: |
+    set -euo pipefail
+    export PATH="$HOME/.cargo/bin:$PATH"
+    cd "$SRCROOT/../.."
+    cargo build -p vault-ffi --release --target aarch64-apple-darwin
+    mkdir -p "$SRCROOT/libs"
+    CARGO_OUTPUT="$(python3 scripts/cargo-target-dir.py)"
+    cp -f "$CARGO_OUTPUT/aarch64-apple-darwin/release/libvault_ffi.a" "$SRCROOT/libs/libvault_ffi.a"
+
+targets:
+  # Provisioning helper: exists only so Xcode provisions the no.sybr.vault App ID
+  # with App Groups + Keychain Sharing; its profile is embedded into the Tauri
+  # Arca.app. Not shipped, not installed.
+  ArcaSign:
+    type: application
+    platform: macOS
+    sources:
+      - ProvisionStub
+    settings:
+      base:
+        PRODUCT_NAME: ArcaSign
+        PRODUCT_BUNDLE_IDENTIFIER: no.sybr.vault
+        INFOPLIST_FILE: ProvisionStub/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ProvisionStub/ProvisionStub.entitlements
+
+  ArcaHost:
+    type: application
+    platform: macOS
+    scheme:
+      # Attached here rather than given its own scheme, so `xcodebuild test
+      # -scheme ArcaHost` both builds the app and runs the bridge tests.
+      testTargets:
+        - ArcaBridgeTests
+    sources:
+      - ArcaHost
+      # The Swift/Rust bridge is platform-agnostic and shared with apps/ios.
+      - path: ../apple-shared/VaultBridge.swift
+        group: Shared
+    settings:
+      base:
+        PRODUCT_NAME: ArcaHost
+        PRODUCT_BUNDLE_IDENTIFIER: no.sybr.vault.autofill-host
+        INFOPLIST_FILE: ArcaHost/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ArcaHost/ArcaHost.entitlements
+    preBuildScripts:
+      - *buildFfi
+    # Depending on the extension makes XcodeGen embed the .appex into the host's
+    # Contents/PlugIns, which is how the OS discovers the credential provider.
+    dependencies:
+      - target: ArcaAutoFill
+
+  ArcaAutoFill:
+    type: app-extension
+    platform: macOS
+    sources:
+      - ArcaAutoFill
+      - path: ../apple-shared/VaultBridge.swift
+        group: Shared
+    settings:
+      base:
+        PRODUCT_NAME: ArcaAutoFill
+        PRODUCT_BUNDLE_IDENTIFIER: no.sybr.vault.autofill-host.autofill
+        INFOPLIST_FILE: ArcaAutoFill/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ArcaAutoFill/ArcaAutoFill.entitlements
+    preBuildScripts:
+      - *buildFfi
+
+  # The repository's first Swift tests. Standalone — no host application —
+  # because everything they touch is pure logic or a C ABI call that needs no
+  # vault, no keychain and no user. It links vault-ffi like the other targets,
+  # which is what lets it check the ABI version against the real library.
+  ArcaBridgeTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: ../apple-shared/VaultBridge.swift
+        group: Shared
+      - path: ../apple-shared/VaultBridgeTests.swift
+        group: Shared
+      - path: ../apple-shared/SyncStatus.swift
+        group: Shared
+      - path: ../apple-shared/SessionLifetime.swift
+        group: Shared
+    settings:
+      base:
+        PRODUCT_NAME: ArcaBridgeTests
+        PRODUCT_BUNDLE_IDENTIFIER: no.sybr.vault.bridge-tests
+        GENERATE_INFOPLIST_FILE: "YES"
+    preBuildScripts:
+      - *buildFfi

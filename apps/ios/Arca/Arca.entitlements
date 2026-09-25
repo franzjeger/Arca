@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- iOS app entitlements.
+     - autofill-credential-provider: the AutoFill capability. It has to be on the
+       CONTAINING APP as well as the extension — with it on the extension alone
+       the OS registers the extension but never offers it as a password source.
+       That trap cost a day on macOS; see apps/macos/README.md.
+     - application-groups: the shared container holding the encrypted vault file,
+       which the app writes (on import) and the extension reads.
+     - keychain-access-groups: shared with the extension. Unused today — nothing
+       can mint a device key on iOS yet (see README.md) — but the group has to be
+       provisioned before it can be, and adding it later reprovisions both
+       targets.
+     No app-sandbox key: that is macOS-only. iOS apps are always sandboxed. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.authentication-services.autofill-credential-provider</key>
+    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.no.sybr.vault</string>
+    </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)no.sybr.vault.shared</string>
+    </array>
+</dict>
+</plist>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Dev host app. Its only real job in M1 is to (a) contain/embed the AutoFill
+     extension so the OS discovers it, and (b) register one test credential
+     identity in ASCredentialIdentityStore. The shipping container will be the
+     Tauri Arca.app; this host is a build/debug harness. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Arca AutoFill (dev host)</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>SYBR</string>
+    <!-- The shared keychain group holding the device key, so VaultBridge.swift
+         doesn't have to hardcode a team prefix. Xcode expands
+         $(AppIdentifierPrefix) from the provisioning profile, exactly as it does
+         in keychain-access-groups in the entitlements — keeping the two in step
+         by construction. An unsigned build leaves it unexpanded; the bridge
+         detects that and falls back. -->
+    <key>ArcaKeychainAccessGroup</key>
+    <string>$(AppIdentifierPrefix)no.sybr.vault.shared</string>
+</dict>
+</plist>

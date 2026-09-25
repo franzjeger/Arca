@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- M2 entitlements.
+     - app-sandbox: required for any app extension.
+     - autofill-credential-provider: the AutoFill capability (also on the host).
+     - application-groups: the shared container holding the encrypted vault file,
+       written by the Tauri Arca app and read here.
+     - keychain-access-groups: the shared keychain group holding the device
+       (quick-unlock) key, so the extension can unlock the vault after Touch ID. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.developer.authentication-services.autofill-credential-provider</key>
+    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.no.sybr.vault</string>
+    </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)no.sybr.vault.shared</string>
+    </array>
+</dict>
+</plist>

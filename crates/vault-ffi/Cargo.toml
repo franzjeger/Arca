@@ -1,0 +1,36 @@
+[package]
+name = "vault-ffi"
+description = "C ABI over vault-core for native platform integrations (macOS AutoFill Credential Provider passkeys)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+# staticlib for linking into the Swift app extension; cdylib for a standalone
+# dynamic library. rlib so Rust integration tests can call the exports directly.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+vault-core.workspace = true
+# The sync surface (ABI v5): Drive transport and the pull→merge→push engine, so
+# a phone can reach the user's own vault instead of being handed a file.
+vault-sync.workspace = true
+# The passwords surface returns login identities as JSON (metadata only) and
+# parses item ids; zeroize wipes the transient device-key copy on open, and
+# holds the refresh token and PKCE verifier while sync needs them.
+serde = { workspace = true }
+serde_json.workspace = true
+# Passkey identities/assertions cross as JSON; the binary fields (credential
+# id, user handle, authenticator data, signature) ride in it as base64.
+data-encoding.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# Only to verify the FFI's assertion signatures in tests.
+p256 = { workspace = true }
+# Only to decode the attestation object in the registration test.
+ciborium = { workspace = true }

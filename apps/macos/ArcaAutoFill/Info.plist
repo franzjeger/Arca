@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AutoFill Credential Provider extension. ProvidesPasswords = true is what
+     lets Arca appear in System Settings > AutoFill & Passwords and offer
+     passwords. NSExtensionPrincipalClass must match the Swift class below. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Arca</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <!-- The shared keychain group holding the device key, so VaultBridge.swift
+         doesn't have to hardcode a team prefix. Xcode expands
+         $(AppIdentifierPrefix) from the provisioning profile, exactly as it does
+         in keychain-access-groups in the entitlements — keeping the two in step
+         by construction. An unsigned build leaves it unexpanded; the bridge
+         detects that and falls back. -->
+    <key>ArcaKeychainAccessGroup</key>
+    <string>$(AppIdentifierPrefix)no.sybr.vault.shared</string>
+    <key>NSExtension</key>
+    <dict>
+        <!-- ASCredentialProviderExtensionCapabilities MUST be nested under
+             NSExtensionAttributes. Placed directly under NSExtension the OS
+             registers the extension but never sees ProvidesPasswords, so it is
+             not offered as a password source and never appears in
+             System Settings > AutoFill & Passwords. -->
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>ASCredentialProviderExtensionCapabilities</key>
+            <dict>
+                <key>ProvidesPasswords</key>
+                <true/>
+                <!-- On: ASPasskeyCredentialRequest and friends are macos(14.0),
+                     so this was never an Apple limit — only an unimplemented
+                     feature. The host publishes passkey identities and this
+                     extension answers assertions. -->
+                <key>ProvidesPasskeys</key>
+                <true/>
+            </dict>
+        </dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.authentication-services-credential-provider-ui</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>$(PRODUCT_MODULE_NAME).CredentialProviderViewController</string>
+    </dict>
+</dict>
+</plist>

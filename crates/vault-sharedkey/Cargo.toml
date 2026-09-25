@@ -1,0 +1,22 @@
+# Mirroring the device key into the shared keychain group the sandboxed macOS
+# AutoFill extension reads (macOS only).
+#
+# Its own crate for the same reason vault-credstore and vault-appgroup are: the
+# app crates carry #![forbid(unsafe_code)], and the access-control and
+# data-protection flags this needs are not reachable through security-framework's
+# safe surface.
+[package]
+name = "vault-sharedkey"
+description = "Mirror Arca's device key into the AutoFill extension's keychain group."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+zeroize.workspace = true
+
+[build-dependencies]
+cc = "1"

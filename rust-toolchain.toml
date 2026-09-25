@@ -1,0 +1,15 @@
+# Pin the toolchain so a new Rust release cannot change the build or the
+# formatting rules on its own. CI previously installed whatever `stable`
+# happened to be that day, so when 1.97.1 shipped a rustfmt with different
+# output, `cargo fmt --check` started failing on files nobody had edited and
+# main went red with no commit responsible for it.
+#
+# Bumping Rust is now a deliberate commit, which carries any resulting
+# `cargo fmt` churn along with it and keeps every machine and every runner on
+# the same compiler.
+#
+# Components live here rather than in the workflow so there is one place to
+# change, and so a local checkout gets the same rustfmt/clippy that CI gates on.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

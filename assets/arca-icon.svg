@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#12235C"/>
+      <stop offset="0.55" stop-color="#1E3A8A"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.36" r="0.75">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#D9A441"/>
+    </linearGradient>
+  </defs>
+
+  <!-- squircle background -->
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#glow)"/>
+
+  <!-- Roman arch (arca / ark), open at the base, framing the keyhole -->
+  <path d="M 300 720 L 300 470 A 212 212 0 0 1 724 470 L 724 720"
+        fill="none" stroke="url(#gold)" stroke-width="30" stroke-linecap="round"/>
+
+  <!-- vault-dial suggestion: faint dashed ring -->
+  <circle cx="512" cy="486" r="250" fill="none" stroke="#ffffff" stroke-opacity="0.14"
+          stroke-width="10" stroke-dasharray="4 40" stroke-linecap="round"/>
+
+  <!-- keyhole -->
+  <circle cx="512" cy="438" r="86" fill="#ffffff"/>
+  <path d="M 470 500 L 554 500 L 588 660 L 436 660 Z" fill="#ffffff"/>
+</svg>

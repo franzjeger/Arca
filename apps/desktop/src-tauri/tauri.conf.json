@@ -1,0 +1,69 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Arca",
+  "version": "0.6.2",
+  "identifier": "no.sybr.vault",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build && node ../../scripts/gen-linux-packaging.mjs"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Arca",
+        "width": 1000,
+        "height": 680,
+        "minWidth": 820,
+        "minHeight": 520,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/bin/vault-native-host": "../../../target/linux-packaging/vault-native-host",
+          "/etc/opt/chrome/native-messaging-hosts/no.sybr.vault.json": "../../../target/linux-packaging/no.sybr.vault.chromium.json",
+          "/etc/chromium/native-messaging-hosts/no.sybr.vault.json": "../../../target/linux-packaging/no.sybr.vault.chromium.json",
+          "/usr/lib/mozilla/native-messaging-hosts/no.sybr.vault.json": "../../../target/linux-packaging/no.sybr.vault.firefox.json"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/bin/vault-native-host": "../../../target/linux-packaging/vault-native-host",
+          "/etc/opt/chrome/native-messaging-hosts/no.sybr.vault.json": "../../../target/linux-packaging/no.sybr.vault.chromium.json",
+          "/etc/chromium/native-messaging-hosts/no.sybr.vault.json": "../../../target/linux-packaging/no.sybr.vault.chromium.json",
+          "/usr/lib/mozilla/native-messaging-hosts/no.sybr.vault.json": "../../../target/linux-packaging/no.sybr.vault.firefox.json"
+        }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlBRjkxRjAwMkYwNTNENzkKUldSNVBRVXZBQi81bXFXSzhpTVFBbVZlQk1tTTNhOU1pWkEwLzg1dS9iSGFXUWdlSklUUDhBRFkK",
+      "endpoints": [
+        "https://github.com/franzjeger/Arca/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

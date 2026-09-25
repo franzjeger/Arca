@@ -1,0 +1,98 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vault-core",
+    "crates/vault-store",
+    "crates/vault-ffi",
+    "crates/vault-secmem",
+    "crates/vault-appgroup",
+    "crates/vault-winhello",
+    "crates/vault-credstore",
+    "crates/vault-sharedkey",
+    "crates/vault-sync",
+    "apps/desktop/src-tauri",
+    "apps/cli",
+    "extension/native-host",
+]
+
+# Keep the heavy Tauri desktop build out of the default `cargo build`/`test` at
+# the workspace root; build it explicitly with `-p vault-desktop` (or via the
+# Tauri CLI). The other crates are fast and fully testable here.
+default-members = [
+    "crates/vault-core",
+    "crates/vault-store",
+    "crates/vault-ffi",
+    "crates/vault-secmem",
+    "crates/vault-sync",
+    "apps/cli",
+    "extension/native-host",
+]
+
+[workspace.package]
+version = "0.6.2"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+authors = ["SYBR AS <support@sybr.no>"]
+repository = "https://github.com/franzjeger/Arca"
+
+[workspace.dependencies]
+# --- internal ---
+vault-core = { path = "crates/vault-core" }
+vault-store = { path = "crates/vault-store" }
+vault-secmem = { path = "crates/vault-secmem" }
+vault-appgroup = { path = "crates/vault-appgroup" }
+vault-sync = { path = "crates/vault-sync" }
+
+# --- crypto (audited RustCrypto crates only; no custom primitives) ---
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+subtle = "2.6"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+getrandom = "0.2"
+data-encoding = "2.6"
+# Cross-platform mlock/VirtualLock so secret memory can't be paged to swap.
+region = "3"
+# WebAuthn passkeys: ES256 (P-256 ECDSA). RustCrypto, no custom EC math.
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+# SSH agent keys: Ed25519 (dalek, audited). The OpenSSH wire encoding is
+# hand-rolled from length-prefixed strings and tested byte-exactly against the
+# ssh CLI; signing stays internal so the private key never leaves the vault.
+# Seeds come from `getrandom` (not dalek's RNG helper), so no `rand_core` feature.
+ed25519-dalek = { version = "2", features = ["zeroize"] }
+
+# --- serde / data ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# bincode: simple positional framing for the outer container only.
+bincode = "1.3"
+# ciborium (CBOR): self-describing, name-tagged encoding for the at-rest item
+# payload, so the VaultItem schema can evolve (variant reorder/append) safely.
+ciborium = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+# Public Suffix List, compiled in — so a page can't scope a passkey to an eTLD
+# (e.g. "github.io", "co.uk") that crosses mutually-distrusting tenants.
+url = "2"
+psl = "2"
+
+# --- network ---
+# rustls rather than the platform TLS stack, so certificate verification behaves
+# identically on every target rather than inheriting each OS's quirks. Blocking:
+# sync owns a thread on every platform and the engine stays an ordinary function
+# a test can call.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+
+# Release profile: keep symbols light, no debug info leaking secrets via panics.
+[profile.release]
+panic = "abort"
+strip = true
+lto = true

@@ -1,0 +1,446 @@
+name: CI
+
+# Cross-platform verification for the Arca workspace.
+#
+# `test` builds and runs the full suite on Linux, Windows, and macOS — this is
+# what closes the "compiles/runs on the target platform" gap, including the
+# Tauri desktop crate's deterministic clipboard + command tests.
+#
+# `test-cross` also carries the ONLY compilation the Swift ever gets. It is
+# written on Linux, where SwiftUI, AuthenticationServices, LocalAuthentication
+# and Security do not exist, so the macOS runner is the first and only compiler
+# it meets. Unsigned; running the extensions needs an Apple ID.
+#
+# `linux-smoke` runs the #[ignore]d real-OS smoke tests on an actual X11 session
+# (Xvfb) and D-Bus + gnome-keyring, so the arboard clipboard code path executes
+# on Linux — the platform the clipboard fix targets, which the in-memory tests
+# can't model.
+#
+# `linux-package` builds the .deb/.rpm and asserts they actually contain the
+# native-messaging host plus its browser manifests. Nothing else in CI runs
+# `tauri build`, which is exactly how the bundles once shipped the desktop app
+# alone: the app worked, but the extension had nothing to talk to and reported
+# "Can't reach Arca". A green `test` job cannot catch that, because the failure
+# is in what gets packaged rather than in what compiles.
+#
+# NOTE: Headless CI cannot cover interactive cross-application paste on Wayland.
+# That check remains a manual,
+# one-time run on a real X11 *and* Wayland desktop before shipping to Linux
+# users — see SECURITY.md.
+
+# Every main push verifies all supported desktop platforms and compiles/tests
+# the shared Swift bridge. A file-format change must not ship from Linux alone.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: build & test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            libdbus-1-dev build-essential file \
+            libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+
+      # Toolchain and components come from rust-toolchain.toml, so Rust is
+      # bumped in exactly one place. rustup ships on the runners and honours
+      # that file over its own default; `rustup show` materialises it up front
+      # so a download failure reads as itself rather than as a cargo error.
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Check coordinated application versions
+        run: |
+          python3 scripts/check-versions.py
+          python3 scripts/test-cargo-target-dir.py
+          python3 scripts/test-installed-bridge.py
+          python3 scripts/test-autofill-signing.py
+          python3 scripts/test-check-release.py
+          python3 scripts/test-install-macos-support.py
+          python3 scripts/test-apple-ci.py
+          python3 scripts/test-install-linux.py
+          python3 scripts/test-update-manifest.py
+
+      - name: Build frontend (tsc type-check + Vite bundle)
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run build
+
+      - name: Frontend component tests
+        working-directory: apps/desktop
+        run: npm run test
+
+      # The runner ships branded Google Chrome, which since 137 IGNORES
+      # --load-extension: it starts, serves the page, and never loads Arca, so
+      # every assertion in the E2E times out with nothing to say why. (The same
+      # reason the harness prefers Brave over Chrome on a developer's Mac.)
+      # Playwright ships a plain Chromium build that still honours the switch.
+      - name: Install the locked Playwright Chromium
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          npm exec --no -- playwright install chromium
+          node --input-type=module -e 'import { chromium } from "playwright"; console.log("CHROME_BIN=" + chromium.executablePath())' >> "$GITHUB_ENV"
+
+      # Run every dependency-free extension suite against the files that ship.
+      # The browser E2E harness loads the unpacked extension in Chromium and
+      # performs trusted clicks through a full autofill flow.
+      - name: Browser extension tests
+        shell: bash
+        env:
+          ARCA_REQUIRE_BROWSER_E2E: "1"
+        run: |
+          for test_file in extension/test/*.test.mjs; do
+            node "$test_file"
+          done
+
+      - name: Desktop keyboard and dialog browser checks
+        working-directory: apps/desktop
+        run: npm run test:browser
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test (all crates)
+        run: cargo test --workspace --locked
+
+  test-cross:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            libdbus-1-dev build-essential file \
+            libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+
+      # Toolchain and components come from rust-toolchain.toml, so Rust is
+      # bumped in exactly one place. rustup ships on the runners and honours
+      # that file over its own default; `rustup show` materialises it up front
+      # so a download failure reads as itself rather than as a cargo error.
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Check coordinated application versions
+        run: |
+          python3 scripts/check-versions.py
+          python3 scripts/test-cargo-target-dir.py
+          python3 scripts/test-installed-bridge.py
+          python3 scripts/test-autofill-signing.py
+          python3 scripts/test-check-release.py
+          python3 scripts/test-install-macos-support.py
+          python3 scripts/test-apple-ci.py
+
+      - name: Build frontend (tsc type-check + Vite bundle)
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run build
+
+      - name: Frontend component tests
+        working-directory: apps/desktop
+        run: npm run test
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: test (all crates)
+        run: cargo test --workspace --locked
+
+      # apps/ios links vault-ffi cross-compiled for the phone. Cheap on its own
+      # (vault-ffi pulls in only vault-core, not Tauri), and separate from the
+      # Swift build below so a Rust cross-compile break reads as one rather than
+      # as a mysterious Xcode failure.
+      - name: vault-ffi cross-compiles for iOS
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+          for t in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+            cargo build --locked -p vault-ffi --release --target "$t"
+          done
+
+      # The Swift in apps/ is written and reviewed on Linux, where no toolchain
+      # can build it: SwiftUI, AuthenticationServices, LocalAuthentication and
+      # Security do not exist there. This runner is the only machine in CI with
+      # Xcode, so it is the only place the ~1200 lines across apps/macos,
+      # apps/ios and apps/apple-shared get compiled at all. It rides the macOS
+      # matrix leg already being paid for rather than adding a job.
+      #
+      # Compile only. Running either extension needs provisioning, which needs
+      # an Apple ID; CODE_SIGNING_ALLOWED=NO gets the compiler and the linker
+      # without one. The iOS scheme also exercises scripts/build-ffi-ios.sh,
+      # so the cross-compile and staging are covered by the same step.
+      #
+      # The script reports a diagnostic COUNT rather than relying on an empty
+      # log, because an empty log cannot distinguish "clean" from "suppressed".
+      # Both projects use Swift 6 with complete concurrency checking.
+      - name: Build the Swift targets, unsigned (macOS + iOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install xcodegen
+          scripts/build-apple-ci.sh
+
+  linux-smoke:
+    name: linux real-clipboard & keychain smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Heavier job (X11/Wayland/keyring setup): PR or manual dispatch only.
+    if: github.event_name != 'push'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            libdbus-1-dev build-essential file \
+            libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+            xvfb dbus-x11 gnome-keyring libsecret-1-0 sway
+
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: npm ci && npm run build
+
+      # Exercises clipboard::tests::real_clipboard_round_trips against the real
+      # X11 clipboard provided by Xvfb (the matrix job only runs the in-memory
+      # fake). This is the bulk of the Linux clipboard verification.
+      - name: Real clipboard smoke (X11 via Xvfb)
+        run: xvfb-run --auto-servernum cargo test --locked -p vault-desktop -- --ignored real_clipboard
+
+      # A separate compositor with no DISPLAY prevents silent X11 fallback.
+      # This must pass: missing Wayland support used to hide behind a tolerated
+      # failure while every pure Wayland clipboard operation was broken.
+      - name: Real clipboard smoke (Wayland via headless sway)
+        timeout-minutes: 5
+        run: scripts/test-wayland-clipboard.sh
+
+      # Exercises vault-store's keychain quick-unlock against a real Secret
+      # Service (gnome-keyring on the session bus). Best-effort: CI keyring
+      # setup is environment-sensitive, so a failure here is informational, not
+      # a gate.
+      - name: Keychain smoke (Secret Service via gnome-keyring)
+        continue-on-error: true
+        run: |
+          dbus-run-session -- bash -c '
+            eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
+            cargo test --locked -p vault-store -- --ignored quick_unlock_round_trip
+          '
+
+  linux-package:
+    name: linux .deb/.rpm ship the native host
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # A full release bundle is expensive, so it follows the same minute
+    # economics as the other heavy jobs: PR or manual dispatch, never a push.
+    if: github.event_name != 'push'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            libdbus-1-dev build-essential file \
+            libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+            rpm
+
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Build the Linux bundles
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run tauri build -- --bundles deb,rpm -- --locked
+
+      # The point of the job. Every assertion below corresponds to something a
+      # user hits directly: a missing binary or manifest means autofill fails
+      # with an error that blames their setup rather than the package.
+      - name: Assert the bundles contain the host and its manifests
+        run: |
+          set -euo pipefail
+          DEB="$(find target/release/bundle/deb -name '*.deb' | head -1)"
+          RPM="$(find target/release/bundle/rpm -name '*.rpm' | head -1)"
+          echo "deb: $DEB"
+          echo "rpm: $RPM"
+
+          root=$(mktemp -d)
+          dpkg-deb -x "$DEB" "$root"
+
+          MANIFESTS="
+            etc/opt/chrome/native-messaging-hosts/no.sybr.vault.json
+            etc/chromium/native-messaging-hosts/no.sybr.vault.json
+            usr/lib/mozilla/native-messaging-hosts/no.sybr.vault.json
+          "
+          for f in usr/bin/vault-native-host $MANIFESTS; do
+            [ -e "$root/$f" ] || { echo "MISSING from .deb: /$f"; exit 1; }
+            echo "ok: /$f"
+          done
+          [ -x "$root/usr/bin/vault-native-host" ] \
+            || { echo "/usr/bin/vault-native-host is not executable"; exit 1; }
+
+          # Every manifest must point at the packaged path, not at a build dir.
+          # A manifest pointing into target/ is the failure mode that survives a
+          # dev checkout and breaks on a real install.
+          for f in $MANIFESTS; do
+            node -e '
+              const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+              if (m.path !== "/usr/bin/vault-native-host") {
+                console.error(`${process.argv[1]}: path is ${m.path}`);
+                process.exit(1);
+              }
+            ' "$root/$f"
+          done
+          echo "ok: all manifests point at /usr/bin/vault-native-host"
+
+          # Cross-check the pinned extension id against an independent
+          # derivation (this shell pipeline vs the JS in
+          # scripts/gen-linux-packaging.mjs). If the two ever disagree, the
+          # packaged manifest would silently reject the real extension.
+          KEY="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("extension/chromium/manifest.json","utf8")).key||"")')"
+          [ -n "$KEY" ] || { echo 'no "key" in extension/chromium/manifest.json'; exit 1; }
+          HEX="$(printf '%s' "$KEY" | base64 -d | openssl dgst -sha256 | awk '{print $NF}')"
+          EXT_ID="$(printf '%s' "${HEX:0:32}" | tr '0-9a-f' 'a-p')"
+          grep -q "chrome-extension://$EXT_ID/" \
+            "$root/etc/opt/chrome/native-messaging-hosts/no.sybr.vault.json" \
+            || { echo "chromium manifest does not allow $EXT_ID"; exit 1; }
+          echo "ok: chromium manifest allows the pinned id $EXT_ID"
+
+          # Prove the packaged binary is a working native host, not just a file
+          # of the right name. No desktop app runs here, so the handshake
+          # reports app_connected:false — the response itself is the assertion.
+          reply="$(printf '\x10\x00\x00\x00{"type":"hello"}' \
+            | "$root/usr/bin/vault-native-host" | tail -c +5)"
+          echo "handshake: $reply"
+          case "$reply" in
+            *'"name":"no.sybr.vault"'*) echo "ok: packaged host answers the native-messaging handshake" ;;
+            *) echo "packaged host did not answer a valid hello"; exit 1 ;;
+          esac
+
+          # The .rpm is generated from the same `files` map and drifts silently
+          # if only one of the two is updated. List it once and check the
+          # listing is non-empty first, so a broken `rpm` reads as itself rather
+          # than as every file being absent.
+          RPM_FILES="$(rpm -qpl "$RPM")"
+          [ -n "$RPM_FILES" ] || { echo "could not list contents of $RPM"; exit 1; }
+          for f in usr/bin/vault-native-host $MANIFESTS; do
+            printf '%s\n' "$RPM_FILES" | grep -qx "/$f" \
+              || { echo "MISSING from .rpm: /$f"; exit 1; }
+          done
+          echo "ok: .rpm carries the same payload"
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Run cargo-audit
+        run: cargo audit
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Audit locked frontend dependencies, including build tools
+        working-directory: apps/desktop
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=moderate

@@ -1,0 +1,39 @@
+[package]
+name = "vault-store"
+description = "Persistence (atomic single-file vault) and OS-keychain quick-unlock for the SYBR password manager."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+vault-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+data-encoding.workspace = true
+zeroize.workspace = true
+sha2.workspace = true
+fs2 = "0.4"
+
+# OS keychain backends, selected per-target so each platform only pulls its own
+# native backend (no D-Bus/secret-service on macOS or Windows, etc.).
+#
+# macOS uses security-framework directly (not keyring) so the device key can go
+# into a SHARED keychain access group with a biometric access control — that is
+# what lets the sandboxed AutoFill extension read it after Touch ID.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+security-framework = "3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

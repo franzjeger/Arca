@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The iOS app: unlock, search, copy. It is also the CONTAINER for the AutoFill
+     extension, which is how the OS discovers the provider at all — the extension
+     is embedded in Arca.app/PlugIns by the target dependency in project.yml. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Arca</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <!-- Required since iOS 14; without it the app is letterboxed at a smaller
+         screen size on modern devices. Empty means "plain background colour". -->
+    <!-- Catches the Google OAuth redirect. ASWebAuthenticationSession will not
+         hand back a callback for a scheme the app does not claim, so sync
+         sign-in silently never completes without this.
+         The value is the REVERSED client id of the iOS OAuth client: Google
+         accepts no other redirect for that client type. Keep it in step with
+         SyncSignIn.redirectURI and REDIRECT_URI in vault-sync/src/drive.rs. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>no.sybr.vault.ios.oauth</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>com.googleusercontent.apps.269591410733-ltlkje5t7p8gajnp8vvk3gp9223nheu7</string>
+            </array>
+        </dict>
+    </array>
+    <!-- Without this the app can create no Live Activity at all, and the
+         failure is a silent nil rather than an error. -->
+    <key>NSSupportsLiveActivities</key>
+    <true/>
+    <!-- Frank's declaration (2026-07-30): Arca uses only exempt encryption —
+         standard algorithms (Argon2id, XChaCha20-Poly1305, P-256) for data
+         protection, the category the export rules exempt. With the key in the
+         plist, App Store Connect stops asking per build. -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+    <key>NSCameraUsageDescription</key>
+    <string>The camera reads a site's QR code to add its verification code to your vault. Nothing is photographed or stored.</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Face ID unlocks your vault so you don't have to type the master password every time. The vault stays encrypted either way.</string>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <!-- Apple rejects a universal build whose orientation list omits this
+             one: iPad multitasking requires all four. Caught by
+             `altool --validate-app`, which is why the release script validates
+             before it uploads. -->
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <!-- The shared keychain group, so VaultBridge.swift doesn't hardcode a team
+         prefix. Xcode expands $(AppIdentifierPrefix) from the provisioning
+         profile, exactly as it does in keychain-access-groups in the
+         entitlements, keeping the two in step by construction. -->
+    <key>ArcaKeychainAccessGroup</key>
+    <string>$(AppIdentifierPrefix)no.sybr.vault.shared</string>
+</dict>
+</plist>

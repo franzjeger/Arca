@@ -1,0 +1,153 @@
+# XcodeGen project definition — the reviewable source of truth for the iOS
+# Xcode project. Regenerate the .xcodeproj with:  cd apps/ios && xcodegen generate
+#
+# Two targets over the same Rust core the desktop and macOS extension use:
+# a SwiftUI app and an AutoFill Credential Provider extension. Both link
+# vault-ffi (cross-compiled by the pre-build script) and read the encrypted
+# vault from the shared App Group container.
+#
+name: Arca
+options:
+  bundleIdPrefix: no.sybr.vault
+  deploymentTarget:
+    # iOS 17: ASCredentialRequest and the modern AutoFill entry points, plus the
+    # Observation framework the app's state layer uses.
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    # Xcode wraps Debug builds in a separate <name>.debug.dylib launched via a
+    # thunk. For an app extension the credential-provider loader can fail to
+    # recognize that indirection, so build a conventional single-binary target.
+    # apps/macos learned this the hard way; the iOS extension is the same shape
+    # of thing, and the CI build log shows it linking ArcaAutoFill.debug.dylib
+    # without it. This is a RUNTIME failure — no compile catches it.
+    ENABLE_DEBUG_DYLIB: "NO"
+    # Same reasoning as apps/macos/project.yml: a data race here means handing
+    # back the wrong password, so the Swift 6 language mode makes it an error
+    # rather than a warning.
+    SWIFT_STRICT_CONCURRENCY: complete
+    # Must match apps/macos — App Groups and keychain groups are team-scoped, so
+    # the phone's app, its extension and the Mac app all have to share one team.
+    DEVELOPMENT_TEAM: LY6LJ395B8
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.6.2"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    # vault-ffi (Rust) linkage, shared by both targets, and deliberately the same
+    # shape as apps/macos: search paths + a linker flag, resolved at LINK time.
+    # A framework dependency is resolved when Xcode sets the target up, before
+    # the pre-build script has run, so a library this project builds itself can
+    # never be one — see scripts/build-ffi-ios.sh.
+    SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../apple-shared/Arca-Bridging-Header.h"
+    HEADER_SEARCH_PATHS: "$(SRCROOT)/../../crates/vault-ffi/include"
+    # Device and simulator are different platforms with different .a files; the
+    # SDK condition is what picks the right one.
+    "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": "$(SRCROOT)/libs/device"
+    "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": "$(SRCROOT)/libs/simulator"
+    OTHER_LDFLAGS: "-lvault_ffi"
+
+# Pre-build step reused by both targets: cross-compile vault-ffi for device and
+# simulator and stage the two .a files where LIBRARY_SEARCH_PATHS looks.
+# `basedOnDependencyAnalysis: false` so it always runs (cargo is incremental).
+scriptDefaults: &buildFfi
+  name: "Build vault-ffi (Rust static libs)"
+  basedOnDependencyAnalysis: false
+  script: |
+    set -euo pipefail
+    export PATH="$HOME/.cargo/bin:$PATH"
+    "$SRCROOT/../../scripts/build-ffi-ios.sh"
+
+targets:
+  Arca:
+    type: application
+    platform: iOS
+    sources:
+      - Arca
+      # The Live Activity's data shape, compiled into BOTH this target and the
+      # widget. They are separate processes: ActivityKit encodes on one side and
+      # decodes on the other, so a divergence here is a silent no-show.
+      - path: Shared/TotpActivity.swift
+        group: Shared
+      # The Swift/Rust bridge is platform-agnostic and shared with apps/macos.
+      - path: ../apple-shared/VaultBridge.swift
+        group: Shared
+      # App target ONLY: the sign-in needs UIApplication for its presentation
+      # anchor, which is unavailable in an app extension — and an extension has
+      # no window to present from anyway. The extension only ever reads a vault
+      # somebody else synced.
+      - path: ../apple-shared/VaultSync.swift
+        group: Shared
+      - path: ../apple-shared/SyncStatus.swift
+        group: Shared
+      - path: ../apple-shared/SessionLifetime.swift
+        group: Shared
+    settings:
+      base:
+        PRODUCT_NAME: Arca
+        PRODUCT_BUNDLE_IDENTIFIER: no.sybr.vault.ios
+        INFOPLIST_FILE: Arca/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Arca/Arca.entitlements
+        # One 1024px image; Xcode derives every size it needs. The source
+        # is the same artwork the desktop ships, flattened — an app icon
+        # with an alpha channel is rejected outright.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    preBuildScripts:
+      - *buildFfi
+    dependencies:
+      # Embeds the .appex into Arca.app/PlugIns, which is how the OS discovers
+      # the credential provider. `embed` is spelled out because the default did
+      # NOT copy it: the extension built fine and simply was not in the app.
+      - target: ArcaAutoFill
+        embed: true
+        codeSign: true
+      - target: ArcaWidgets
+        embed: true
+        codeSign: true
+
+  ArcaAutoFill:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ArcaAutoFill
+      - path: ../apple-shared/VaultBridge.swift
+        group: Shared
+      # Also compiled into the app target (via the Arca dir). The extension
+      # needs it to publish a freshly REGISTERED passkey to the credential
+      # store — without it a passkey saves but iOS never offers it for sign-in
+      # until the app is next opened.
+      - path: Arca/CredentialIdentities.swift
+        group: Shared
+    settings:
+      base:
+        PRODUCT_NAME: ArcaAutoFill
+        PRODUCT_BUNDLE_IDENTIFIER: no.sybr.vault.ios.autofill
+        INFOPLIST_FILE: ArcaAutoFill/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ArcaAutoFill/ArcaAutoFill.entitlements
+    preBuildScripts:
+      - *buildFfi
+
+  # The Dynamic Island / lock-screen Live Activity. A WidgetKit extension
+  # because `ActivityConfiguration` is only reachable from one — nothing here is
+  # a home-screen widget. It links no Rust: everything it draws arrives inside
+  # the activity's own state.
+  ArcaWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ArcaWidgets
+      - path: Shared/TotpActivity.swift
+        group: Shared
+    settings:
+      base:
+        PRODUCT_NAME: ArcaWidgets
+        PRODUCT_BUNDLE_IDENTIFIER: no.sybr.vault.ios.widgets
+        INFOPLIST_FILE: ArcaWidgets/Info.plist
+        # Deliberately NOT linking vault-ffi: this process never opens a vault,
+        # and a bridging header pointing at Rust it cannot use is reach without
+        # purpose. The base settings supply those, so they are cleared here.
+        SWIFT_OBJC_BRIDGING_HEADER: ""
+        HEADER_SEARCH_PATHS: ""
+        OTHER_LDFLAGS: ""

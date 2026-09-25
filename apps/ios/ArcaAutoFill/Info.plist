@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AutoFill Credential Provider extension. ProvidesPasswords = true is what
+     lets Arca appear in Settings > General > AutoFill & Passwords and offer
+     passwords. NSExtensionPrincipalClass must match the Swift class. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Arca</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>ArcaKeychainAccessGroup</key>
+    <string>$(AppIdentifierPrefix)no.sybr.vault.shared</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Face ID unlocks your vault so you don't have to type the master password every time. The vault stays encrypted either way.</string>
+    <key>NSExtension</key>
+    <dict>
+        <!-- ASCredentialProviderExtensionCapabilities MUST be nested under
+             NSExtensionAttributes. Placed directly under NSExtension the OS
+             registers the extension but never sees ProvidesPasswords, so it is
+             not offered as a password source and never appears in
+             Settings > General > AutoFill & Passwords. -->
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>ASCredentialProviderExtensionCapabilities</key>
+            <dict>
+                <key>ProvidesPasswords</key>
+                <true/>
+                <!-- On since ABI v10: vault_ffi_passkey_identities feeds the
+                     credential store and vault_ffi_passkey_assert_for_id signs
+                     by item id, so a synced passkey signs in on the phone with
+                     the private key never leaving Rust. -->
+                <key>ProvidesPasskeys</key>
+                <true/>
+                <!-- "Use Strong Password" on any sign-up field, system-wide:
+                     Safari, native apps, anywhere iOS offers AutoFill.
+                     Requires iOS 26.2; older systems ignore these keys and lose
+                     nothing else. Unavailable on macOS at all — there the
+                     browser extension is the only route. -->
+                <key>SupportsGeneratePasswordCredentials</key>
+                <true/>
+                <!-- Opted OUT of presenting our own UI, which is the unusual
+                     choice and the right one here. Generating touches no vault,
+                     so there is nothing to unlock and nothing to choose: the
+                     extension answers instantly and the system draws its own
+                     picker. Showing a sheet would mean launching this
+                     memory-capped process to render a list it already knows. -->
+                <key>SupportsGeneratePasswordCredentialsWithUI</key>
+                <false/>
+            </dict>
+        </dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.authentication-services-credential-provider-ui</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>$(PRODUCT_MODULE_NAME).CredentialProviderViewController</string>
+    </dict>
+</dict>
+</plist>

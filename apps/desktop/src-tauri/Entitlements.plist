@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- DEV-ONLY entitlements, applied by scripts/install-app-macos.sh when it
+     re-signs a locally installed build. They are deliberately NOT in
+     tauri.conf.json, so a plain `tauri build` produces a bundle that can be
+     Developer ID signed and notarized: these are RESTRICTED entitlements, and
+     macOS (AMFI) kills an app that carries them without a provisioning profile
+     that authorizes them.
+
+     - autofill-credential-provider: REQUIRED ON THIS APP, not only on the
+       extension. With it on the extension alone the appex registers with pkd
+       and everything looks healthy, but Arca never appears under System
+       Settings > General > AutoFill & Passwords, so the OS routes nothing to
+       it and identity publishes are accepted and discarded. There is no error
+       anywhere. It cost an evening twice: once when the extension lived in the
+       ArcaHost harness (whose App ID carried the capability), and again the day
+       the extension moved in here and the capability did not come with it.
+       The App ID no.sybr.vault must have AUTOFILL_CREDENTIAL_PROVIDER enabled
+       and the embedded profile must post-date that change, or AMFI kills the
+       app at launch instead.
+     - application-groups: the container shared with the extension.
+     - keychain-access-groups: the shared group for the device key. The team
+       prefix is literal (raw codesign does not substitute the Xcode
+       $(AppIdentifierPrefix) variable the extension's own file uses); both
+       resolve to LY6LJ395B8.no.sybr.vault.shared. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.authentication-services.autofill-credential-provider</key>
+    <true/>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.no.sybr.vault</string>
+    </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>LY6LJ395B8.no.sybr.vault.shared</string>
+    </array>
+</dict>
+</plist>

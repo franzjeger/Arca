@@ -1,0 +1,17 @@
+# Publishing credential identities to the OS AutoFill store (macOS).
+#
+# Its own crate for the same reason vault-appgroup is: the app crates carry
+# #![forbid(unsafe_code)], and AuthenticationServices is Objective-C. The unsafe
+# is one extern "C" call over a shim that can be read in a sitting.
+[package]
+name = "vault-credstore"
+description = "Publish Arca's logins and passkeys to ASCredentialIdentityStore."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+cc = "1"

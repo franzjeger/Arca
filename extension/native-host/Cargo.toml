@@ -1,0 +1,27 @@
+[package]
+name = "vault-native-host"
+description = "Native-messaging host bridging the browser extension to the Arca desktop app."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "vault-native-host"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# Locate the desktop app's per-user data dir (where the bridge writes its
+# connection-info file), matching Tauri's app_data_dir resolution.
+dirs = "5"
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+getrandom.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

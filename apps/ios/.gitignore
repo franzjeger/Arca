@@ -1,0 +1,9 @@
+# XcodeGen generates the project from project.yml (the source of truth).
+Arca.xcodeproj/
+# Build products / Xcode local state.
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad
+# Staged by scripts/build-ffi-ios.sh.
+libs/

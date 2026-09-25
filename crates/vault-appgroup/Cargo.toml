@@ -1,0 +1,19 @@
+[package]
+name = "vault-appgroup"
+description = "macOS App Group container path resolution (Foundation containerURL) for Arca."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Isolated so the desktop app crate can keep #![forbid(unsafe_code)]: the one
+# Objective-C FFI call lives here, behind a safe `container_path` function.
+
+# NOT target-gated. A build script is compiled unconditionally, on every host,
+# so gating `cc` behind cfg(target_os = "macos") made the build script itself
+# fail to compile on Linux ("cannot find crate `cc`"). build.rs decides at run
+# time, via CARGO_CFG_TARGET_OS, whether there is any Objective-C to compile.
+[build-dependencies]
+cc = "1"

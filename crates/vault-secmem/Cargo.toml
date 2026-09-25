@@ -1,0 +1,13 @@
+[package]
+name = "vault-secmem"
+description = "Locked, zeroized secret memory (mlock/VirtualLock) for key material."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+region.workspace = true
+zeroize.workspace = true

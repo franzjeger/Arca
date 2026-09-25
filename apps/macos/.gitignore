@@ -1,0 +1,10 @@
+# XcodeGen generates projects from project.yml (the source of truth). The
+# wildcard also catches File Provider conflict copies such as "Arca 2.xcodeproj".
+*.xcodeproj/
+# Build products / Xcode local state.
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad
+libs/
+Arca-Bridging-Header.h.orig

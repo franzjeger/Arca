@@ -1,0 +1,23 @@
+[package]
+name = "vault-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vault-core = { path = ".." }
+ciborium = "0.2"
+
+[[bin]]
+name = "item"
+path = "fuzz_targets/item.rs"
+test = false
+doc = false
+
+# cargo-fuzz runs separately from the desktop workspace.
+[workspace]
+members = ["."]

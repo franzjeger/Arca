@@ -1,0 +1,22 @@
+# Windows Hello user-presence verification, done the way the OS wants it.
+#
+# Its own crate for the same reason vault-appgroup is: the app crates carry
+# #![forbid(unsafe_code)], and WinRT COM interop is unavoidably unsafe. The
+# unsafe lives here, in ~30 lines that can be read in one sitting.
+[package]
+name = "vault-winhello"
+description = "Windows Hello verification parented to a real window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Security_Credentials_UI",
+    "Win32_Foundation",
+    "Win32_System_WinRT",
+] }

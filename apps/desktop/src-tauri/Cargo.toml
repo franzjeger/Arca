@@ -1,0 +1,85 @@
+[package]
+name = "vault-desktop"
+description = "Arca — cross-platform desktop password manager (Tauri 2 shell over vault-core/vault-store)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+default-run = "vault-desktop"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+subtle.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+# Open the "Website" URL in the user's default browser (not in the webview).
+tauri-plugin-opener = "2"
+# Native file picker for CSV import (the file is read in Rust, so exported
+# plaintext passwords never pass through the webview).
+tauri-plugin-dialog = "2"
+serde.workspace = true
+serde_json.workspace = true
+vault-core.workspace = true
+vault-store.workspace = true
+# macOS App Group container resolution (Foundation containerURL), isolated so
+# this crate keeps #![forbid(unsafe_code)].
+vault-appgroup.workspace = true
+uuid.workspace = true
+# Public Suffix List for passkey RP-ID validation (reject eTLD-scoped rp_ids).
+psl.workspace = true
+# Publishing logins + passkeys to the OS AutoFill store (macOS; a no-op
+# elsewhere, where the browser extension is the path and needs no registration).
+vault-credstore = { path = "../../../crates/vault-credstore" }
+vault-sharedkey = { path = "../../../crates/vault-sharedkey" }
+# Origin parsing for WebAuthn related-origin lists: a hand-rolled prefix check
+# reads "https://good.test@evil.test" as good.test.
+url.workspace = true
+# Cross-platform clipboard, used so secret copies + auto-clear happen in Rust
+# rather than exposing plaintext to the webview's clipboard API.
+# The default backend only supports X11. Pure Wayland sessions need the
+# data-control backend; arboard retains X11 fallback where it is unavailable.
+arboard = { version = "3", features = ["wayland-data-control"] }
+# RFC 4180 CSV parsing for importing exports from other password managers.
+csv = "1"
+# Wi-Fi join QR codes, rendered to SVG in Rust (keeps the plaintext
+# passphrase out of the webview — only the image crosses).
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# Google Drive sync: the transport and the pull→merge→push engine. This crate
+# supplies the desktop's side of it — the loopback OAuth flow, the OS secret
+# store, the app state, and the webview events.
+vault-sync.workspace = true
+# Breach-check lookups (k-anonymity range queries against HIBP).
+reqwest.workspace = true
+# Zeroizing, for the refresh token on its way between the keychain and the
+# sync crate.
+zeroize.workspace = true
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+
+[target.'cfg(windows)'.dependencies]
+# ssh-agent named-pipe transport (\\.\pipe\openssh-ssh-agent). Safe wrapper, so
+# the crate-wide #![forbid(unsafe_code)] still holds.
+interprocess = "1.2"
+# Windows Hello parented to Arca's real HWND, no focus tricks. Its own crate
+# because the interop is unsafe and this crate forbids unsafe code.
+vault-winhello = { path = "../../../crates/vault-winhello" }
+
+# macOS ONLY. On Windows robius parents the Hello prompt to the desktop window
+# and forces focus with a synthesized Alt keypress; an interrupted sequence
+# leaves Alt logically held and the keyboard unusable until logout.
+[target.'cfg(target_os = "macos")'.dependencies]
+robius-authentication = "0.1"

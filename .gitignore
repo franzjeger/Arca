@@ -1,0 +1,42 @@
+# Rust
+/target
+**/*.rs.bk
+/*.long-type-*.txt
+
+# Node / frontend
+node_modules/
+apps/desktop/dist/
+
+# Tauri generated
+apps/desktop/src-tauri/gen/
+
+# Local vault data / secrets (never commit)
+*.vault
+*.vault.tmp.*
+
+# Signing and API credentials. These all live OUTSIDE the repository by design
+# (~/.arca and ~/.appstoreconnect), so these patterns are a backstop for the day
+# somebody copies one here "just to test something". A public repository gives
+# no second chance: a committed credential can only be rotated, never withdrawn.
+*.p8
+AuthKey_*
+asc-api-key
+*.mobileprovision
+*.provisionprofile
+google-client-secret
+arca-updater.key
+
+# OS / editor
+__pycache__/
+*.pyc
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.nosync
+
+# Pinned-extension keypair (public key lives in manifest.json; private key is
+# only needed to pack a .crx and must never be committed)
+extension/.ext-private-key.pem
+extension/.ext-public-key.b64
+extension/.ext-id.txt

@@ -1,0 +1,27 @@
+# `arca` — the command line, so automation can finish jobs that need a password.
+#
+# Talks to the running desktop app over its existing loopback bridge, with the
+# existing token. It holds no key material and can do nothing while the vault is
+# locked, which is the point: there is one thing that can decrypt a vault, and
+# this is not it.
+[package]
+name = "arca-cli"
+description = "Create and use Arca logins from scripts and automation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "arca"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+dirs = "5"
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+getrandom.workspace = true

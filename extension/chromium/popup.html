@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        width: 280px;
+        margin: 0;
+        padding: 14px;
+        background: #1c1c1e;
+        color: #f5f5f7;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+          sans-serif;
+        font-size: 13px;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #8e8e93;
+      }
+      .dot.ok {
+        background: #30d158;
+      }
+      .dot.bad {
+        background: #ff453a;
+      }
+      p {
+        color: #a1a1a6;
+        line-height: 1.45;
+      }
+      code {
+        color: #0a84ff;
+      }
+      hr {
+        border: 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        margin: 14px 0 12px;
+      }
+      h2 {
+        font-size: 12px;
+        margin: 0 0 6px;
+        color: #f5f5f7;
+      }
+      h2 .host {
+        color: #a1a1a6;
+        font-weight: 400;
+      }
+      select {
+        width: 100%;
+        padding: 6px 8px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: #2c2c2e;
+        color: #f5f5f7;
+        font: inherit;
+      }
+      .hint {
+        margin: 6px 0 0;
+        font-size: 11.5px;
+      }
+      ul {
+        list-style: none;
+        margin: 10px 0 0;
+        padding: 0;
+      }
+      li {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 0;
+        font-size: 11.5px;
+        color: #a1a1a6;
+      }
+      li .name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #f5f5f7;
+      }
+      li button {
+        border: 0;
+        background: transparent;
+        color: #a1a1a6;
+        cursor: pointer;
+        font: inherit;
+        padding: 0 3px;
+      }
+      li button:hover {
+        color: #ff453a;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🔑 Arca</h1>
+    <div class="status">
+      <span id="dot" class="dot"></span>
+      <span id="statusText">Checking native host…</span>
+    </div>
+    <p id="detail">
+      Vault unlock happens in the desktop app. This extension only relays
+      requests to it through the native messaging host.
+    </p>
+    <section id="site" hidden>
+      <hr />
+      <h2>Passkeys on <span class="host" id="host"></span></h2>
+      <select id="policy">
+        <option value="ask">Ask when I start a sign-in</option>
+        <option value="always">Always let Arca answer</option>
+        <option value="never">Never — leave it to the browser</option>
+      </select>
+      <p class="hint" id="policyHint"></p>
+      <ul id="siteList"></ul>
+    </section>
+    <section id="bookmarks">
+      <hr />
+      <h2>Bookmarks</h2>
+      <p class="hint">
+        Arca keeps the master list. Send this browser's bookmarks up, then
+        write the list back into any browser.
+      </p>
+      <button id="bmUp" type="button">Send this browser's bookmarks to Arca</button>
+      <button id="bmDown" type="button">Write Arca's bookmarks into this browser</button>
+      <label class="hint">
+        <input id="bmDelete" type="checkbox" />
+        Also remove bookmarks Arca does not have
+      </label>
+      <p class="hint" id="bmStatus"></p>
+    </section>
+    <section id="mirror">
+      <h2>Bokmerker i nettleseren</h2>
+      <p class="hint">
+        Arca kan vise bokmerkene sine i denne nettleseren mens hvelvet er ulåst,
+        og fjerne dem igjen når det låses.
+      </p>
+      <label class="row">
+        <input type="checkbox" id="mirrorAllowed" />
+        <span>Vis Arcas bokmerker her</span>
+      </label>
+      <div id="mirrorConfirm" hidden>
+        <p class="warn">
+          Bekreft at nettleserens egen bokmerkesynk er <b>av</b>. Er den på,
+          lastes Arcas bokmerker opp til Google og blir liggende der.
+        </p>
+        <button type="button" id="mirrorYes">Ja, synken er av</button>
+        <button type="button" id="mirrorNo">Avbryt</button>
+      </div>
+      <p class="warn" id="mirrorWarn">
+        Slå dette PÅ bare hvis nettleserens egen bokmerkesynk er AV. Er den på,
+        lastes alt Arca skriver opp til Google eller Brave og blir liggende der.
+        Da er bokmerkene verken midlertidige eller private, og de kan ikke
+        fjernes herfra. Arca kan ikke lese den innstillingen, så dette må du
+        svare på selv.
+      </p>
+    </section>
+    <script src="popup.js" defer></script>
+
+</body>
+</html>
