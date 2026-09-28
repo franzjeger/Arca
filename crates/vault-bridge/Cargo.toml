@@ -1,6 +1,6 @@
 [package]
-name = "vault-bridge-auth"
-description = "The handshake of Arca's loopback bridge, shared by the app and its clients."
+name = "vault-bridge"
+description = "The protocol of Arca's loopback bridge, shared by the app and its clients."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,10 +9,14 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+serde.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 getrandom.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

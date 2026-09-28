@@ -102,7 +102,7 @@ version = "0.6.2"
 dependencies = [
  "dirs 5.0.1",
  "serde_json",
- "vault-bridge-auth",
+ "vault-bridge",
 ]
 
 [[package]]
@@ -5665,11 +5665,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "vault-bridge-auth"
+name = "vault-bridge"
 version = "0.6.2"
 dependencies = [
  "getrandom 0.2.17",
  "hmac",
+ "serde",
+ "serde_json",
  "sha2",
  "subtle",
 ]
@@ -5733,7 +5735,7 @@ dependencies = [
  "url",
  "uuid",
  "vault-appgroup",
- "vault-bridge-auth",
+ "vault-bridge",
  "vault-core",
  "vault-credstore",
  "vault-sharedkey",
@@ -5765,7 +5767,7 @@ dependencies = [
  "dirs 5.0.1",
  "serde",
  "serde_json",
- "vault-bridge-auth",
+ "vault-bridge",
 ]
 
 [[package]]

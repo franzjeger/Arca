@@ -28,7 +28,7 @@
   that very message — so a process that bound the port after Arca exited
   was sent the next submitted password. Protocol 3 proves both sides over
   two nonces without the token crossing, from one shared crate
-  (`vault-bridge-auth`) instead of three copies. Checking whether the app
+  (`vault-bridge`) instead of three copies. Checking whether the app
   runs is now the handshake alone; it used to be a `match`, which unlocked
   the vault whenever a USB key was inserted.
 - Settings described "Confirm before autofill" as off by default. It is on,

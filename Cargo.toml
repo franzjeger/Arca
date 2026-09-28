@@ -10,7 +10,7 @@ members = [
     "crates/vault-credstore",
     "crates/vault-sharedkey",
     "crates/vault-sync",
-    "crates/vault-bridge-auth",
+    "crates/vault-bridge",
     "apps/desktop/src-tauri",
     "apps/cli",
     "extension/native-host",
@@ -25,7 +25,7 @@ default-members = [
     "crates/vault-ffi",
     "crates/vault-secmem",
     "crates/vault-sync",
-    "crates/vault-bridge-auth",
+    "crates/vault-bridge",
     "apps/cli",
     "extension/native-host",
 ]
@@ -45,7 +45,7 @@ vault-store = { path = "crates/vault-store" }
 vault-secmem = { path = "crates/vault-secmem" }
 vault-appgroup = { path = "crates/vault-appgroup" }
 vault-sync = { path = "crates/vault-sync" }
-vault-bridge-auth = { path = "crates/vault-bridge-auth" }
+vault-bridge = { path = "crates/vault-bridge" }
 
 # --- crypto (audited RustCrypto crates only; no custom primitives) ---
 argon2 = "0.5"

@@ -21,4 +21,4 @@ path = "src/main.rs"
 [dependencies]
 serde_json.workspace = true
 dirs = "5"
-vault-bridge-auth.workspace = true
+vault-bridge.workspace = true

@@ -1,7 +1,4 @@
-//! The handshake of the desktop app's loopback bridge, in one place for the app
-//! and both of its clients: the browser's native-messaging host and `arca`.
-//!
-//! Protocol 3. The token never crosses the socket:
+//! The handshake. Protocol 3 never sends the token across the socket:
 //!
 //! ```text
 //! client -> app   hello     { protocol: 3, nonce: C }
@@ -18,9 +15,6 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-
-/// The bridge protocol the app and its clients speak.
-pub const PROTOCOL: u32 = 3;
 
 const NONCE_BYTES: usize = 16;
 

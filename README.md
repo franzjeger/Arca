@@ -85,9 +85,11 @@ crates/
 ├── vault-secmem/     mlock'd buffers for key material.
 ├── vault-appgroup/   macOS App Group container resolution (one isolated
 │                     Objective-C call, so the app crate stays unsafe-free).
-└── vault-sync/       End-to-end encrypted sync: the Google Drive client, the
-                      OAuth token calls, and the pull→merge→push engine, over
-                      traits so each platform supplies its own storage and UI.
+├── vault-sync/       End-to-end encrypted sync: the Google Drive client, the
+│                     OAuth token calls, and the pull→merge→push engine, over
+│                     traits so each platform supplies its own storage and UI.
+└── vault-bridge/     The desktop app's loopback bridge: its messages and the
+                      handshake, shared by the app, the native host and `arca`.
 apps/
 ├── desktop/          Tauri 2 app
 │   ├── src-tauri/      Rust shell: commands, state, sync glue, bridge,

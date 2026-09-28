@@ -31,8 +31,10 @@ use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
 
+use vault_bridge::proto::Request;
+
 const HOST_NAME: &str = "no.sybr.vault";
-const BRIDGE_PROTOCOL: u32 = vault_bridge_auth::PROTOCOL;
+const BRIDGE_PROTOCOL: u32 = vault_bridge::PROTOCOL;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -93,7 +95,7 @@ Exit codes: 0 ok, 1 failed, 2 bad usage, 3 app locked or not running.
 // ── Commands ────────────────────────────────────────────────────────────────
 
 fn cmd_status() -> i32 {
-    match bridge(serde_json::json!({ "type": "match", "url": "" })) {
+    match bridge(&Request::Match { url: String::new() }) {
         Ok(_) => {
             println!("unlocked");
             0
@@ -118,7 +120,7 @@ fn cmd_new(args: &[String]) -> i32 {
     let mut username = String::new();
     let mut url = String::new();
     let mut notes = String::new();
-    let mut length: Option<u64> = None;
+    let mut length: Option<usize> = None;
     let mut symbols = true;
     let mut show = false;
 
@@ -154,7 +156,7 @@ fn cmd_new(args: &[String]) -> i32 {
                 }
                 None => return usage_error("--notes needs a value"),
             },
-            "--length" => match need(i).and_then(|v| v.parse::<u64>().ok()) {
+            "--length" => match need(i).and_then(|v| v.parse::<usize>().ok()) {
                 Some(v) => {
                     length = Some(v);
                     i += 2;
@@ -177,16 +179,15 @@ fn cmd_new(args: &[String]) -> i32 {
         return usage_error("--title is required");
     };
 
-    let resp = bridge(serde_json::json!({
-        "type": "create_login",
-        "title": title,
-        "username": username,
-        "url": url,
-        "notes": notes,
-        "length": length,
-        "symbols": symbols,
-        "reveal": show,
-    }));
+    let resp = bridge(&Request::CreateLogin {
+        title: title.clone(),
+        username,
+        url,
+        notes,
+        length,
+        symbols: Some(symbols),
+        reveal: show,
+    });
     match resp {
         Ok(v) => {
             let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
@@ -258,7 +259,7 @@ fn cmd_rm(args: &[String]) -> i32 {
     let Some(id) = args.first() else {
         return usage_error("rm needs an id");
     };
-    match bridge(serde_json::json!({ "type": "delete_item", "id": id })) {
+    match bridge(&Request::DeleteItem { id: id.to_string() }) {
         Ok(v) => {
             let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("");
             // The title, not just "ok": a caller that was handed an id from
@@ -273,7 +274,7 @@ fn cmd_rm(args: &[String]) -> i32 {
 }
 
 fn read_password(id: &str) -> Result<String, Fault> {
-    let v = bridge(serde_json::json!({ "type": "read_password", "id": id }))?;
+    let v = bridge(&Request::ReadPassword { id: id.to_string() })?;
     v.get("password")
         .and_then(|x| x.as_str())
         .map(str::to_string)
@@ -345,7 +346,7 @@ impl std::fmt::Display for Fault {
 /// host uses. The handshake itself comes from `vault_bridge_auth`, so the app
 /// and both clients cannot compute it differently; the socket code around it
 /// is small enough to keep here.
-fn bridge(payload: serde_json::Value) -> Result<serde_json::Value, Fault> {
+fn bridge(request: &Request) -> Result<serde_json::Value, Fault> {
     let info_path = dirs::data_dir()
         .map(|d| d.join(HOST_NAME).join("native-bridge.json"))
         .ok_or(Fault::Unreachable)?;
@@ -373,19 +374,22 @@ fn bridge(payload: serde_json::Value) -> Result<serde_json::Value, Fault> {
     // process, and the app proves it holds it before we write the request.
     // Arca's port is freed the moment it exits, so whatever answers on it has
     // to earn our trust.
-    let nonce = vault_bridge_auth::nonce().ok_or(Fault::Unreachable)?;
-    let hello = serde_json::json!({"type": "hello", "protocol": BRIDGE_PROTOCOL, "nonce": nonce});
-    send_json(&mut writer, &hello)?;
+    let nonce = vault_bridge::auth::nonce().ok_or(Fault::Unreachable)?;
+    send(
+        &mut writer,
+        &Request::Hello {
+            token: None,
+            protocol: Some(BRIDGE_PROTOCOL),
+            nonce: Some(nonce.clone()),
+        },
+    )?;
     let challenge = read_json(&mut reader)?;
     let app_nonce = verify_challenge(&challenge, token, &nonce)?;
-    let proof = vault_bridge_auth::client_proof(token, &nonce, &app_nonce);
-    send_json(
-        &mut writer,
-        &serde_json::json!({"type": "auth", "proof": proof}),
-    )?;
+    let proof = vault_bridge::auth::client_proof(token, &nonce, &app_nonce);
+    send(&mut writer, &Request::Auth { proof })?;
     validate_bridge_hello(&read_json(&mut reader)?)?;
 
-    send_json(&mut writer, &payload)?;
+    send(&mut writer, request)?;
     let resp = read_json(&mut reader)?;
 
     if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
@@ -404,8 +408,9 @@ fn bridge(payload: serde_json::Value) -> Result<serde_json::Value, Fault> {
     Ok(resp)
 }
 
-fn send_json(writer: &mut impl Write, message: &serde_json::Value) -> Result<(), Fault> {
-    writeln!(writer, "{message}").map_err(|_| Fault::Unreachable)
+fn send(writer: &mut impl Write, request: &Request) -> Result<(), Fault> {
+    let line = serde_json::to_string(request).map_err(|_| Fault::Protocol)?;
+    writeln!(writer, "{line}").map_err(|_| Fault::Unreachable)
 }
 
 fn read_json(reader: &mut impl BufRead) -> Result<serde_json::Value, Fault> {
@@ -429,8 +434,9 @@ fn verify_challenge(
             let (Some(app_nonce), Some(proof)) = (field("nonce"), field("proof")) else {
                 return Err(Fault::Impostor);
             };
-            let expected = vault_bridge_auth::app_proof(token, nonce, app_nonce);
-            if vault_bridge_auth::is_nonce(app_nonce) && vault_bridge_auth::same(proof, &expected) {
+            let expected = vault_bridge::auth::app_proof(token, nonce, app_nonce);
+            if vault_bridge::auth::is_nonce(app_nonce) && vault_bridge::auth::same(proof, &expected)
+            {
                 Ok(app_nonce.to_string())
             } else {
                 Err(Fault::Impostor)
@@ -508,13 +514,13 @@ mod tests {
 
     #[test]
     fn the_app_must_prove_it_holds_the_token() {
-        let nonce = vault_bridge_auth::nonce().unwrap();
-        let app_nonce = vault_bridge_auth::nonce().unwrap();
+        let nonce = vault_bridge::auth::nonce().unwrap();
+        let app_nonce = vault_bridge::auth::nonce().unwrap();
         let challenge = |token: &str, app_nonce: &str| {
             serde_json::json!({
                 "type": "challenge",
                 "nonce": app_nonce,
-                "proof": vault_bridge_auth::app_proof(token, &nonce, app_nonce),
+                "proof": vault_bridge::auth::app_proof(token, &nonce, app_nonce),
             })
         };
         assert_eq!(
