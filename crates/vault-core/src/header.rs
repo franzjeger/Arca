@@ -140,12 +140,13 @@ pub struct VaultHeader {
     /// device still holding an older key knows the file needs the new
     /// password, not a merge. Files before v7 load as epoch 0.
     pub key_epoch: u64,
-    /// The vault keys from before each password change, sealed under a key
-    /// derived from the current one. They let a device that missed a change
-    /// open its own copy with just the new password, and tell a peer's copy
-    /// from before the change apart from a foreign vault. `None` until the
-    /// first change, and before v7.
-    pub previous_keys: Option<AeadBlob>,
+    /// What the header carries that only the vault key may read, sealed under
+    /// a key derived from it: the vault keys from before each password change,
+    /// which let a device that missed a change open its own copy with just the
+    /// new password, and tell a peer's copy from before the change apart from
+    /// a foreign vault. CBOR inside, so a later build can add to it without a
+    /// new format. `None` while there is nothing to seal, and before v7.
+    pub sealed_meta: Option<AeadBlob>,
 }
 
 impl VaultHeader {
@@ -229,7 +230,7 @@ impl From<LegacyHeaderV2> for VaultHeader {
             device_wrapped_vault_key: h.device_wrapped_vault_key,
             rewrap_epoch: 0,
             key_epoch: 0,
-            previous_keys: None,
+            sealed_meta: None,
         }
     }
 }
@@ -255,7 +256,7 @@ impl From<HeaderV6> for VaultHeader {
             device_wrapped_vault_key: h.device_wrapped_vault_key,
             rewrap_epoch: h.rewrap_epoch,
             key_epoch: 0,
-            previous_keys: None,
+            sealed_meta: None,
         }
     }
 }

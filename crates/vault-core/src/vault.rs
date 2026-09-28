@@ -101,39 +101,46 @@ fn derive(vault_key: &SymmetricKey, info: &[u8]) -> Result<SymmetricKey> {
     Ok(SymmetricKey::from_bytes(*key))
 }
 
-/// Names the key the header's previous vault keys are sealed with, and binds
-/// that use as their AAD.
-const PREVIOUS_KEYS: &[u8] = b"arca/v7/previous-keys";
+/// Names the key the header's sealed part is sealed with, and binds that use
+/// as its AAD.
+const SEALED_META: &[u8] = b"arca/v7/sealed-meta";
 
-/// Seal the keys a vault had before its password changes, for its header.
-fn seal_previous_keys(vault_key: &SymmetricKey, keys: &[SymmetricKey]) -> Result<Option<AeadBlob>> {
-    if keys.is_empty() {
-        return Ok(None);
-    }
-    let mut plaintext = Zeroizing::new(Vec::with_capacity(keys.len() * KEY_LEN));
-    for key in keys {
-        plaintext.extend_from_slice(key.as_bytes());
-    }
-    let key = derive(vault_key, PREVIOUS_KEYS)?;
-    crypto::seal(&key, &plaintext, PREVIOUS_KEYS).map(Some)
+/// The header's sealed part, as CBOR. Every field defaults, so a build that
+/// knows fewer of them still reads what it knows, and one that knows more
+/// reads an older header as empty in the rest.
+#[derive(Default, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct SealedMeta {
+    #[serde(default)]
+    previous_keys: Vec<[u8; KEY_LEN]>,
 }
 
-/// Open what [`seal_previous_keys`] sealed.
-fn open_previous_keys(
-    vault_key: &SymmetricKey,
-    sealed: Option<&AeadBlob>,
-) -> Result<Vec<SymmetricKey>> {
+/// Seal what the header keeps from everyone but the vault key's holders.
+fn seal_meta(vault_key: &SymmetricKey, previous_keys: &[SymmetricKey]) -> Result<Option<AeadBlob>> {
+    if previous_keys.is_empty() {
+        return Ok(None);
+    }
+    let meta = SealedMeta {
+        previous_keys: previous_keys.iter().map(|key| *key.as_bytes()).collect(),
+    };
+    let mut plaintext = Zeroizing::new(Vec::new());
+    ciborium::into_writer(&meta, &mut *plaintext).map_err(|_| Error::Serialization)?;
+    let key = derive(vault_key, SEALED_META)?;
+    crypto::seal(&key, &plaintext, SEALED_META).map(Some)
+}
+
+/// Open what [`seal_meta`] sealed: the previous vault keys.
+fn open_meta(vault_key: &SymmetricKey, sealed: Option<&AeadBlob>) -> Result<Vec<SymmetricKey>> {
     let Some(blob) = sealed else {
         return Ok(Vec::new());
     };
-    let plaintext = crypto::open(&derive(vault_key, PREVIOUS_KEYS)?, blob, PREVIOUS_KEYS)?;
-    if plaintext.len() % KEY_LEN != 0 {
-        // Authentic, yet not a list of keys: a newer build's, not garbage.
-        return Err(Error::UnsupportedVersion);
-    }
-    Ok(plaintext
-        .chunks_exact(KEY_LEN)
-        .map(|key| SymmetricKey::from_bytes(key.try_into().expect("chunks are KEY_LEN")))
+    let plaintext = crypto::open(&derive(vault_key, SEALED_META)?, blob, SEALED_META)?;
+    // Authentic, yet unreadable to us: a newer build's, not garbage.
+    let meta: SealedMeta =
+        ciborium::from_reader(plaintext.as_slice()).map_err(|_| Error::UnsupportedVersion)?;
+    Ok(meta
+        .previous_keys
+        .iter()
+        .map(|key| SymmetricKey::from_bytes(*key))
         .collect())
 }
 
@@ -290,7 +297,7 @@ impl Vault {
             device_wrapped_vault_key: None,
             rewrap_epoch: 0,
             key_epoch: 0,
-            previous_keys: None,
+            sealed_meta: None,
         };
 
         Ok(Self {
@@ -430,7 +437,7 @@ impl Vault {
         let (header, body) = if version >= SUBKEYS_SINCE {
             let header = VaultHeader {
                 format_version: version,
-                previous_keys: seal_previous_keys(vault_key, previous_keys)?,
+                sealed_meta: seal_meta(vault_key, previous_keys)?,
                 ..self.header.clone()
             };
             let body = encode_body(&VaultBody {
@@ -567,7 +574,7 @@ impl Vault {
             // unreachable: callers guard on `is_unlocked()` first.
             VaultState::Unlocked { .. } => return Ok(()),
         };
-        let previous_keys = open_previous_keys(&vault_key, self.header.previous_keys.as_ref())?;
+        let previous_keys = open_meta(&vault_key, self.header.sealed_meta.as_ref())?;
         self.state = VaultState::Unlocked {
             vault_key,
             previous_keys,
@@ -660,7 +667,7 @@ impl Vault {
         self.authenticate(&remote)?;
         let vault_key = self.vault_key()?;
         let remote_keys = Keys::of(vault_key, remote.container_version())?;
-        let remote_previous = open_previous_keys(vault_key, remote.header.previous_keys.as_ref())?;
+        let remote_previous = open_meta(vault_key, remote.header.sealed_meta.as_ref())?;
         let VaultState::Locked {
             items: remote_enc,
             sealed,
@@ -1962,6 +1969,41 @@ mod tests {
             Err(Error::StaleKey)
         ));
         assert!(Vault::from_bytes(&after).unwrap().unlock("old").is_err());
+    }
+
+    /// The sealed part of the header is CBOR so a later build can add to it:
+    /// a field this build does not know is skipped, and authentic content it
+    /// cannot read at all is a newer build's, not garbage.
+    #[test]
+    fn the_sealed_header_part_takes_fields_a_later_build_adds() {
+        #[derive(Serialize)]
+        struct Later {
+            previous_keys: Vec<[u8; KEY_LEN]>,
+            devices: Vec<String>,
+        }
+        let vault_key = SymmetricKey::generate().unwrap();
+        let old = SymmetricKey::generate().unwrap();
+        let seal = |plaintext: &[u8]| {
+            crypto::seal(
+                &derive(&vault_key, SEALED_META).unwrap(),
+                plaintext,
+                SEALED_META,
+            )
+            .unwrap()
+        };
+        let mut later = Vec::new();
+        let fields = Later {
+            previous_keys: vec![*old.as_bytes()],
+            devices: vec!["phone".into()],
+        };
+        ciborium::into_writer(&fields, &mut later).unwrap();
+        let keys = open_meta(&vault_key, Some(&seal(&later))).unwrap();
+        assert!(keys == [old]);
+
+        assert!(matches!(
+            open_meta(&vault_key, Some(&seal(b"\xff not cbor"))),
+            Err(Error::UnsupportedVersion)
+        ));
     }
 
     #[test]
