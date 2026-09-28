@@ -129,16 +129,23 @@ pub struct VaultHeader {
     /// quick/biometric unlock. `None` until the user opts in. The device key
     /// itself lives only in the OS keychain (see `vault-store`).
     pub device_wrapped_vault_key: Option<AeadBlob>,
-    /// Monotonic master-rewrap epoch: bumped on every master-password change
-    /// (or future KDF hardening). Sync merges adopt the header with the HIGHER
-    /// epoch, so a rotation done on one device propagates instead of being
-    /// reverted by a peer's stale header. Legacy (v2) files load as epoch 0.
+    /// Monotonic master-rewrap epoch: bumped on every master-password change.
+    /// Between files sealed with the same vault key, sync merges adopt the
+    /// header with the HIGHER epoch, so a rewrap done on one device propagates
+    /// instead of being reverted by a peer's stale header. Legacy (v2) files
+    /// load as epoch 0.
     pub rewrap_epoch: u64,
-    /// Which vault key the items are sealed under, counted from 0. A password
-    /// change creates a new vault key and bumps this, so a device still
-    /// holding an older key knows it needs the new password, not a merge.
-    /// Files before v7 load as epoch 0.
+    /// Which vault key the items are sealed under, counted from 0. Every
+    /// master password change creates a new vault key and bumps this, so a
+    /// device still holding an older key knows the file needs the new
+    /// password, not a merge. Files before v7 load as epoch 0.
     pub key_epoch: u64,
+    /// The vault keys from before each password change, sealed under a key
+    /// derived from the current one. They let a device that missed a change
+    /// open its own copy with just the new password, and tell a peer's copy
+    /// from before the change apart from a foreign vault. `None` until the
+    /// first change, and before v7.
+    pub previous_keys: Option<AeadBlob>,
 }
 
 impl VaultHeader {
@@ -182,8 +189,9 @@ impl VaultHeader {
     /// v5: the complete container carries a vault-key authentication tag.
     /// v6: the master wrap is bound to that tag's container (`SYBRVLT6`), so a
     ///     file relabelled as v4 or older no longer opens with the password.
-    /// v7: the header carries `key_epoch`; items and the container tag use
-    ///     keys derived from the vault key (HKDF) rather than the key itself.
+    /// v7: a password change replaces the vault key. The header carries
+    ///     `key_epoch` and the keys it replaced; items and the container tag
+    ///     use keys derived from the vault key (HKDF), not the key itself.
     pub const FORMAT_VERSION: u16 = 7;
 
     /// Validate that this build can read the header.
@@ -221,6 +229,7 @@ impl From<LegacyHeaderV2> for VaultHeader {
             device_wrapped_vault_key: h.device_wrapped_vault_key,
             rewrap_epoch: 0,
             key_epoch: 0,
+            previous_keys: None,
         }
     }
 }
@@ -246,6 +255,7 @@ impl From<HeaderV6> for VaultHeader {
             device_wrapped_vault_key: h.device_wrapped_vault_key,
             rewrap_epoch: h.rewrap_epoch,
             key_epoch: 0,
+            previous_keys: None,
         }
     }
 }

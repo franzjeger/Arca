@@ -41,6 +41,27 @@ pub enum Error {
     #[error("vault written by a newer version of the app")]
     UnsupportedVersion,
 
+    /// The file was sealed after a master password change this vault has not
+    /// taken on: its key is one only the new password opens. Nothing is wrong
+    /// with the file; see `Vault::adopt_rotation`.
+    #[error("the master password was changed on another device")]
+    KeyRotated,
+
+    /// The file is this vault's, sealed with a key a password change has
+    /// since replaced: a copy written before the change. Nothing in it is
+    /// trusted, since whoever knew the old password could have written it,
+    /// and nothing is lost by dropping it: the device that wrote it merges its
+    /// changes again once it takes on the new password.
+    #[error("vault copy from before a master password change")]
+    StaleKey,
+
+    /// The password opens the file, but the file does not continue this
+    /// vault: it holds none of this vault's keys. A different vault, a copy
+    /// forged by someone who knew an old password, or this vault changed to
+    /// two passwords on two devices at once.
+    #[error("the file belongs to a different vault")]
+    DifferentVault,
+
     /// Writing the vault structure failed. An internal error, never a verdict
     /// on bytes that were read.
     #[error("vault serialization failed")]
