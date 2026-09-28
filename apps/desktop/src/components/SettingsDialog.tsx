@@ -476,7 +476,7 @@ export function SettingsDialog({
             {sync?.connected && <SyncDevices refreshKey={sync.lastSyncUnix} />}
             <Row
               label="Change master password"
-              hint="Requires your current master password or system verification. Quick unlock keeps working; other devices need the new password after the next sync/seed."
+              hint="Requires your current master password or system verification. The vault gets a new key: quick unlock and a plugged-in USB key come back by themselves (macOS asks for Touch ID once), and other devices ask for the new password on their next sync."
             >
               <button
                 type="button"
