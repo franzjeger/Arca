@@ -523,7 +523,7 @@ export function SettingsDialog({
             />
             <ToggleRow
               label="Confirm before autofill"
-              hint="Ask for an explicit Allow/Deny in this app before a password is filled into the browser. Off by default; autofill is already limited to the matching site while unlocked."
+              hint="Ask for an explicit Allow/Deny in this app before a password is filled into the browser. On by default, so even a compromised extension cannot take a password without you seeing it."
               checked={settings.confirmAutofill}
               onChange={(v) => apply({ confirmAutofill: v })}
             />

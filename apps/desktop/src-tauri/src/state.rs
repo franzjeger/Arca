@@ -30,8 +30,8 @@ pub struct Settings {
     /// disables auto-clear.
     pub clipboard_clear_secs: u64,
     /// Require an explicit in-app Allow/Deny prompt before releasing a
-    /// credential to the browser extension. Off by default (origin binding +
-    /// unlock already gate autofill); on makes the app the final approver.
+    /// credential to the browser extension. On by default (THREAT_MODEL T11):
+    /// the app is the final approver even if the extension is compromised.
     pub confirm_autofill: bool,
     /// Offer to save a new (or changed) login when you submit a form the vault
     /// doesn't already know. On by default.

@@ -31,6 +31,8 @@
   (`vault-bridge-auth`) instead of three copies. Checking whether the app
   runs is now the handshake alone; it used to be a `match`, which unlocked
   the vault whenever a USB key was inserted.
+- Settings described "Confirm before autofill" as off by default. It is on,
+  deliberately (THREAT_MODEL T11), and now says so.
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native
