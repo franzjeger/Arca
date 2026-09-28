@@ -11,6 +11,7 @@ export function VaultStatusBar({ onOpenSettings, conflictCount = 0, onReviewConf
   // Asked once, when sync first finds the change; after "Not now" the button
   // below stays until the new password is in.
   const needsPassword = !!status?.needsPassword;
+  const rolledBack = status?.rolledBack ?? [];
   const [askingPassword, setAskingPassword] = useState(false);
   const asked = useRef(false);
   useEffect(() => {
@@ -34,6 +35,12 @@ export function VaultStatusBar({ onOpenSettings, conflictCount = 0, onReviewConf
     <span role="status">{failure ? "Saved locally · Sync needs attention" : syncLabel(status)}</span>
     {failure && <span className="text-amber-400">{failure}</span>}
     {needsPassword && <button className="text-accent hover:underline" onClick={() => setAskingPassword(true)}>Enter new password</button>}
+    {rolledBack.length > 0 && <>
+      <span role="alert" className="text-amber-400">
+        Google Drive had lost the latest changes from {listed(rolledBack)}. Arca has put them back. If this happens again, someone else may have access to your Google account.
+      </span>
+      <button className="text-accent hover:underline" onClick={() => void api.syncAcknowledgeRollback().catch(() => {})}>OK</button>
+    </>}
     {status?.connected && !needsPassword && (failure || status.pending) && <button
       className="text-accent hover:underline disabled:opacity-50"
       disabled={retrying || status.syncing}
@@ -58,4 +65,11 @@ export function VaultStatusBar({ onOpenSettings, conflictCount = 0, onReviewConf
           : "This device now uses the new master password.");
       }} />}
   </div>;
+}
+
+/** "a", "a and b", "a, b and c". */
+function listed(names: string[]): string {
+  return names.length > 1
+    ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
+    : names[0] ?? "";
 }

@@ -333,6 +333,8 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::sync_connect,
         commands::sync_disconnect,
         commands::sync_status,
+        commands::sync_devices,
+        commands::sync_acknowledge_rollback,
         commands::sync_now,
         commands::sync_bootstrap,
         commands::merge_duplicates,

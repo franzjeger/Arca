@@ -48,7 +48,9 @@
 //! * a remote written by a NEWER format is refused, never "repaired";
 //! * a remote sealed after a master password change this device has not taken
 //!   on stops the cycle until the user enters the new password, and one sealed
-//!   before a change is replaced, never merged.
+//!   before a change is replaced, never merged;
+//! * a remote that no longer accounts for uploads this device has already seen
+//!   went back in time: it is healed by the next push, and the user is told.
 
 #![forbid(unsafe_code)]
 
@@ -58,8 +60,10 @@ mod http;
 pub mod oauth;
 
 use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use vault_core::Vault;
+use uuid::Uuid;
+use vault_core::{Device, Vault};
 
 pub use engine::{SyncEngine, SyncStatus};
 
@@ -182,10 +186,64 @@ pub trait RemoteStore: Send + Sync {
 /// and receives the bytes to push, which keeps every question of how the vault
 /// is stored, locked, or persisted on the caller's side of the line.
 pub trait LocalVault: Send + Sync {
-    /// Merge `remotes` into the local vault, persist the result, and return the
-    /// bytes to upload. Implementations should apply the shared policy by
-    /// calling [`merge_remotes`].
-    fn merge_and_serialize(&self, remotes: &[Vec<u8>]) -> Result<Vec<u8>, LocalError>;
+    /// Merge `remotes` into the local vault, record this device's upload,
+    /// persist the result, and return what to push. `whole` says `remotes` is
+    /// everything the remote holds, which is when it can be judged for going
+    /// back in time. Implementations apply the shared policy by calling
+    /// [`prepare_push`].
+    fn merge_and_serialize(&self, remotes: &[Vec<u8>], whole: bool) -> Result<Push, LocalError>;
+}
+
+/// This device, as it records itself in the copies it pushes (see
+/// [`vault_core::Device`]). The id is the platform's to keep: one per
+/// installation, stable across launches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThisDevice {
+    pub id: Uuid,
+    pub name: String,
+}
+
+/// What the local side hands the engine to push.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Push {
+    pub bytes: Vec<u8>,
+    /// Devices whose uploads the remote no longer accounted for, when it was
+    /// judged: it went back in time (see `Vault::devices_behind`).
+    pub behind: Vec<Device>,
+}
+
+/// The shared tail of every platform's [`LocalVault`]: merge by
+/// [`merge_remotes`], judge the remote when `whole`, and record this device's
+/// upload in the copy about to be pushed. Returns the devices the remote was
+/// behind on. `device` is `None` until the platform has named this device;
+/// its uploads then go unrecorded.
+pub fn prepare_push(
+    vault: &mut Vault,
+    remotes: &[Vec<u8>],
+    whole: bool,
+    device: Option<&ThisDevice>,
+) -> Result<Vec<Device>, LocalError> {
+    merge_remotes(vault, remotes)?;
+    let me = device.map_or(Uuid::nil(), |d| d.id);
+    let behind = if whole {
+        vault
+            .devices_behind(remotes, me)
+            .map_err(|e| LocalError::Refused(e.to_string()))?
+    } else {
+        Vec::new()
+    };
+    if let Some(device) = device {
+        vault
+            .record_upload(device.id, &device.name, now_millis())
+            .map_err(|e| LocalError::Save(e.to_string()))?;
+    }
+    Ok(behind)
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// Sync progress, for whatever the platform shows a user.

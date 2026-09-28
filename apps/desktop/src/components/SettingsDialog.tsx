@@ -1,6 +1,7 @@
 import { AutomaticBackupSettings } from "./AutomaticBackupSettings";
 import { useReauthentication } from "../hooks/useReauthentication";
 import { syncLabel, useSyncStatus } from "../hooks/useSyncStatus";
+import { SyncDevices } from "./SyncDevices";
 import { Dialog } from "./Dialog";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -472,6 +473,7 @@ export function SettingsDialog({
                 </button>
               )}
             </Row>
+            {sync?.connected && <SyncDevices refreshKey={sync.lastSyncUnix} />}
             <Row
               label="Change master password"
               hint="Requires your current master password or system verification. Quick unlock keeps working; other devices need the new password after the next sync/seed."

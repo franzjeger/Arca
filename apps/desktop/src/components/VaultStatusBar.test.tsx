@@ -8,7 +8,7 @@ vi.mock("../hooks/useSyncStatus", () => ({
 }));
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, api: { ...actual.api, backupStatus: vi.fn(), syncAdoptPassword: vi.fn() } };
+  return { ...actual, api: { ...actual.api, backupStatus: vi.fn(), syncAdoptPassword: vi.fn(), syncAcknowledgeRollback: vi.fn() } };
 });
 const now = 2_000_000_000;
 const healthy: BackupStatus = { directory: "/backups", lastSuccessUnix: now, lastError: null, lastFile: null };
@@ -87,4 +87,15 @@ it("asks for a master password changed on another device, once, and keeps a way 
   await waitFor(() => expect(onToast).toHaveBeenCalledWith("This device now uses the new master password."));
   expect(api.syncAdoptPassword).toHaveBeenLastCalledWith("new");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("says when Drive lost another device's changes, until acknowledged", async () => {
+  vi.useRealTimers();
+  vi.mocked(api.backupStatus).mockResolvedValue(healthy);
+  vi.mocked(api.syncAcknowledgeRollback).mockResolvedValue();
+  sync.status = { pending: false, syncing: false, connected: true, account: null, lastSyncUnix: 1, lastError: null, rolledBack: ["iPhone", "iPad"] };
+  await act(async () => { render(<VaultStatusBar onOpenSettings={vi.fn()} />); });
+  expect(screen.getByRole("alert")).toHaveTextContent("lost the latest changes from iPhone and iPad");
+  fireEvent.click(screen.getByRole("button", { name: "OK" }));
+  expect(api.syncAcknowledgeRollback).toHaveBeenCalledOnce();
 });

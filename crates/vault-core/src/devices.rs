@@ -40,7 +40,7 @@ pub struct Device {
 
 /// `known` with `seen` merged in: per device, the entry that knows of more
 /// uploads. Order is kept, new devices go at the end.
-pub(crate) fn merge(known: &mut Vec<Device>, seen: impl IntoIterator<Item = Device>) {
+pub fn merge(known: &mut Vec<Device>, seen: impl IntoIterator<Item = Device>) {
     for device in seen {
         match known.iter_mut().find(|d| d.id == device.id) {
             Some(mine) if device.uploads > mine.uploads => *mine = device,

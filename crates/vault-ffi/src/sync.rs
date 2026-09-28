@@ -39,7 +39,9 @@ use std::sync::{Arc, Mutex};
 use vault_core::Vault;
 use vault_sync::drive::{arca_credentials, DriveStore, RefreshTokenStore};
 use vault_sync::oauth::{OAuthClient, Pkce};
-use vault_sync::{LocalError, LocalVault, RemoteStore, SilentObserver, SyncEngine};
+use vault_sync::{
+    LocalError, LocalVault, Push, RemoteStore, SilentObserver, SyncEngine, ThisDevice,
+};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -91,12 +93,15 @@ impl RefreshTokenStore for Credential {
 struct SharedVault {
     vault: Arc<Mutex<Vault>>,
     /// Vault bytes the caller still has to write, set only when a cycle
-    /// actually integrated something from the remote.
+    /// changed what belongs on disk.
     pending: Mutex<Option<Vec<u8>>>,
+    /// This device, once the caller has named it; its uploads go unrecorded
+    /// until then.
+    device: Mutex<Option<ThisDevice>>,
 }
 
 impl LocalVault for SharedVault {
-    fn merge_and_serialize(&self, remotes: &[Vec<u8>]) -> Result<Vec<u8>, LocalError> {
+    fn merge_and_serialize(&self, remotes: &[Vec<u8>], whole: bool) -> Result<Push, LocalError> {
         // Not recovered from on purpose — see `lock_vault` in lib.rs. A merge
         // interrupted by a panic can leave the vault holding no items, and this
         // is the one path that would serialize that and push it to the user's
@@ -110,24 +115,29 @@ impl LocalVault for SharedVault {
             // unless the password changed elsewhere.
             return Err(vault_sync::locked(&vault, remotes));
         }
-        vault_sync::merge_remotes(&mut vault, remotes)?;
+        let device = self
+            .device
+            .lock()
+            .map_err(|_| LocalError::Save("device poisoned".into()))?
+            .clone();
+        let behind = vault_sync::prepare_push(&mut vault, remotes, whole, device.as_ref())?;
         let bytes = vault
             .to_bytes()
             .map_err(|e| LocalError::Save(e.to_string()))?;
 
-        // Only remote content changes what belongs on disk. Serializing
-        // re-encrypts with fresh nonces, so bytes from a push of unchanged
-        // state differ from the file while meaning exactly the same thing —
-        // handing those back would rewrite the user's vault every cycle for
-        // nothing.
-        if !remotes.is_empty() {
+        // Remote content, or this device's upload count, changes what belongs
+        // on disk. Nothing else does: serializing re-encrypts with fresh
+        // nonces, so bytes from a push of unchanged state differ from the file
+        // while meaning exactly the same thing, and handing those back would
+        // rewrite the user's vault every cycle for nothing.
+        if !remotes.is_empty() || device.is_some() {
             *self
                 .pending
                 .lock()
                 .map_err(|_| LocalError::Save("pending buffer poisoned".into()))? =
                 Some(bytes.clone());
         }
-        Ok(bytes)
+        Ok(Push { bytes, behind })
     }
 }
 
@@ -222,6 +232,7 @@ pub unsafe extern "C" fn vault_ffi_sync_new(
         let local = Arc::new(SharedVault {
             vault: shared,
             pending: Mutex::new(None),
+            device: Mutex::new(None),
         });
         let engine = SyncEngine::new(drive.clone(), local.clone(), Arc::new(SilentObserver));
         SyncHandle {
@@ -657,6 +668,7 @@ mod tests {
         let local = Arc::new(SharedVault {
             vault: arc.clone(),
             pending: Mutex::new(None),
+            device: Mutex::new(None),
         });
         (arc, local)
     }
@@ -689,7 +701,7 @@ mod tests {
             peer.to_bytes().unwrap()
         };
 
-        local.merge_and_serialize(&[peer_bytes]).unwrap();
+        local.merge_and_serialize(&[peer_bytes], true).unwrap();
         assert_eq!(titles(&arc), vec!["mine", "theirs"]);
     }
 
@@ -700,7 +712,7 @@ mod tests {
     fn nothing_is_handed_back_to_persist_when_nothing_was_merged() {
         let (_arc, local) = shared(vault_with("mine", 1));
 
-        let bytes = local.merge_and_serialize(&[]).unwrap();
+        let bytes = local.merge_and_serialize(&[], true).unwrap().bytes;
         assert!(!bytes.is_empty(), "the push still needs bytes to upload");
         assert!(
             local.pending.lock().unwrap().is_none(),
@@ -713,7 +725,7 @@ mod tests {
         let (arc, local) = shared(vault_with("mine", 1));
         let peer_bytes = arc.lock().unwrap().to_bytes().unwrap();
 
-        local.merge_and_serialize(&[peer_bytes]).unwrap();
+        local.merge_and_serialize(&[peer_bytes], true).unwrap();
         let pending = local.pending.lock().unwrap().clone();
         let pending = pending.expect("a merge must produce bytes to write");
 
@@ -733,7 +745,7 @@ mod tests {
         let (_arc, local) = shared(vault);
 
         assert!(matches!(
-            local.merge_and_serialize(&[]),
+            local.merge_and_serialize(&[], true),
             Err(LocalError::Locked)
         ));
     }
@@ -756,7 +768,7 @@ mod tests {
         };
 
         assert!(matches!(
-            local.merge_and_serialize(&[foreign]),
+            local.merge_and_serialize(&[foreign], true),
             Err(LocalError::Refused(_))
         ));
         assert_eq!(titles(&arc), vec!["mine"], "a refusal must change nothing");
@@ -777,17 +789,17 @@ mod tests {
 
         let (arc, local) = shared(base);
         assert_eq!(
-            local.merge_and_serialize(std::slice::from_ref(&rotated)),
+            local.merge_and_serialize(std::slice::from_ref(&rotated), true),
             Err(LocalError::KeyRotated(rotated.clone()))
         );
         arc.lock().unwrap().lock().unwrap();
         assert_eq!(
-            local.merge_and_serialize(std::slice::from_ref(&rotated)),
+            local.merge_and_serialize(std::slice::from_ref(&rotated), true),
             Err(LocalError::KeyRotated(rotated.clone()))
         );
 
         arc.lock().unwrap().adopt_rotation(&rotated, "new").unwrap();
-        assert!(local.merge_and_serialize(&[before]).is_ok());
+        assert!(local.merge_and_serialize(&[before], true).is_ok());
         assert_eq!(titles(&arc), vec!["mine"]);
     }
 
