@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Vault files are now `SYBRVLT7`. The header records which vault key sealed
+  the items (its epoch), and items and the container tag are sealed with
+  keys derived from the vault key by HKDF instead of the key itself. V6 files
+  open and are rewritten as V7 on the next save; earlier builds refuse V7.
 - Security: vault files are now `SYBRVLT6`. Relabelling a V5 file as the
   unauthenticated V4 format took two bytes and no key, and the result unlocked
   and was re-signed on the next save — so whoever could write the file could

@@ -46,7 +46,7 @@ disk at rest, the browser/extension context.
   laptop drive) but not the running process or master password.
 - **A2 — Remote network attacker or cloud file holder.** Optional Drive sync,
   update checks, breach-prefix lookups and related-origin checks cross the
-  network boundary. TLS protects transport; V6 container authentication protects
+  network boundary. TLS protects transport; container authentication protects
   vault contents. Replay of an older authentic vault remains a residual risk.
 - **A3 — Same-user malware.** Code running with the user's privileges.
 - **A4 — Privileged/physical attacker.** Root, kernel, or live-memory access.
@@ -59,7 +59,7 @@ disk at rest, the browser/extension context.
 | # | Threat | Adversary | Status | Mitigation / note |
 |---|--------|-----------|--------|-------------------|
 | T1 | Offline brute force of the vault file | A1 | **Mitigated** | Argon2id (m=64 MiB, t=3, p=4) + 256-bit keys. Strength ultimately bounded by master-password entropy. |
-| T2 | Tampering with vault bytes | A1/A3 | **Mitigated** | V6 whole-container HMAC plus per-item/key-wrap XChaCha20-Poly1305; authentication precedes unlock/merge. The master wrap names the authenticated container and device keys only open authenticated files, so relabelling a file as a legacy format does not open it. Residual: a vault not yet unlocked with its master password on a V6 build still has an unbound wrap, and an entire older file can be replayed (no freshness check). |
+| T2 | Tampering with vault bytes | A1/A3 | **Mitigated** | Whole-container HMAC plus per-item/key-wrap XChaCha20-Poly1305; authentication precedes unlock/merge. The master wrap names the authenticated container and device keys only open authenticated files, so relabelling a file as a legacy format does not open it. Residual: a vault not yet unlocked with its master password on a V6 or later build still has an unbound wrap, and an entire older file can be replayed (no freshness check). |
 | T3 | Format/variant confusion to mis-decode data | A1 | **Mitigated** | Name-tagged CBOR item payloads + versioned header; id bound as AEAD AAD. |
 | T4 | Wrong-password oracle / timing side channel | A1/A6 | **Mitigated** | Poly1305 verification is constant-time; errors are indistinct ("wrong password or tampered"). |
 | T5 | Secrets written to swap/hibernation | A1/A4 | **Partial** | Symmetric **key material** (master + vault keys) is held in `mlock`/`VirtualLock`-locked memory (`vault-secmem`) so it can't page to swap/hibernation; locking is best-effort (may be refused by `RLIMIT_MEMLOCK`). Residual: item **plaintext** (passwords, revealed values) still transits non-locked heap / the webview (see T8). |

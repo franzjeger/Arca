@@ -134,6 +134,11 @@ pub struct VaultHeader {
     /// epoch, so a rotation done on one device propagates instead of being
     /// reverted by a peer's stale header. Legacy (v2) files load as epoch 0.
     pub rewrap_epoch: u64,
+    /// Which vault key the items are sealed under, counted from 0. A password
+    /// change creates a new vault key and bumps this, so a device still
+    /// holding an older key knows it needs the new password, not a merge.
+    /// Files before v7 load as epoch 0.
+    pub key_epoch: u64,
 }
 
 impl VaultHeader {
@@ -177,7 +182,9 @@ impl VaultHeader {
     /// v5: the complete container carries a vault-key authentication tag.
     /// v6: the master wrap is bound to that tag's container (`SYBRVLT6`), so a
     ///     file relabelled as v4 or older no longer opens with the password.
-    pub const FORMAT_VERSION: u16 = 6;
+    /// v7: the header carries `key_epoch`; items and the container tag use
+    ///     keys derived from the vault key (HKDF) rather than the key itself.
+    pub const FORMAT_VERSION: u16 = 7;
 
     /// Validate that this build can read the header.
     pub(crate) fn check_supported(&self) -> Result<()> {
@@ -213,6 +220,44 @@ impl From<LegacyHeaderV2> for VaultHeader {
             master_wrapped_vault_key: h.master_wrapped_vault_key,
             device_wrapped_vault_key: h.device_wrapped_vault_key,
             rewrap_epoch: 0,
+            key_epoch: 0,
+        }
+    }
+}
+
+/// The header as `SYBRVLT2` to `SYBRVLT6` containers serialized it: every
+/// field up to `rewrap_epoch` (bincode is positional, so each layout needs its
+/// own type).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct HeaderV6 {
+    pub format_version: u16,
+    pub kdf: KdfParams,
+    pub master_wrapped_vault_key: AeadBlob,
+    pub device_wrapped_vault_key: Option<AeadBlob>,
+    pub rewrap_epoch: u64,
+}
+
+impl From<HeaderV6> for VaultHeader {
+    fn from(h: HeaderV6) -> Self {
+        Self {
+            format_version: h.format_version,
+            kdf: h.kdf,
+            master_wrapped_vault_key: h.master_wrapped_vault_key,
+            device_wrapped_vault_key: h.device_wrapped_vault_key,
+            rewrap_epoch: h.rewrap_epoch,
+            key_epoch: 0,
+        }
+    }
+}
+
+impl From<&VaultHeader> for HeaderV6 {
+    fn from(h: &VaultHeader) -> Self {
+        Self {
+            format_version: h.format_version,
+            kdf: h.kdf.clone(),
+            master_wrapped_vault_key: h.master_wrapped_vault_key.clone(),
+            device_wrapped_vault_key: h.device_wrapped_vault_key.clone(),
+            rewrap_epoch: h.rewrap_epoch,
         }
     }
 }
