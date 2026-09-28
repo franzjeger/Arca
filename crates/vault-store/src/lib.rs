@@ -229,8 +229,9 @@ impl VaultStore {
     /// Sync-aware save: if the file on disk changed since we last read/wrote it
     /// (a synced peer rewrote it), merge those changes into `vault` first so the
     /// peer's edits aren't clobbered, then persist the merged result. Returns
-    /// `true` if a merge happened. A foreign/corrupt external file surfaces as
-    /// an error (the peer's file is *not* overwritten).
+    /// `true` if a merge happened. A file that is not a readable vault is
+    /// replaced; a foreign, tampered or newer one surfaces as an error and is
+    /// *not* overwritten.
     pub fn save_synced(&self, vault: &mut Vault) -> Result<bool> {
         // Covers the complete read → merge → snapshot → atomic rename window.
         // Locking only the final write still lets two processes both merge the
@@ -243,10 +244,10 @@ impl VaultStore {
                 match vault.merge_remote(&current) {
                     Ok(()) => merged = true,
                     // Unparseable bytes — a corrupt file, or a cloud daemon's
-                    // in-progress partial write. It isn't a real vault, so
-                    // replacing it with ours is safe and, crucially, doesn't
-                    // wedge every future save behind a transient bad file.
-                    Err(vault_core::Error::Format) | Err(vault_core::Error::Serialization) => {}
+                    // in-progress partial write. Nothing in it was
+                    // authenticated, so replacing it with ours loses nothing
+                    // and doesn't wedge every future save behind a bad file.
+                    Err(vault_core::Error::Format) => {}
                     // A well-formed but un-reconcilable file (a *different*
                     // vault's key, or we're locked): refuse rather than
                     // destroy a vault we can't safely merge.
@@ -686,12 +687,23 @@ mod tests {
         store.save(&v).unwrap();
 
         // A corrupt / partial file (e.g. a cloud daemon mid-write) must NOT
-        // wedge saving — it's not a real vault, so we replace it.
-        std::fs::write(store.path(), b"not a vault at all").unwrap();
-        assert!(!store.save_synced(&mut v).unwrap());
-        let mut reloaded = store.load().unwrap();
-        reloaded.unlock("pw").unwrap();
-        assert_eq!(reloaded.list_items(true).unwrap().len(), 1);
+        // wedge saving — it's not a real vault, so we replace it. That holds
+        // for our own container cut short, too.
+        let ours = std::fs::read(store.path()).unwrap();
+        for torn in [b"not a vault at all".as_slice(), &ours[..ours.len() / 2]] {
+            std::fs::write(store.path(), torn).unwrap();
+            assert!(!store.save_synced(&mut v).unwrap());
+            let mut reloaded = store.load().unwrap();
+            reloaded.unlock("pw").unwrap();
+            assert_eq!(reloaded.list_items(true).unwrap().len(), 1);
+        }
+
+        // A vault from a newer Arca is left exactly as it is.
+        let mut newer = b"SYBRVLT9".to_vec();
+        newer.extend_from_slice(&[0u8; 64]);
+        std::fs::write(store.path(), &newer).unwrap();
+        assert!(store.save_synced(&mut v).is_err());
+        assert_eq!(std::fs::read(store.path()).unwrap(), newer);
 
         // But a well-formed DIFFERENT vault (foreign key) is refused, not
         // clobbered.

@@ -61,6 +61,13 @@ impl KdfParams {
         })
     }
 
+    /// Whether any cost is above what this build accepts from a header.
+    pub(crate) fn exceeds_limits(&self) -> bool {
+        self.m_cost_kib > Self::MAX_M_COST_KIB
+            || self.t_cost > Self::MAX_T_COST
+            || self.p_cost > Self::MAX_P_COST
+    }
+
     /// Validate public KDF parameters before they reach Argon2.
     ///
     /// Vault headers can come from removable media or a sync peer. Bounding
@@ -177,11 +184,12 @@ impl VaultHeader {
         if self.format_version == 0 {
             return Err(Error::Format);
         }
-        if self.format_version > Self::FORMAT_VERSION {
+        // Costs above our limits may be a newer build that raised them, so
+        // they are refused, never treated as garbage to overwrite. Either way
+        // Argon2 never starts with an attacker's resource costs.
+        if self.format_version > Self::FORMAT_VERSION || self.kdf.exceeds_limits() {
             return Err(Error::UnsupportedVersion);
         }
-        // A malformed untrusted header is a format error; do not start Argon2
-        // with its attacker-selected resource costs.
         self.kdf.validate().map_err(|_| Error::Format)?;
         Ok(())
     }

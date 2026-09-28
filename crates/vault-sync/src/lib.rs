@@ -191,17 +191,18 @@ impl SyncObserver for SilentObserver {}
 ///
 /// The classification is the interesting part:
 ///
-/// * a torn upload (`Format`/`Serialization`) is **skipped**, and ours replaces
-///   it — half a file is not content worth preserving;
+/// * a torn upload (`Format`) is **skipped**, and ours replaces it — half a
+///   file, with nothing in it authenticated, is not content worth preserving;
 /// * a newer format is **refused**, because merging a schema we do not
-///   understand is how a vault loses items;
+///   understand is how a vault loses items. That includes an authentic file
+///   whose items this build cannot decode;
 /// * anything else — a foreign vault sealed with a different key above all — is
 ///   refused too. Overwriting it would destroy someone's data.
 pub fn merge_remotes(vault: &mut vault_core::Vault, remotes: &[Vec<u8>]) -> Result<(), LocalError> {
     for bytes in remotes {
         match vault.merge_remote(bytes) {
             Ok(()) => {}
-            Err(vault_core::Error::Format) | Err(vault_core::Error::Serialization) => {}
+            Err(vault_core::Error::Format) => {}
             Err(vault_core::Error::UnsupportedVersion) => return Err(LocalError::RemoteTooNew),
             Err(e) => return Err(LocalError::Refused(e.to_string())),
         }
@@ -246,7 +247,10 @@ mod merge_remotes_tests {
         ));
 
         // Half an upload is not content worth keeping, and refusing it would
-        // wedge every future sync behind one bad file.
+        // wedge every future sync behind one bad file — our own container
+        // cut short included, which used to be refused forever.
         assert!(merge_remotes(&mut vault, &[b"garbage".to_vec()]).is_ok());
+        let ours = vault.to_bytes().unwrap();
+        assert!(merge_remotes(&mut vault, &[ours[..ours.len() - 10].to_vec()]).is_ok());
     }
 }

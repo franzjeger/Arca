@@ -150,9 +150,7 @@ fn encode_body(body: &VaultBody) -> Result<Vec<u8>> {
 }
 
 fn decode_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    body_codec()
-        .deserialize(bytes)
-        .map_err(|_| Error::Serialization)
+    body_codec().deserialize(bytes).map_err(|_| Error::Format)
 }
 
 /// A password vault. Create a new one with [`Vault::create`], or load an
@@ -211,15 +209,16 @@ impl Vault {
                 } else {
                     SEALED_SINCE
                 };
-                // A torn or tampered authenticated file must not read as
-                // foreign: callers replace a `Format` file with their own.
-                let split = rest.len().checked_sub(AUTH_LEN).ok_or(Error::Decryption)?;
+                // A container that does not even parse was torn (a partial
+                // upload, a crash mid-write) before anything in it could be
+                // authenticated: `Format`, which callers may replace.
+                let split = rest.len().checked_sub(AUTH_LEN).ok_or(Error::Format)?;
                 let (body, tag) = rest.split_at(split);
-                let parsed: VaultBody = decode_body(body).map_err(|_| Error::Decryption)?;
+                let parsed: VaultBody = decode_body(body)?;
                 let sealed = Sealed {
                     version,
                     body: body.to_vec(),
-                    tag: tag.try_into().map_err(|_| Error::Decryption)?,
+                    tag: tag.try_into().map_err(|_| Error::Format)?,
                 };
                 (parsed.header, parsed.items, parsed.purges, Some(sealed))
             }
@@ -959,7 +958,9 @@ fn encrypt_items(vault_key: &SymmetricKey, items: &[Item]) -> Result<Vec<Encrypt
     items
         .iter()
         .map(|item| {
-            validate_revision(item)?;
+            if !revision_in_bounds(item) {
+                return Err(Error::Serialization);
+            }
             let plaintext = encode_item_payload(item)?;
             let blob = crypto::seal(vault_key, &plaintext, item.id.as_bytes())?;
             Ok(EncryptedItem { id: item.id, blob })
@@ -973,22 +974,24 @@ fn decrypt_items(vault_key: &SymmetricKey, items: &[EncryptedItem]) -> Result<Ve
         .iter()
         .map(|enc| {
             let plaintext = crypto::open(vault_key, &enc.blob, enc.id.as_bytes())?;
-            let item: Item = decode_item_payload(&plaintext)?;
+            // Authentic, since it opened under our key, yet unreadable to us:
+            // written by a newer build, which is never a reason to discard it.
+            let item: Item =
+                decode_item_payload(&plaintext).map_err(|_| Error::UnsupportedVersion)?;
             // Defense in depth: the decrypted id must match the cleartext id.
             if item.id != enc.id {
                 return Err(Error::Decryption);
             }
-            validate_revision(&item)?;
+            if !revision_in_bounds(&item) {
+                return Err(Error::UnsupportedVersion);
+            }
             Ok(item)
         })
         .collect()
 }
 
-fn validate_revision(item: &Item) -> Result<()> {
-    if item.revision_ancestors.len() > MAX_REVISION_ANCESTORS {
-        return Err(Error::Format);
-    }
-    Ok(())
+fn revision_in_bounds(item: &Item) -> bool {
+    item.revision_ancestors.len() <= MAX_REVISION_ANCESTORS
 }
 
 #[cfg(test)]
@@ -1206,7 +1209,66 @@ mod tests {
         let mut forged = MAGIC.to_vec();
         forged.extend_from_slice(&bincode::serialize(&body).unwrap());
         forged.extend_from_slice(&[0; AUTH_LEN]);
-        assert!(matches!(Vault::from_bytes(&forged), Err(Error::Format)));
+        // Refused as newer, not garbage: a later build may raise the limits.
+        assert!(matches!(
+            Vault::from_bytes(&forged),
+            Err(Error::UnsupportedVersion)
+        ));
+    }
+
+    /// `Format` is the one error that lets a caller replace the bytes, so it
+    /// must mean exactly "nothing in here was authenticated".
+    #[test]
+    fn a_torn_container_is_format_and_nothing_else_is() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let file = vault.to_bytes().unwrap();
+        for torn in [
+            &file[..MAGIC.len()],
+            &file[..file.len() / 2],
+            &file[..file.len() - 1],
+        ] {
+            assert!(
+                matches!(Vault::from_bytes(torn), Err(Error::Format)),
+                "{}",
+                torn.len()
+            );
+        }
+        let legacy = legacy_file(&vault, "pw", MAGIC_V4);
+        assert!(matches!(
+            Vault::from_bytes(&legacy[..legacy.len() - 3]),
+            Err(Error::Format)
+        ));
+
+        // Whole but tampered: refused, never replaceable.
+        let mut tampered = file.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        let mut opened = Vault::from_bytes(&tampered).unwrap();
+        assert!(matches!(opened.unlock("pw"), Err(Error::Decryption)));
+    }
+
+    /// An item that opens under our key but does not decode was written by a
+    /// build that knows more than this one. Discarding it would lose data.
+    #[test]
+    fn authentic_content_this_build_cannot_decode_is_newer_not_garbage() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let VaultState::Unlocked { vault_key, items } = &vault.state else {
+            unreachable!();
+        };
+        let mut sealed = encrypt_items(vault_key, items).unwrap();
+        sealed[0].blob = crypto::seal(vault_key, &[0xff, 0xff], sealed[0].id.as_bytes()).unwrap();
+        let file = vault.seal(vault_key, sealed).unwrap().to_container();
+
+        let mut opened = Vault::from_bytes(&file).unwrap();
+        assert!(matches!(
+            opened.unlock("pw"),
+            Err(Error::UnsupportedVersion)
+        ));
+        assert!(matches!(
+            vault.merge_remote(&file),
+            Err(Error::UnsupportedVersion)
+        ));
     }
 
     #[test]

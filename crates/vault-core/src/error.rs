@@ -26,18 +26,24 @@ pub enum Error {
     #[error("key derivation failed")]
     KeyDerivation,
 
-    /// The on-disk container is not a recognized vault.
+    /// The bytes are not a readable vault: not one of our containers, or one
+    /// that is truncated or corrupt before anything in it could be
+    /// authenticated. Nothing in them can be trusted, so nothing is lost by
+    /// replacing them — the one error that permits it.
     #[error("unrecognized or unsupported vault format")]
     Format,
 
-    /// The vault was written by a NEWER build than this one. Distinct from
-    /// [`Error::Format`] so sync layers refuse (rather than "repair"/overwrite)
-    /// a legitimate newer-version peer file. The fix is updating the app.
+    /// The vault was written by a NEWER build than this one: a container or
+    /// format version this build does not know, key-derivation costs above its
+    /// limits, or authenticated content it cannot decode. Distinct from
+    /// [`Error::Format`] so callers refuse, rather than "repair" or delete, a
+    /// legitimate newer file. The fix is updating the app.
     #[error("vault written by a newer version of the app")]
     UnsupportedVersion,
 
-    /// (De)serialization of the vault structure failed.
-    #[error("vault (de)serialization failed")]
+    /// Writing the vault structure failed. An internal error, never a verdict
+    /// on bytes that were read.
+    #[error("vault serialization failed")]
     Serialization,
 
     /// No item with the given id exists.
