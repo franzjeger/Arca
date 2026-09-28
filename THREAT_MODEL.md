@@ -88,6 +88,8 @@ disk at rest, the browser/extension context.
 - vault-core crypto, model, TOTP, password gen, audit: unit-tested.
 - Cross-platform build + full test suite: CI on Linux, Windows, macOS.
 - Atomic persistence + AEAD tamper detection: tested.
+- Parsers of input Arca does not control — vault files, URLs, password rules,
+  otpauth URIs — are fuzzed (`fuzz/`) on every pull request.
 - Clipboard ownership (the X11 "serves after copy returns" path): executed in CI
   under Xvfb. The Wayland path is a required CI check under isolated headless
   `sway`; the final **interactive cross-application paste on a real Wayland

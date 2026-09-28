@@ -15,6 +15,8 @@ members = [
     "apps/cli",
     "extension/native-host",
 ]
+# Its own workspace, built by cargo-fuzz on nightly.
+exclude = ["fuzz"]
 
 # Keep the heavy Tauri desktop build out of the default `cargo build`/`test` at
 # the workspace root; build it explicitly with `-p vault-desktop` (or via the
