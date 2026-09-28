@@ -21,7 +21,8 @@ Current source version: **0.6.2** — see [`CHANGELOG.md`](./CHANGELOG.md)
   HaveIBeenPwned using k-anonymity (only a 5-character hash prefix ever leaves
   the device)
 - Find and merge duplicates; soft delete with a Trash you can restore from
-- Change the master password without re-encrypting every item
+- Change the master password: the vault gets a new key, so the old password
+  opens nothing written since, and your other devices ask for the new one once
 
 **Unlock**
 - Master password (Argon2id), or quick unlock via the OS keychain gated by

@@ -34,6 +34,40 @@ Legacy formats have no whole-file integrity protection; this upgrade cannot
 retroactively authenticate an old file or provide protection against replay of
 an entire previously valid file.
 
+## Master password changes
+
+Changing the master password gives the vault a new key. Whoever knew the old
+password and kept a copy of the old file can read nothing written since, and a
+device that has the new key merges nothing sealed with the old one: anyone who
+knew the old password could have written it.
+
+Every V7 file records its key epoch and carries the keys it replaced, sealed
+under the current one. A device sorts each remote copy by them:
+
+- **Sealed with its own key:** merged, as always.
+- **From a later change** (`KeyRotated`): the cycle merges the copies it can
+  open, keeps the newest changed copy and reports `needsPassword`; nothing is
+  pushed until the user enters the new password. That copy carries the key the
+  device's own vault is sealed with, so a locked desktop opens with the new
+  password alone. A copy that does not carry that key is refused even when the
+  password opens it (`DifferentVault`): that is what a copy forged by someone
+  who knows an old password looks like.
+- **From before a change** (`StaleKey`): skipped and retired with the cycle's
+  inputs, like a torn upload. The device that wrote it still has those edits
+  and pushes them again once it has the new password.
+- **Anything else** is a foreign or tampered vault, and is refused as before.
+
+Quick unlock, the USB key and macOS's protected Touch ID key all wrapped the old
+key. After a change the desktop brings them back: silently on Windows and Linux,
+with one Touch ID prompt on macOS, and the USB key if it is plugged in
+(otherwise its next use asks for the password once). iOS mints a new device key,
+which needs no prompt.
+
+Change the password on one computer and let the others catch up. Two computers
+that change it while apart end up with keys neither can take on from the other,
+and each refuses the other's copy; a desktop refuses a change while one from
+elsewhere is already waiting, but it cannot know about one it has not seen.
+
 Each successful cloud upload now creates a new file, then retires only the
 input files already incorporated in it. A checksum preflight alone leaves a
 race between checking and replacing: two devices can both pass it and the last
@@ -200,9 +234,8 @@ folder, which needs the path-config UI below. Flagged by an adversarial review.
    across writers; a peer/cloud write landing mid-save is lost (never a *torn*
    file — the atomic rename guarantees a complete old-or-new vault, just a lost
    update). Consider a file lock or a re-check-after-write.
-4. **Header changes over sync.** `merge_remote` keeps the local header. If master
-   password rotation (`change_master_password`, currently unwired) ships, a
-   stale-header device would revert the rotation on its next save. Add a header
-   version/epoch and take the newer header before wiring password change.
+4. **Header changes over sync.** Built: the header carries a rewrap epoch, and
+   a password change a new key epoch (see
+   [Master password changes](#master-password-changes)).
 5. **Status/refresh UX.** Show sync state; refresh the item list when a
    background merge brings in a peer's changes.
