@@ -1339,15 +1339,8 @@ pub unsafe extern "C" fn vault_ffi_passkey_identities(
     };
     match guard_result(|| {
         let b64 = data_encoding::BASE64;
-        // Summaries first, full item only for the passkeys: `get_item` clones
-        // the payload (VaultItem is Drop/zeroize), and most vaults are almost
-        // entirely logins that would be cloned for nothing.
         let mut rows: Vec<serde_json::Value> = Vec::new();
-        for summary in vault.list_items(false)? {
-            if summary.kind != vault_core::ItemKind::Passkey {
-                continue;
-            }
-            let item = vault.get_item(summary.id)?;
+        for item in vault.active_items()? {
             if let VaultItem::Passkey {
                 rp_id,
                 user_name,

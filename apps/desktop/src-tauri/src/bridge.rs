@@ -270,10 +270,7 @@ fn rp_id_matches_origin(rp_id: &str, origin: &str) -> bool {
 #[cfg(test)]
 fn find_login(vault: &vault_core::Vault, host: &str, username: &str) -> Option<(Uuid, String)> {
     let user = username.to_lowercase();
-    for s in vault.list_items(false).ok()? {
-        let Ok(item) = vault.get_item(s.id) else {
-            continue;
-        };
+    for item in vault.active_items().ok()? {
         if let VaultItem::Login {
             url,
             username: un,
@@ -332,10 +329,7 @@ fn find_login_for_save(
     username: &str,
 ) -> Option<(Uuid, String, String)> {
     if !username.is_empty() {
-        for s in vault.list_items(false).ok()? {
-            let Ok(item) = vault.get_item(s.id) else {
-                continue;
-            };
+        for item in vault.active_items().ok()? {
             if let VaultItem::Login {
                 url,
                 username: stored,
@@ -354,10 +348,7 @@ fn find_login_for_save(
         return None;
     }
     let mut only: Option<(Uuid, String, String)> = None;
-    for s in vault.list_items(false).ok()? {
-        let Ok(item) = vault.get_item(s.id) else {
-            continue;
-        };
+    for item in vault.active_items().ok()? {
         if let VaultItem::Login {
             url,
             username: un,
@@ -683,55 +674,53 @@ fn list_matches(ctx: &mut Ctx, url: String) -> Response {
     // Passkeys whose rp_id does not match this page directly. Resolved
     // after the lock is released.
     let mut deferred: Vec<(String, LoginMatch)> = Vec::new();
-    if let Ok(summaries) = vault.list_items(false) {
-        for s in summaries {
-            if let Ok(item) = vault.get_item(s.id) {
-                match &item.data {
-                    VaultItem::Login {
-                        url: u,
-                        username,
-                        title,
-                        ..
-                    } if domain_matches(u, &url) => {
-                        items.push(LoginMatch {
-                            id: item.id.to_string(),
-                            title: title.clone(),
-                            username: username.clone(),
-                            kind: "password".into(),
-                            credential_id: Vec::new(),
-                        });
-                    }
-                    // Passkeys for this site: surfaced so the picker can
-                    // show the user a passkey exists. Matched by the same
-                    // rule the ceremony uses. Those that do not match
-                    // DIRECTLY are set aside — deciding them needs the
-                    // relying party's related-origins file, and fetching
-                    // it under this lock would stall every other command
-                    // behind a network request.
-                    VaultItem::Passkey {
-                        rp_id,
-                        user_name,
-                        title,
-                        credential_id,
-                        ..
-                    } => {
-                        let entry = LoginMatch {
-                            id: item.id.to_string(),
-                            title: title.clone(),
-                            username: user_name.clone(),
-                            kind: "passkey".into(),
-                            credential_id: credential_id.clone(),
-                        };
-                        if rp_id_matches_origin(rp_id, &url) {
-                            items.push(entry);
-                        } else {
-                            deferred.push((rp_id.clone(), entry));
-                        }
-                    }
-                    // Non-matching logins/passkeys and other item kinds
-                    // (SSH keys, secure notes) are not autofillable here.
-                    _ => {}
+    if let Ok(active) = vault.active_items() {
+        for item in active {
+            match &item.data {
+                VaultItem::Login {
+                    url: u,
+                    username,
+                    title,
+                    ..
+                } if domain_matches(u, &url) => {
+                    items.push(LoginMatch {
+                        id: item.id.to_string(),
+                        title: title.clone(),
+                        username: username.clone(),
+                        kind: "password".into(),
+                        credential_id: Vec::new(),
+                    });
                 }
+                // Passkeys for this site: surfaced so the picker can
+                // show the user a passkey exists. Matched by the same
+                // rule the ceremony uses. Those that do not match
+                // DIRECTLY are set aside — deciding them needs the
+                // relying party's related-origins file, and fetching
+                // it under this lock would stall every other command
+                // behind a network request.
+                VaultItem::Passkey {
+                    rp_id,
+                    user_name,
+                    title,
+                    credential_id,
+                    ..
+                } => {
+                    let entry = LoginMatch {
+                        id: item.id.to_string(),
+                        title: title.clone(),
+                        username: user_name.clone(),
+                        kind: "passkey".into(),
+                        credential_id: credential_id.clone(),
+                    };
+                    if rp_id_matches_origin(rp_id, &url) {
+                        items.push(entry);
+                    } else {
+                        deferred.push((rp_id.clone(), entry));
+                    }
+                }
+                // Non-matching logins/passkeys and other item kinds
+                // (SSH keys, secure notes) are not autofillable here.
+                _ => {}
             }
         }
     }
@@ -921,11 +910,8 @@ fn passkey_create(
         // view, and nothing anywhere says the way out is to delete the
         // passkey in Arca first. So case 2 is reported to the user;
         // case 1 is the RP's own polite signal and needs no narration.
-        if let Ok(summaries) = vault.list_items(false) {
-            for sum in summaries {
-                let Ok(item) = vault.get_item(sum.id) else {
-                    continue;
-                };
+        if let Ok(active) = vault.active_items() {
+            for item in active {
                 if let VaultItem::Passkey {
                     rp_id: r,
                     credential_id: cid,
@@ -947,7 +933,7 @@ fn passkey_create(
                     }
                 }
             }
-        }
+        };
     }
     if blocked_same_account {
         // Emitted outside the state lock: this reaches the webview, and
@@ -1006,17 +992,14 @@ fn passkey_create(
         let existing_id = if user_handle.is_empty() {
             None
         } else {
-            vault.list_items(false).ok().and_then(|sums| {
-                sums.into_iter().find_map(|s| {
-                    let item = vault.get_item(s.id).ok()?;
-                    match &item.data {
-                        VaultItem::Passkey {
-                            rp_id: r,
-                            user_handle: uh,
-                            ..
-                        } if *r == rp_id && *uh == user_handle => Some(s.id),
-                        _ => None,
-                    }
+            vault.active_items().ok().and_then(|mut active| {
+                active.find_map(|item| match &item.data {
+                    VaultItem::Passkey {
+                        rp_id: r,
+                        user_handle: uh,
+                        ..
+                    } if *r == rp_id && *uh == user_handle => Some(item.id),
+                    _ => None,
                 })
             })
         };
@@ -1107,11 +1090,10 @@ fn passkey_get(
             };
         };
         vault
-            .list_items(false)
-            .unwrap_or_default()
+            .active_items()
             .into_iter()
-            .filter_map(|summary| {
-                let item = vault.get_item(summary.id).ok()?;
+            .flatten()
+            .filter_map(|item| {
                 if let VaultItem::Passkey {
                     rp_id: r,
                     credential_id,
@@ -1123,9 +1105,9 @@ fn passkey_get(
                         allow_credentials.is_empty() || allow_credentials.contains(credential_id);
                     if *r == rp_id && allowed {
                         return Some(PasskeyChoice {
-                            id: summary.id.to_string(),
+                            id: item.id.to_string(),
                             account: user_name.clone(),
-                            title: summary.title.clone(),
+                            title: item.data.title().to_owned(),
                             credential_id: credential_id.clone(),
                         });
                     }
@@ -1285,11 +1267,8 @@ fn import_bookmarks(ctx: &mut Ctx, items: Vec<BookmarkWire>) -> Response {
                 message: "locked".into(),
             };
         };
-        if let Ok(summaries) = vault.list_items(false) {
-            for sum in summaries {
-                let Ok(item) = vault.get_item(sum.id) else {
-                    continue;
-                };
+        if let Ok(active) = vault.active_items() {
+            for item in active {
                 if let VaultItem::Bookmark { url, folder, .. } = &item.data {
                     seen.insert((url.clone(), folder.clone()));
                 }
@@ -1353,11 +1332,8 @@ fn list_bookmarks(ctx: &mut Ctx) -> Response {
         };
     };
     let mut items = Vec::new();
-    if let Ok(summaries) = vault.list_items(false) {
-        for sum in summaries {
-            let Ok(item) = vault.get_item(sum.id) else {
-                continue;
-            };
+    if let Ok(active) = vault.active_items() {
+        for item in active {
             if let VaultItem::Bookmark {
                 title, url, folder, ..
             } = &item.data
@@ -1792,11 +1768,8 @@ fn delete_bookmarks(ctx: &mut Ctx, url: String, folder: String) -> Response {
             };
         };
         let mut hits = Vec::new();
-        if let Ok(summaries) = vault.list_items(false) {
-            for sum in summaries {
-                let Ok(item) = vault.get_item(sum.id) else {
-                    continue;
-                };
+        if let Ok(active) = vault.active_items() {
+            for item in active {
                 if let VaultItem::Bookmark {
                     url: u, folder: f, ..
                 } = &item.data

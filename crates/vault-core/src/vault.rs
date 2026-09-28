@@ -454,6 +454,13 @@ impl Vault {
         Ok(crate::security::audit(self.unlocked_items()?))
     }
 
+    /// The active (not deleted) items, borrowed. For reading many items, this
+    /// rather than `get_item` per summary, which finds each id by a linear
+    /// search and clones its plaintext.
+    pub fn active_items(&self) -> Result<impl Iterator<Item = &Item>> {
+        Ok(self.unlocked_items()?.iter().filter(|i| !i.is_deleted()))
+    }
+
     /// Fetch a full (decrypted) item by id. The returned clone carries
     /// plaintext secrets and zeroizes on drop.
     pub fn get_item(&self, id: Uuid) -> Result<Item> {
@@ -1169,6 +1176,23 @@ mod tests {
         out[..MAGIC.len()].copy_from_slice(MAGIC_V4);
         out[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&4u16.to_le_bytes());
         out
+    }
+
+    #[test]
+    fn active_items_are_the_undeleted_ones_and_need_an_unlocked_vault() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "kept", 10)).unwrap();
+        vault.upsert_item(login_item(2, "binned", 10)).unwrap();
+        vault.delete_item(Uuid::from_bytes([2; 16]), 20).unwrap();
+        let titles: Vec<&str> = vault
+            .active_items()
+            .unwrap()
+            .map(|item| item.data.title())
+            .collect();
+        assert_eq!(titles, ["kept"]);
+
+        vault.lock().unwrap();
+        assert!(matches!(vault.active_items(), Err(Error::Locked)));
     }
 
     #[test]

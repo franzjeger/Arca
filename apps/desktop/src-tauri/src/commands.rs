@@ -565,14 +565,11 @@ pub(crate) fn publish_identities(app: &tauri::AppHandle) {
             // success: the identities appear in Safari, and every one of them
             // fails to fill.
             let mirror = mirror_for_autofill(&st);
-            let Ok(summaries) = vault.list_items(false) else {
+            let Ok(active) = vault.active_items() else {
                 return;
             };
             let mut out = Vec::new();
-            for s in summaries {
-                let Ok(item) = vault.get_item(s.id) else {
-                    continue;
-                };
+            for item in active {
                 match &item.data {
                     vault_core::VaultItem::Login { url, username, .. } => {
                         let host = crate::bridge::host_of(url);
@@ -924,11 +921,8 @@ pub async fn export_logins_csv(
     wtr.write_record(["title", "url", "username", "password", "totp", "notes"])
         .map_err(|e| CmdError::new("export", &e.to_string()))?;
     let mut n = 0usize;
-    if let Ok(summaries) = vault.list_items(false) {
-        for s in summaries {
-            let Ok(item) = vault.get_item(s.id) else {
-                continue;
-            };
+    if let Ok(active) = vault.active_items() {
+        for item in active {
             if let VaultItem::Login {
                 title,
                 url,
@@ -1550,14 +1544,12 @@ pub async fn check_breaches(
             return Err(CmdError::new("locked", "Unlock the vault first."));
         }
         let mut out = Vec::new();
-        if let Ok(summaries) = vault.list_items(false) {
-            for s in summaries {
-                if let Ok(item) = vault.get_item(s.id) {
-                    if let VaultItem::Login { password, .. } = &item.data {
-                        if !password.is_empty() {
-                            let (p, suf) = vault_core::breach::prefix_suffix(password);
-                            out.push((item.id.to_string(), p, suf));
-                        }
+        if let Ok(active) = vault.active_items() {
+            for item in active {
+                if let VaultItem::Login { password, .. } = &item.data {
+                    if !password.is_empty() {
+                        let (p, suf) = vault_core::breach::prefix_suffix(password);
+                        out.push((item.id.to_string(), p, suf));
                     }
                 }
             }
@@ -2577,11 +2569,8 @@ fn do_import_bookmarks(state: &Mutex<AppState>, path: &std::path::Path) -> Resul
 
         let mut seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
-        if let Ok(summaries) = vault.list_items(false) {
-            for s in summaries {
-                let Ok(item) = vault.get_item(s.id) else {
-                    continue;
-                };
+        if let Ok(active) = vault.active_items() {
+            for item in active {
                 if let vault_core::VaultItem::Bookmark { url, folder, .. } = &item.data {
                     seen.insert((url.clone(), folder.clone()));
                 }

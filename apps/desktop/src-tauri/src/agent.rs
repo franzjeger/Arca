@@ -106,11 +106,8 @@ fn collect_identities(st: &AppState) -> Vec<(Vec<u8>, String)> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    if let Ok(summaries) = vault.list_items(false) {
-        for s in summaries {
-            let Ok(item) = vault.get_item(s.id) else {
-                continue;
-            };
+    if let Ok(active) = vault.active_items() {
+        for item in active {
             if let VaultItem::SshKey {
                 public_key,
                 comment,
@@ -129,11 +126,7 @@ fn collect_identities(st: &AppState) -> Vec<(Vec<u8>, String)> {
 /// The Ed25519 seed for the key whose public blob matches, if unlocked.
 fn seed_for(st: &AppState, key_blob: &[u8]) -> Option<Vec<u8>> {
     let vault = st.vault.as_ref().filter(|v| v.is_unlocked())?;
-    let summaries = vault.list_items(false).ok()?;
-    for s in summaries {
-        let Ok(item) = vault.get_item(s.id) else {
-            continue;
-        };
+    for item in vault.active_items().ok()? {
         if let VaultItem::SshKey {
             public_key,
             private_key,
