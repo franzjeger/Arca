@@ -48,10 +48,12 @@ under the current one. A device sorts each remote copy by them:
 - **From a later change** (`KeyRotated`): the cycle merges the copies it can
   open, keeps the newest changed copy and reports `needsPassword`; nothing is
   pushed until the user enters the new password. That copy carries the key the
-  device's own vault is sealed with, so a locked desktop opens with the new
-  password alone. A copy that does not carry that key is refused even when the
-  password opens it (`DifferentVault`): that is what a copy forged by someone
-  who knows an old password looks like.
+  device's own vault is sealed with, so a locked device opens with the new
+  password alone: the desktop from the copy its background sync keeps, an
+  iPhone by loading its vault unopened (`vault_ffi_vault_load`) and running one
+  cycle when the typed password does not open it. A copy that does not carry
+  that key is refused even when the password opens it (`DifferentVault`): that
+  is what a copy forged by someone who knows an old password looks like.
 - **From before a change** (`StaleKey`): skipped and retired with the cycle's
   inputs, like a torn upload. The device that wrote it still has those edits
   and pushes them again once it has the new password.

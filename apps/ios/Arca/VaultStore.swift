@@ -178,18 +178,23 @@ final class VaultStore {
             do {
                 return try await VaultSession.openWithMasterPassword(password)
             } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
-                // This phone learns of a password changed elsewhere from sync,
-                // which needs the vault open: the old password (or Face ID)
-                // once, then Arca asks for the new one.
-                throw WrongPassword()
+                // Perhaps the password was changed on another device: sync
+                // keeps the copy sealed under it, which opens this vault too.
+                guard let token = SyncCredentialStore.load() else { throw WrongPassword() }
+                do {
+                    guard let session = try await VaultSession.openWithChangedPassword(
+                        password, refreshToken: token)
+                    else { throw WrongPassword() }
+                    return session
+                } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
+                    throw WrongPassword()
+                }
             }
         }
     }
 
     private struct WrongPassword: LocalizedError {
-        var errorDescription: String? {
-            "Wrong master password. Changed it on another device? Unlock with the old one once, and Arca asks for the new one."
-        }
+        var errorDescription: String? { "Wrong master password." }
     }
 
     /// Unlock with the stored device key, behind Face ID / Touch ID.

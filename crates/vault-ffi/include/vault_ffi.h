@@ -1,6 +1,6 @@
 /* vault-ffi — C ABI over vault-core for native platform integrations.
  *
- * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 18). All
+ * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 19). All
  * out-buffers are heap-allocated by the library and must be released with
  * vault_ffi_free(ptr, len), which also zeroes them.
  *
@@ -74,6 +74,13 @@ int32_t vault_ffi_vault_check(const uint8_t *vault_bytes, size_t vault_len);
  * On OK, *out_handle is a handle to release with vault_ffi_vault_free. */
 int32_t vault_ffi_vault_open(const uint8_t *vault_bytes, size_t vault_len,
                              const uint8_t *device_key, size_t device_key_len,
+                             VaultHandle **out_handle);
+
+/* ADDED IN ABI v19. Load a vault WITHOUT opening it. Nothing can be read
+ * through the handle (every read returns -4) until vault_ffi_sync_adopt_password
+ * opens it with a master password changed on another device: a sync engine over
+ * this handle is how a locked client finds that change. Free it like any handle. */
+int32_t vault_ffi_vault_load(const uint8_t *vault_bytes, size_t vault_len,
                              VaultHandle **out_handle);
 
 /* ADDED IN ABI v3, purely additive.
@@ -261,8 +268,10 @@ typedef struct SyncHandle SyncHandle;
 /* An interactive sign-in in progress (holds the PKCE verifier). */
 typedef struct SyncAuth SyncAuth;
 
-/* Create a sync engine over an already-open vault. Starts DISCONNECTED: call
- * vault_ffi_sync_set_credential before vault_ffi_sync_now will do anything.
+/* Create a sync engine over an open vault, or one only loaded
+ * (vault_ffi_vault_load): its cycles push nothing, and report needsPassword
+ * when the master password was changed on another device. Starts DISCONNECTED:
+ * call vault_ffi_sync_set_credential before vault_ffi_sync_now does anything.
  *
  * The engine shares the handle's vault rather than copying it, so a merge is
  * visible to vault_ffi_identities on that handle with no reload — and the vault
@@ -310,7 +319,8 @@ int32_t vault_ffi_sync_now(SyncHandle *handle, uint8_t **out_vault_bytes,
 
 /* Take on a master password change made on another device (ABI v18): the
  * answer to needsPassword, with the new password. The shared vault switches to
- * the new key and merges the copy sync found; persist it like any change, with
+ * the new key and merges the copy sync found, and a vault only loaded is opened
+ * by it (v19); persist it like any change, with
  * vault_ffi_merge_and_serialize under the vault lock. Quick unlock wrapped the
  * old key and is gone: re-enable it if it was on. Returns 0; -7 when the
  * password does not open the changed copy; -11 when it opens one that is not

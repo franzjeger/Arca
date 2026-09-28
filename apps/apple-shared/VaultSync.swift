@@ -19,6 +19,20 @@ import AuthenticationServices
 
 private let syncLog = Logger(subsystem: "no.sybr.vault", category: "sync")
 
+/// Why a password that does not open this phone's vault was not tried as one
+/// changed on another device.
+enum ChangedPasswordError: LocalizedError {
+    /// Sync could not say whether the password changed: offline, or signed out.
+    case unchecked(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unchecked(let reason):
+            "Wrong master password — or it was changed on another device, and Arca couldn't check (\(reason))."
+        }
+    }
+}
+
 enum SyncError: Error {
     case ffi(code: Int32, operation: String)
     case decode
@@ -189,6 +203,35 @@ final class VaultSync: @unchecked Sendable {
 }
 
 extension VaultSession {
+    /// Open the vault with a master password changed on another device.
+    ///
+    /// A locked phone cannot know of the change: sync finds it, and sync needs
+    /// a vault to run over. So load the vault without opening it, run one
+    /// cycle, and if sync found a copy sealed under a new password, take it on
+    /// with `password`. That copy carries the key this vault is sealed with,
+    /// so the new password alone opens both. Face ID wrapped the old key; if it
+    /// was on, a new device key wraps the new one, which needs no prompt.
+    ///
+    /// Network-bound. Returns nil when sync finds no such change, which means
+    /// the password is simply wrong; throws `ChangedPasswordError.unchecked`
+    /// when the cycle could not tell.
+    static func openWithChangedPassword(
+        _ password: String, refreshToken: String
+    ) async throws -> VaultSession? {
+        let session = try await loadLocked()
+        let hadQuickUnlock = await session.hasDeviceUnlock()
+        let sync = try await session.makeSync()
+        try await sync.connect(refreshToken: refreshToken, account: nil)
+        let status = try await sync.syncNow()
+        guard status.needsPassword == true else {
+            if let reason = status.lastError { throw ChangedPasswordError.unchecked(reason) }
+            return nil
+        }
+        try await sync.adoptPassword(password)
+        if hadQuickUnlock { try? await session.enableDeviceUnlock() }
+        return session
+    }
+
     /// A sync engine over this session's vault.
     func makeSync() async throws -> VaultSync {
         try await Self.runSync {

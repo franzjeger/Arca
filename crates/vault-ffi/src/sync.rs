@@ -194,15 +194,17 @@ fn status_json(handle: &SyncHandle, merged: bool) -> Vec<u8> {
 // Engine lifecycle
 // ---------------------------------------------------------------------------
 
-/// Create a sync engine over an already-open vault.
+/// Create a sync engine over a vault handle: an open one, or one only loaded
+/// (`vault_ffi_vault_load`), whose cycles push nothing and report
+/// `needsPassword` when the master password was changed on another device.
 ///
 /// Starts **disconnected**: call [`vault_ffi_sync_set_credential`] with a
 /// refresh token before [`vault_ffi_sync_now`] will do anything. The vault
 /// handle may be freed while this handle lives — they share the vault.
 ///
 /// # Safety
-/// `vault` must be a live handle from `vault_ffi_vault_open*`; `out_handle`
-/// must be writable.
+/// `vault` must be a live handle from `vault_ffi_vault_open*` or
+/// `vault_ffi_vault_load`; `out_handle` must be writable.
 #[no_mangle]
 pub unsafe extern "C" fn vault_ffi_sync_new(
     vault: *mut VaultHandle,
@@ -419,9 +421,11 @@ pub unsafe extern "C" fn vault_ffi_sync_now(
 /// answer to a status with `needsPassword`, where `password` is the new one.
 ///
 /// The shared vault switches to the changed key and merges the copy sync
-/// found. Persist it as after any other change: `vault_ffi_merge_and_serialize`
-/// under the vault lock. Quick unlock wrapped the old key and is gone, so a
-/// client that had it re-enables it with `vault_ffi_enable_device_unlock`.
+/// found. A vault only loaded (`vault_ffi_vault_load`) is opened by it: the
+/// copy carries the key the vault is sealed with. Persist the result as after
+/// any other change: `vault_ffi_merge_and_serialize` under the vault lock.
+/// Quick unlock wrapped the old key and is gone, so a client that had it
+/// re-enables it with `vault_ffi_enable_device_unlock`.
 ///
 /// Returns `OK`; `ERR_DECRYPT` when the password does not open the changed
 /// copy; `ERR_DIFFERENT_VAULT` when it opens one that is not this vault's (a

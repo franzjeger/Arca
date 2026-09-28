@@ -82,11 +82,13 @@ enum VaultShared {
     /// it and every phone edit destroyed the code; v17 did the same for notes,
     /// which the phone's login editor never shows; v18 gave every master
     /// password change a new vault key, with `vault_ffi_sync_adopt_password`
-    /// for taking on one made on another device.
+    /// for taking on one made on another device; v19 added
+    /// `vault_ffi_vault_load`, so a locked phone can take that change on with
+    /// the new password alone.
     /// Bump this in the SAME commit that bumps `ABI_VERSION`: nothing compiles
     /// against it, so a stale value is only ever caught at runtime, by this
     /// guard, on a device.
-    static let requiredAbiVersion: Int32 = 18
+    static let requiredAbiVersion: Int32 = 19
 
     // MARK: Password generation
 
@@ -705,6 +707,25 @@ final class VaultSession: @unchecked Sendable {
             }
             guard code == VaultFFICode.ok, let handle else {
                 throw VaultError.ffi(code: code, operation: "vault_open_password")
+            }
+            return VaultSession(handle: handle)
+        }
+    }
+
+    /// The shared vault, loaded but NOT open: nothing can be read through it
+    /// until a master password changed on another device opens it (see
+    /// `openWithChangedPassword`). Only for that.
+    static func loadLocked() async throws -> VaultSession {
+        try await Self.run {
+            try Self.checkAbi()
+            let vaultBytes = try VaultShared.loadVault()
+            var handle: OpaquePointer?
+            let code = vaultBytes.withUnsafeBytes { vault in
+                vault_ffi_vault_load(
+                    vault.bindMemory(to: UInt8.self).baseAddress, vault.count, &handle)
+            }
+            guard code == VaultFFICode.ok, let handle else {
+                throw VaultError.ffi(code: code, operation: "vault_load")
             }
             return VaultSession(handle: handle)
         }

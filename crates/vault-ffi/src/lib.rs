@@ -95,7 +95,11 @@ pub mod sync;
 /// file sealed after a change this vault has not taken on, and
 /// `ERR_DIFFERENT_VAULT` for a password that opens a file that is not this
 /// vault's. A merge skips a copy sealed before a change instead of failing.
-pub const ABI_VERSION: i32 = 18;
+///
+/// v19 adds `vault_ffi_vault_load`, a handle to a vault that is not open yet,
+/// so a phone that is still locked can sync, find a master password changed on
+/// another device, and open with that password alone.
+pub const ABI_VERSION: i32 = 19;
 
 // Return codes.
 pub(crate) const OK: i32 = 0;
@@ -867,6 +871,41 @@ pub unsafe extern "C" fn vault_ffi_vault_open(
         Ok(vault)
     });
     match opened {
+        Ok(vault) => {
+            *out_handle = Box::into_raw(Box::new(VaultHandle {
+                vault: Arc::new(Mutex::new(vault)),
+            }));
+            OK
+        }
+        Err(code) => code,
+    }
+}
+
+/// Load a vault from its raw file bytes WITHOUT opening it (ABI v19).
+///
+/// Nothing can be read through the handle until something opens it, and only
+/// one thing does: [`sync::vault_ffi_sync_adopt_password`], which takes on a
+/// master password changed on another device. That is what this is for. A
+/// phone that is locked cannot learn of the change any other way, because the
+/// sync engine that finds it needs a handle to run over; with this one, the
+/// new password alone opens the vault. Every read on a handle that is still
+/// locked returns `ERR_LOCKED`.
+///
+/// # Safety
+/// `vault_bytes` must point to a readable buffer of `vault_len` bytes;
+/// `out_handle` must be a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_vault_load(
+    vault_bytes: *const u8,
+    vault_len: usize,
+    out_handle: *mut *mut VaultHandle,
+) -> i32 {
+    if vault_bytes.is_null() || out_handle.is_null() {
+        return ERR_NULL_ARG;
+    }
+    *out_handle = std::ptr::null_mut();
+    let bytes = slice::from_raw_parts(vault_bytes, vault_len);
+    match guard_result(|| Vault::from_bytes(bytes)) {
         Ok(vault) => {
             *out_handle = Box::into_raw(Box::new(VaultHandle {
                 vault: Arc::new(Mutex::new(vault)),
@@ -2308,8 +2347,47 @@ mod tests {
     // Pinned deliberately: clients gate features on this number, so a bump has
     // to be a conscious edit here, not a side effect.
     #[test]
-    fn abi_version_is_18() {
-        assert_eq!(vault_ffi_abi_version(), 18);
+    fn abi_version_is_19() {
+        assert_eq!(vault_ffi_abi_version(), 19);
+    }
+
+    /// A loaded handle is a vault not yet open: it answers what the header
+    /// says, and every read of the items is refused until something opens it.
+    #[test]
+    fn a_loaded_vault_reads_nothing_until_it_is_opened() {
+        let mut params = vault_core::KdfParams::new_default().unwrap();
+        params.m_cost_kib = 256;
+        params.t_cost = 1;
+        let mut vault = Vault::create("pw", params).unwrap();
+        vault
+            .enable_device_unlock(&SymmetricKey::generate().unwrap())
+            .unwrap();
+        let bytes = vault.to_bytes().unwrap();
+
+        let mut handle: *mut VaultHandle = ptr::null_mut();
+        let loaded = unsafe { vault_ffi_vault_load(bytes.as_ptr(), bytes.len(), &mut handle) };
+        assert_eq!(loaded, OK);
+        assert_eq!(unsafe { vault_ffi_has_device_unlock(handle) }, 1);
+        let (mut out, mut len) = (ptr::null_mut(), 0usize);
+        assert_eq!(
+            unsafe { vault_ffi_items(handle, &mut out, &mut len) },
+            ERR_LOCKED
+        );
+        assert_eq!(
+            unsafe { vault_ffi_identities(handle, &mut out, &mut len) },
+            ERR_LOCKED
+        );
+        let merged =
+            unsafe { vault_ffi_merge_and_serialize(handle, ptr::null(), 0, &mut out, &mut len) };
+        assert_eq!(merged, ERR_LOCKED);
+        assert!(out.is_null());
+        unsafe { vault_ffi_vault_free(handle) };
+
+        let not_a_vault = b"not a vault";
+        let refused =
+            unsafe { vault_ffi_vault_load(not_a_vault.as_ptr(), not_a_vault.len(), &mut handle) };
+        assert_ne!(refused, OK);
+        assert!(handle.is_null());
     }
 
     // ---- every-kind surface (ABI v7) -------------------------------------
