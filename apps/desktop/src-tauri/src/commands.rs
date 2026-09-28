@@ -698,8 +698,7 @@ pub fn unlock(
     master_password: String,
 ) -> Result<(), CmdError> {
     do_unlock(state.inner(), &master_password)?;
-    publish_identities(&app);
-    kick_sync(&app);
+    crate::session::unlocked(&app);
     Ok(())
 }
 
@@ -796,8 +795,7 @@ pub async fn quick_unlock(app: tauri::AppHandle, state: St<'_>) -> Result<(), Cm
     }
     st.touch();
     drop(st);
-    publish_identities(&app);
-    kick_sync(&app);
+    crate::session::unlocked(&app);
     Ok(())
 }
 
@@ -811,9 +809,7 @@ pub async fn quick_unlock(app: tauri::AppHandle) -> Result<(), CmdError> {
     })
     .await
     .map_err(|_| CmdError::new("internal", "Unlock worker stopped."))??;
-    let _ = app.emit("vault-unlocked", ());
-    publish_identities(&app);
-    kick_sync(&app);
+    crate::session::unlocked(&app);
     Ok(())
 }
 

@@ -15,6 +15,7 @@ mod keyfile_unlock;
 mod protected_unlock;
 mod reauth;
 mod related_origins;
+mod session;
 mod state;
 mod sync;
 

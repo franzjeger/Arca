@@ -837,7 +837,7 @@ fn handle_request(
         && crate::keyfile_unlock::unlock_if_locked(state)
     {
         if let Some(app) = app {
-            let _ = app.emit("vault-unlocked", ());
+            crate::session::unlocked(app);
         }
     }
     let resp = dispatch(req, state, token, session, app, consent);
@@ -1782,7 +1782,7 @@ fn dispatch(
             // dialog, no window. That is what the key is for.
             if crate::keyfile_unlock::unlock_if_locked(state) {
                 if let Some(app) = app {
-                    let _ = app.emit("vault-unlocked", ());
+                    crate::session::unlocked(app);
                 }
                 return Response::UnlockRequested;
             }
@@ -1847,7 +1847,7 @@ fn dispatch(
                     // without this it would sit there claiming to be locked while
                     // the vault is open.
                     if let Some(app) = app {
-                        let _ = app.emit("vault-unlocked", ());
+                        crate::session::unlocked(app);
                     }
                 } else {
                     // Nothing this side can do opens it: fall back to the master
