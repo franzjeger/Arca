@@ -867,6 +867,19 @@ fn browser_use_resets_the_idle_timer_but_polling_does_not() {
     }
 }
 
+/// Checking whether the app is up must not be what opens the vault: with a
+/// USB key inserted, `arca status` used to report "unlocked" because asking
+/// had unlocked it.
+#[test]
+fn only_a_match_for_a_site_may_open_the_vault() {
+    let status = Request::Match { url: String::new() };
+    assert!(!status.wants_vault_open());
+    let focus = Request::Match {
+        url: "https://github.com/login".into(),
+    };
+    assert!(focus.wants_vault_open());
+}
+
 /// Generation must work with the vault LOCKED.
 ///
 /// Every other bridge request reads or writes the vault and is right to

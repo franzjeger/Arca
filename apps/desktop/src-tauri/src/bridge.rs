@@ -296,19 +296,21 @@ impl Request {
     /// Requests the USB key may open a locked vault for: the ones a person is
     /// directly behind. `Match` is included because it is what puts
     /// credentials in the picker when a field takes focus — without it the
-    /// stick would only help after a failed fill.
+    /// stick would only help after a failed fill. A `Match` with no URL names
+    /// no site: it is `arca status`, or a native host before protocol 3
+    /// checking the app is up, and asking must not be what unlocks.
     fn wants_vault_open(&self) -> bool {
-        matches!(
-            self,
-            Request::Match { .. }
-                | Request::Fill { .. }
-                | Request::PasskeyCreate { .. }
-                | Request::PasskeyGet { .. }
-                | Request::SaveLogin { .. }
-                | Request::CreateLogin { .. }
-                | Request::ReadPassword { .. }
-                | Request::DeleteItem { .. }
-        )
+        match self {
+            Request::Match { url } => !url.is_empty(),
+            Request::Fill { .. }
+            | Request::PasskeyCreate { .. }
+            | Request::PasskeyGet { .. }
+            | Request::SaveLogin { .. }
+            | Request::CreateLogin { .. }
+            | Request::ReadPassword { .. }
+            | Request::DeleteItem { .. } => true,
+            _ => false,
+        }
     }
 
     /// Whether this request is the user deciding to use the vault, as opposed
