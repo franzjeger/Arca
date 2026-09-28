@@ -15,7 +15,6 @@
 //!   * Nothing here logs secrets.
 
 use std::sync::Mutex;
-#[cfg(target_os = "macos")]
 use tauri::Manager;
 
 use serde::{Deserialize, Serialize};
@@ -536,7 +535,6 @@ fn do_create_vault(state: &Mutex<AppState>, master_password: &str) -> Result<(),
 /// On its own thread: the store call blocks, and nobody should wait behind it
 /// to see their own vault.
 pub(crate) fn publish_identities(app: &tauri::AppHandle) {
-    use tauri::Manager;
     let app = app.clone();
     std::thread::spawn(move || {
         let (identities, mirror) = {
