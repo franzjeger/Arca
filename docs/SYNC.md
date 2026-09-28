@@ -78,6 +78,45 @@ process stops before another cycle. The next cycle merges any concurrent
 copies. Listings consume every page; a peer retiring an input during a cycle
 causes a retry.
 
+## When Drive goes back in time
+
+Whoever controls the Google account (Google, or someone who got into it) can
+show any copy Drive has ever held, and hide the newest. They cannot forge a
+copy: every one is sealed. So every V7 copy carries, in its sealed header part,
+the devices that push the vault: an id each picks at random, the name the user
+knows it by, how many copies it has pushed, and when it last did. Only holders
+of the vault key read that list. Copies merge upwards (per device, the entry
+that knows of more uploads), so what Drive holds together accounts for every
+upload a device has already seen, unless someone took the newer copies away.
+
+A device checks that whenever it pulls everything. A cycle that finds its own
+last upload still in place skips the download, and has nothing to check: that
+copy accounts for everything the device knew when it pushed it. Otherwise it
+compares every copy sealed with its current key, together, with what it knows
+itself, leaving itself out, since its own count runs ahead whenever an upload
+fails. A device that is away and pushes a copy knowing only of the others' older
+uploads is no sign of anything; only the union counts. Devices whose uploads
+Drive no longer accounts for are reported (`rolledBack`) until the user has
+seen it: the desktop's status bar and the iPhone's banner name them. Nothing
+waits on the user: the push that follows puts Drive right. An empty Drive, or
+one holding no copy of this vault, tells nothing.
+
+Only uploads sealed with the current key are judged. Around a password change,
+copies sealed with the old key are left out on purpose (`StaleKey`), so each
+device's entry also says which key its latest upload was sealed with. Right
+after a change nothing on Drive is sealed with the new key yet, which is how it
+should be; once a device has pushed with it, Drive holding only copies from
+before the change has lost that upload.
+
+The desktop keeps its id in a `device-id` file beside the vault, which never
+syncs, and uses the computer's name. An iPhone keeps its id in the app's
+defaults, so a reinstall counts as a new device. Both list every device and
+when it last pushed: in Settings on the desktop, under Options → Synced devices
+on iOS. That list is where the one case this check cannot see shows up: uploads
+Drive withheld from the other devices from the start, before any of them saw
+one, look just like a device that has not synced. There it is a phone that
+"synced 3 days ago" when it was used this morning.
+
 ## Built (foundation)
 
 Desktop 0.6.0 exposes unresolved conflicts through the main status bar. New

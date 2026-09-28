@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Sync: whoever controls the Google account could show an older copy of the
+  vault and hide the newer ones, and every device would quietly carry on from
+  it. Every copy now records, sealed, how many copies each device has pushed.
+  A device that has seen newer changes than Drive still accounts for says
+  whose they were (desktop status bar, iPhone banner) and puts them back.
+  Settings on the desktop and Options → Synced devices on iOS list every
+  device that syncs the vault and when each last did. iOS needs C ABI v20.
 - Security: changing the master password now replaces the vault key. It used
   to rewrap the same key, so an old password plus an old copy of the file
   opened everything written afterwards, forever. Other devices ask for the new
