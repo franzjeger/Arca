@@ -20,6 +20,9 @@ pub struct SyncStatus {
     pub account: Option<String>,
     pub last_sync_unix: Option<u64>,
     pub last_error: Option<String>,
+    /// The master password was changed on another device, and this one needs
+    /// it before it syncs again; see [`SyncEngine::rotated_copy`].
+    pub needs_password: bool,
 }
 
 #[derive(Default)]
@@ -27,6 +30,9 @@ struct EngineState {
     account: Option<String>,
     last_sync_unix: Option<u64>,
     last_error: Option<String>,
+    /// The newest remote copy from a master password change this device has
+    /// not taken on, from the last cycle.
+    rotated: Option<Vec<u8>>,
     /// Checksum of remote content we last integrated OR produced ourselves.
     /// Set **only** from our own upload response — see the crate docs.
     last_remote_checksum: Option<String>,
@@ -103,7 +109,25 @@ impl SyncEngine {
             account: guard.as_ref().and_then(|g| g.account.clone()),
             last_sync_unix: guard.as_ref().and_then(|g| g.last_sync_unix),
             last_error: guard.as_ref().and_then(|g| g.last_error.clone()),
+            needs_password: guard.as_ref().is_some_and(|g| g.rotated.is_some()),
         }
+    }
+
+    /// The remote copy sealed by a master password change this device has not
+    /// taken on, while sync is waiting for it. Give it to
+    /// `Vault::adopt_rotation` with the new password, save the vault, then
+    /// call [`SyncEngine::rotation_adopted`].
+    pub fn rotated_copy(&self) -> Option<Vec<u8>> {
+        self.state.lock().ok()?.rotated.clone()
+    }
+
+    /// The vault took the change on: stop asking, and push on the next cycle.
+    pub fn rotation_adopted(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.rotated = None;
+            s.last_error = None;
+        }
+        self.mark_dirty();
     }
 
     /// Run one sync now. Returns whether remote changes were merged.
@@ -130,6 +154,9 @@ impl SyncEngine {
 
         match &result {
             Ok(merged) => {
+                if let Ok(mut s) = self.state.lock() {
+                    s.rotated = None;
+                }
                 if *merged {
                     self.observer.merged();
                 }
@@ -240,7 +267,12 @@ impl SyncEngine {
         let out_bytes = match self.local.merge_and_serialize(to_merge) {
             Ok(bytes) => bytes,
             Err(LocalError::Locked) => return Ok(Pushed::Deferred),
-            Err(e) => return Err(CycleError::Other(e.to_string())),
+            Err(e) => {
+                if let (LocalError::KeyRotated(copy), Ok(mut s)) = (&e, self.state.lock()) {
+                    s.rotated = Some(copy.clone());
+                }
+                return Err(CycleError::Other(e.to_string()));
+            }
         };
 
         // Preflight: if the remote moved since our download, re-run the whole
@@ -300,6 +332,7 @@ enum Pushed {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use vault_core::{Item, KdfAlgorithm, KdfParams, Vault, VaultItem};
 
     /// An in-memory remote. The whole reason the engine was extracted: these
     /// decisions used to be reachable only through a Google account.
@@ -431,8 +464,149 @@ mod tests {
         }
     }
 
-    fn engine(remote: Arc<FakeRemote>, local: Arc<FakeLocal>) -> SyncEngine {
+    fn engine(remote: Arc<FakeRemote>, local: Arc<impl LocalVault + 'static>) -> SyncEngine {
         SyncEngine::new(remote, local, Arc::new(crate::SilentObserver))
+    }
+
+    /// A local side backed by a real vault, handled the way the platforms do.
+    struct RealLocal(Mutex<Vault>);
+
+    impl LocalVault for RealLocal {
+        fn merge_and_serialize(&self, remotes: &[Vec<u8>]) -> Result<Vec<u8>, LocalError> {
+            let mut vault = self.0.lock().unwrap();
+            if !vault.is_unlocked() {
+                return Err(crate::locked(&vault, remotes));
+            }
+            crate::merge_remotes(&mut vault, remotes)?;
+            vault
+                .to_bytes()
+                .map_err(|e| LocalError::Save(e.to_string()))
+        }
+    }
+
+    impl RealLocal {
+        fn new(vault: Vault) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(vault)))
+        }
+
+        fn titles(&self) -> Vec<String> {
+            titles(&self.0.lock().unwrap())
+        }
+    }
+
+    fn cheap_vault() -> Vault {
+        Vault::create(
+            "pw",
+            KdfParams {
+                algorithm: KdfAlgorithm::Argon2id,
+                m_cost_kib: 256,
+                t_cost: 1,
+                p_cost: 1,
+                salt: vec![7; 32],
+            },
+        )
+        .unwrap()
+    }
+
+    fn open(file: &[u8], password: &str) -> Vault {
+        let mut vault = Vault::from_bytes(file).unwrap();
+        vault.unlock(password).unwrap();
+        vault
+    }
+
+    fn with_note(mut vault: Vault, title: &str) -> Vault {
+        let note = VaultItem::SecureNote {
+            title: title.into(),
+            body: "test data".into(),
+        };
+        vault.upsert_item(Item::new(note, 1)).unwrap();
+        vault
+    }
+
+    fn titles(vault: &Vault) -> Vec<String> {
+        let mut titles: Vec<_> = vault
+            .list_items(false)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    /// The master password was changed on the laptop. The phone pushes nothing
+    /// until it has the new password, then carries on, its own edits intact.
+    #[test]
+    fn a_password_change_elsewhere_waits_for_the_new_password() {
+        let phone = with_note(cheap_vault(), "made on the phone");
+        let mut laptop = open(&phone.to_bytes().unwrap(), "pw");
+        laptop.change_master_password("new").unwrap();
+        let rotated = laptop.to_bytes().unwrap();
+        let remote = Arc::new(FakeRemote::with_file("rotated", "md5-rotated", &rotated));
+        let local = RealLocal::new(phone);
+        let sync = engine(remote.clone(), local.clone());
+
+        assert!(sync.sync_now().is_err());
+        assert!(sync.status().needs_password);
+        assert_eq!(remote.uploads(), 0);
+
+        let copy = sync.rotated_copy().unwrap();
+        local
+            .0
+            .lock()
+            .unwrap()
+            .adopt_rotation(&copy, "new")
+            .unwrap();
+        sync.rotation_adopted();
+        assert!(!sync.status().needs_password);
+        assert_eq!(sync.sync_now(), Ok(true));
+        assert_eq!(remote.files.lock().unwrap().len(), 1, "input retired");
+
+        let pushed = remote.download(&remote.files.lock().unwrap()[0].id);
+        laptop.merge_remote(&pushed.unwrap()).unwrap();
+        assert_eq!(titles(&laptop), ["made on the phone"]);
+    }
+
+    /// A locked phone cannot merge anything, but it can still see that the
+    /// password changed, so the lock screen can ask for the new one.
+    #[test]
+    fn a_locked_device_learns_of_a_password_change_too() {
+        let mut laptop = cheap_vault();
+        let base = laptop.to_bytes().unwrap();
+        laptop.change_master_password("new").unwrap();
+        let remote = Arc::new(FakeRemote::with_file(
+            "rotated",
+            "md5-rotated",
+            &laptop.to_bytes().unwrap(),
+        ));
+        let sync = engine(remote, RealLocal::new(Vault::from_bytes(&base).unwrap()));
+
+        assert!(sync.sync_now().is_err());
+        assert!(sync.status().needs_password);
+        assert!(sync.rotated_copy().is_some());
+    }
+
+    /// A copy the phone pushed before it learned of the change is retired, not
+    /// merged: whoever knew the old password could have written it.
+    #[test]
+    fn a_copy_from_before_a_password_change_is_retired_not_merged() {
+        let mut laptop = cheap_vault();
+        let phone = with_note(open(&laptop.to_bytes().unwrap(), "pw"), "pushed too late");
+        laptop.change_master_password("new").unwrap();
+        let remote = Arc::new(FakeRemote::with_file(
+            "stale",
+            "md5-stale",
+            &phone.to_bytes().unwrap(),
+        ));
+        let local = RealLocal::new(laptop);
+        let sync = engine(remote.clone(), local.clone());
+
+        assert!(sync.sync_now().is_ok());
+        assert!(!sync.status().needs_password);
+        assert!(local.titles().is_empty());
+        let files = remote.files.lock().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_ne!(files[0].id, "stale");
     }
 
     #[test]
@@ -756,52 +930,13 @@ mod tests {
 
     #[test]
     fn simultaneous_uploads_preserve_both_devices_edits() {
-        use vault_core::{Item, KdfAlgorithm, KdfParams, Vault, VaultItem};
-        struct RealLocal(Mutex<Vault>);
-        impl LocalVault for RealLocal {
-            fn merge_and_serialize(&self, remotes: &[Vec<u8>]) -> Result<Vec<u8>, LocalError> {
-                let mut vault = self.0.lock().unwrap();
-                crate::merge_remotes(&mut vault, remotes)?;
-                vault
-                    .to_bytes()
-                    .map_err(|e| LocalError::Save(e.to_string()))
-            }
-        }
-        let base = Vault::create(
-            "pw",
-            KdfParams {
-                algorithm: KdfAlgorithm::Argon2id,
-                m_cost_kib: 256,
-                t_cost: 1,
-                p_cost: 1,
-                salt: vec![7; 32],
-            },
-        )
-        .unwrap()
-        .to_bytes()
-        .unwrap();
+        let base = cheap_vault().to_bytes().unwrap();
         let mut remote = FakeRemote::with_file("base", "base-checksum", &base);
         remote.upload_barrier = Some(Arc::new(std::sync::Barrier::new(2)));
         let remote = Arc::new(remote);
         let device = |title: &str| {
-            let mut vault = Vault::from_bytes(&base).unwrap();
-            vault.unlock("pw").unwrap();
-            vault
-                .upsert_item(Item::new(
-                    VaultItem::SecureNote {
-                        title: title.into(),
-                        body: "test data".into(),
-                    },
-                    1,
-                ))
-                .unwrap();
-            let local = Arc::new(RealLocal(Mutex::new(vault)));
-            let engine = Arc::new(SyncEngine::new(
-                remote.clone(),
-                local.clone(),
-                Arc::new(crate::SilentObserver),
-            ));
-            (local, engine)
+            let local = RealLocal::new(with_note(open(&base, "pw"), title));
+            (local.clone(), Arc::new(engine(remote.clone(), local)))
         };
         let (local_a, a) = device("desktop edit");
         let (_, b) = device("phone edit");
@@ -815,16 +950,6 @@ mod tests {
         assert_eq!(remote.files.lock().unwrap().len(), 2);
         a.sync_now().unwrap();
         assert_eq!(remote.files.lock().unwrap().len(), 1);
-        let mut titles: Vec<_> = local_a
-            .0
-            .lock()
-            .unwrap()
-            .list_items(false)
-            .unwrap()
-            .into_iter()
-            .map(|item| item.title)
-            .collect();
-        titles.sort();
-        assert_eq!(titles, ["desktop edit", "phone edit"]);
+        assert_eq!(local_a.titles(), ["desktop edit", "phone edit"]);
     }
 }

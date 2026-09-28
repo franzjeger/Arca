@@ -45,7 +45,10 @@
 //!   whole cycle re-runs rather than overwriting what we have not merged;
 //! * every push creates an immutable remote file; only inputs already merged
 //!   into that successful upload are deleted, so concurrent pushes survive;
-//! * a remote written by a NEWER format is refused, never "repaired".
+//! * a remote written by a NEWER format is refused, never "repaired";
+//! * a remote sealed after a master password change this device has not taken
+//!   on stops the cycle until the user enters the new password, and one sealed
+//!   before a change is replaced, never merged.
 
 #![forbid(unsafe_code)]
 
@@ -55,6 +58,8 @@ mod http;
 pub mod oauth;
 
 use std::fmt;
+
+use vault_core::Vault;
 
 pub use engine::{SyncEngine, SyncStatus};
 
@@ -103,6 +108,10 @@ pub enum LocalError {
     /// The remote was written by a newer version of the app. Refused on purpose
     /// — merging a format we do not understand is how a vault gets corrupted.
     RemoteTooNew,
+    /// A remote copy was sealed after a master password change this device
+    /// has not taken on. Carries the newest such copy, which the engine keeps
+    /// for `Vault::adopt_rotation` (see [`SyncEngine::rotated_copy`]).
+    KeyRotated(Vec<u8>),
     /// A foreign vault (different key), or any other refusal from the core.
     Refused(String),
     /// The merged result could not be persisted locally.
@@ -116,6 +125,10 @@ impl fmt::Display for LocalError {
             LocalError::RemoteTooNew => write!(
                 f,
                 "the synced vault was written by a newer Arca — update this app"
+            ),
+            LocalError::KeyRotated(_) => write!(
+                f,
+                "the master password was changed on another device — enter the new one to keep syncing"
             ),
             LocalError::Refused(m) => write!(f, "remote vault refused: {m}"),
             LocalError::Save(m) => write!(f, "could not save locally: {m}"),
@@ -193,28 +206,59 @@ impl SyncObserver for SilentObserver {}
 ///
 /// * a torn upload (`Format`) is **skipped**, and ours replaces it — half a
 ///   file, with nothing in it authenticated, is not content worth preserving;
+/// * so is a copy sealed before a master password change (`StaleKey`): anyone
+///   who knew the old password could have written it, and the device that did
+///   brings its edits back once it has the new password;
+/// * a copy sealed after a change this device has not taken on stops the
+///   cycle with the newest such copy ([`LocalError::KeyRotated`]), once the
+///   copies we can open have merged;
 /// * a newer format is **refused**, because merging a schema we do not
 ///   understand is how a vault loses items. That includes an authentic file
 ///   whose items this build cannot decode;
 /// * anything else — a foreign vault sealed with a different key above all — is
 ///   refused too. Overwriting it would destroy someone's data.
-pub fn merge_remotes(vault: &mut vault_core::Vault, remotes: &[Vec<u8>]) -> Result<(), LocalError> {
+pub fn merge_remotes(vault: &mut Vault, remotes: &[Vec<u8>]) -> Result<(), LocalError> {
+    let mut rotated = false;
     for bytes in remotes {
         match vault.merge_remote(bytes) {
             Ok(()) => {}
-            Err(vault_core::Error::Format) => {}
+            Err(vault_core::Error::Format | vault_core::Error::StaleKey) => {}
+            Err(vault_core::Error::KeyRotated) => rotated = true,
             Err(vault_core::Error::UnsupportedVersion) => return Err(LocalError::RemoteTooNew),
             Err(e) => return Err(LocalError::Refused(e.to_string())),
         }
     }
-    Ok(())
+    match newest_rotation(vault, remotes) {
+        Some(copy) if rotated => Err(LocalError::KeyRotated(copy)),
+        _ => Ok(()),
+    }
+}
+
+/// What a platform's [`LocalVault`] reports while its vault is locked:
+/// [`LocalError::KeyRotated`] when a remote copy comes from a master password
+/// change this vault has not taken on, so the lock screen can ask for the new
+/// password, and [`LocalError::Locked`] otherwise.
+pub fn locked(vault: &Vault, remotes: &[Vec<u8>]) -> LocalError {
+    newest_rotation(vault, remotes).map_or(LocalError::Locked, LocalError::KeyRotated)
+}
+
+/// The remote copy from the latest password change `vault` has not taken on.
+/// Only the latest matters: its password is the one the user knows, and it
+/// carries the keys of every change before it.
+fn newest_rotation(vault: &Vault, remotes: &[Vec<u8>]) -> Option<Vec<u8>> {
+    let ours = vault.header().key_epoch;
+    remotes
+        .iter()
+        .filter_map(|bytes| Some((Vault::from_bytes(bytes).ok()?.header().key_epoch, bytes)))
+        .filter(|(epoch, _)| *epoch > ours)
+        .max_by_key(|(epoch, _)| *epoch)
+        .map(|(_, bytes)| bytes.clone())
 }
 
 #[cfg(test)]
 mod merge_remotes_tests {
     use super::*;
     use vault_core::header::{KdfAlgorithm, KdfParams};
-    use vault_core::Vault;
 
     fn cheap_vault() -> Vault {
         // A deliberately weak KDF: these tests are about how a remote is
@@ -252,5 +296,35 @@ mod merge_remotes_tests {
         assert!(merge_remotes(&mut vault, &[b"garbage".to_vec()]).is_ok());
         let ours = vault.to_bytes().unwrap();
         assert!(merge_remotes(&mut vault, &[ours[..ours.len() - 10].to_vec()]).is_ok());
+    }
+
+    /// After a password change elsewhere, the copies we can open still merge,
+    /// the cycle asks for the password with the newest changed copy, and a
+    /// copy from before the change is dropped rather than merged or refused.
+    #[test]
+    fn a_password_change_elsewhere_asks_for_the_newest_copy() {
+        let mut here = cheap_vault();
+        let base = here.to_bytes().unwrap();
+        let mut there = Vault::from_bytes(&base).unwrap();
+        there.unlock("pw").unwrap();
+        there.change_master_password("new").unwrap();
+        let rotated = there.to_bytes().unwrap();
+
+        let shut = Vault::from_bytes(&base).unwrap();
+        assert_eq!(
+            locked(&shut, &[base.clone(), rotated.clone()]),
+            LocalError::KeyRotated(rotated.clone())
+        );
+        assert_eq!(
+            locked(&shut, std::slice::from_ref(&base)),
+            LocalError::Locked
+        );
+
+        assert_eq!(
+            merge_remotes(&mut here, &[rotated.clone(), base.clone()]),
+            Err(LocalError::KeyRotated(rotated.clone()))
+        );
+        here.adopt_rotation(&rotated, "new").unwrap();
+        assert_eq!(merge_remotes(&mut here, &[base, rotated]), Ok(()));
     }
 }

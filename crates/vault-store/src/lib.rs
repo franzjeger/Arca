@@ -247,7 +247,10 @@ impl VaultStore {
                     // in-progress partial write. Nothing in it was
                     // authenticated, so replacing it with ours loses nothing
                     // and doesn't wedge every future save behind a bad file.
-                    Err(vault_core::Error::Format) => {}
+                    // A copy sealed with a key a password change replaced is
+                    // replaced too: like a peer's from before the change, it
+                    // is never merged (see `Vault::merge_remote`).
+                    Err(vault_core::Error::Format | vault_core::Error::StaleKey) => {}
                     // A well-formed but un-reconcilable file (a *different*
                     // vault's key, or we're locked): refuse rather than
                     // destroy a vault we can't safely merge.
@@ -292,17 +295,28 @@ impl VaultStore {
         // Stage the entire batch so corrupt/foreign input cannot partially
         // alter the live session. merge_remote authenticates every snapshot.
         let mut candidate = vault.clone();
-        for path in &paths {
-            candidate.merge_remote(&read_vault_file(path)?)?;
+        let mut imported = Vec::with_capacity(paths.len());
+        for path in paths {
+            match candidate.merge_remote(&read_vault_file(&path)?) {
+                Ok(()) => imported.push(path),
+                // Saved by an AutoFill session that opened the vault before a
+                // master password change. Nothing sealed with a replaced key
+                // is merged; it stays where it is rather than block the rest.
+                Err(vault_core::Error::StaleKey) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if imported.is_empty() {
+            return Ok(0);
         }
         self.save_synced(&mut candidate)?;
         // save_synced's mirror is best effort; acknowledgment is not.
         write_atomic(mirror, &candidate.to_bytes()?)?;
         *vault = candidate;
-        for path in &paths {
+        for path in &imported {
             std::fs::remove_file(path)?;
         }
-        Ok(paths.len())
+        Ok(imported.len())
     }
 
     // ----- quick unlock ---------------------------------------------------
@@ -714,6 +728,29 @@ mod tests {
         };
         std::fs::write(store.path(), &foreign).unwrap();
         assert!(store.save_synced(&mut v).is_err());
+    }
+
+    /// Written by a process that had not seen the password change: replaced,
+    /// like any copy sealed with a key the change replaced, never merged.
+    #[test]
+    fn save_synced_replaces_a_copy_from_before_a_password_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VaultStore::new(dir.path().join("v.vault"), "s", "a");
+        let mut v = Vault::create("pw", cheap_params()).unwrap();
+        let stale = {
+            let mut other = Vault::from_bytes(&v.to_bytes().unwrap()).unwrap();
+            other.unlock("pw").unwrap();
+            other.upsert_item(Item::new(login(), 10)).unwrap();
+            other.to_bytes().unwrap()
+        };
+        v.change_master_password("new").unwrap();
+        store.save(&v).unwrap();
+
+        std::fs::write(store.path(), &stale).unwrap();
+        assert!(!store.save_synced(&mut v).unwrap());
+        let mut reloaded = store.load().unwrap();
+        reloaded.unlock("new").unwrap();
+        assert!(reloaded.list_items(true).unwrap().is_empty());
     }
 
     #[test]
