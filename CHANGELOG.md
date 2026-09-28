@@ -10,6 +10,10 @@
   unlock or a USB key only opens authenticated files. A vault upgrades the
   next time it is unlocked with the master password. Earlier builds refuse V6
   files as newer: update every device before syncing.
+- Security: a website's password rules can no longer crash the AutoFill
+  extension. A `minlength` of 2^64-1 overflowed the generator's allocation,
+  and release builds abort on panic. Rule lengths are capped at 128 and the
+  generator refuses anything longer.
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native
