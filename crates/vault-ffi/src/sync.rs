@@ -183,6 +183,9 @@ struct StatusJson {
     /// The master password was changed on another device; sync waits for it
     /// (see [`vault_ffi_sync_adopt_password`]).
     needs_password: bool,
+    /// Devices whose latest changes the remote had lost (ABI v20), until
+    /// [`vault_ffi_sync_acknowledge_rollback`].
+    rolled_back: Vec<String>,
 }
 
 fn status_json(handle: &SyncHandle, merged: bool) -> Vec<u8> {
@@ -194,9 +197,10 @@ fn status_json(handle: &SyncHandle, merged: bool) -> Vec<u8> {
         last_error: status.last_error,
         merged,
         needs_password: status.needs_password,
+        rolled_back: status.rolled_back,
     };
-    // A status object of four scalars and two strings cannot fail to serialize;
-    // an empty object still parses on the far side if it somehow did.
+    // Scalars, strings and a list of strings cannot fail to serialize; an
+    // empty object still parses on the far side if it somehow did.
     serde_json::to_vec(&json).unwrap_or_else(|_| b"{}".to_vec())
 }
 
@@ -320,6 +324,56 @@ pub unsafe extern "C" fn vault_ffi_sync_set_credential(
         handle.engine.forget_account();
     }
     OK
+}
+
+/// Name this device (ABI v20): the id the caller keeps for this installation
+/// (a UUID string, stable across launches) and the name the user knows it by.
+/// From then on every copy it pushes records the upload, which is how other
+/// devices tell a current copy from an old one. Until it is called, uploads go
+/// unrecorded.
+///
+/// # Safety
+/// `handle` must be valid; both strings NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_sync_set_device(
+    handle: *mut SyncHandle,
+    device_id: *const c_char,
+    name: *const c_char,
+) -> i32 {
+    if handle.is_null() || device_id.is_null() || name.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let (Some(device_id), Some(name)) = (cstr(device_id), cstr(name)) else {
+        return ERR_UTF8;
+    };
+    let Ok(id) = uuid::Uuid::parse_str(device_id) else {
+        return ERR_OP_FAILED;
+    };
+    let handle = &*handle;
+    match handle.local.device.lock() {
+        Ok(mut slot) => {
+            *slot = Some(ThisDevice {
+                id,
+                name: name.to_string(),
+            });
+            OK
+        }
+        Err(_) => ERR_OP_FAILED,
+    }
+}
+
+/// The user has seen that the remote went back in time (ABI v20): clears
+/// `rolledBack` from the status.
+///
+/// # Safety
+/// `handle` must be valid or null.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_sync_acknowledge_rollback(handle: *mut SyncHandle) {
+    if handle.is_null() {
+        return;
+    }
+    let handle = &*handle;
+    let _ = catch_unwind(AssertUnwindSafe(|| handle.engine.acknowledge_rollback()));
 }
 
 /// Tell the engine local vault state changed and must be pushed next cycle.
@@ -801,6 +855,27 @@ mod tests {
         arc.lock().unwrap().adopt_rotation(&rotated, "new").unwrap();
         assert!(local.merge_and_serialize(&[before], true).is_ok());
         assert_eq!(titles(&arc), vec!["mine"]);
+    }
+
+    /// A named device records its upload in the copy it pushes, and hands
+    /// the result back to be written: the count has to survive a restart.
+    #[test]
+    fn a_named_device_records_its_uploads() {
+        let (arc, local) = shared(vault_with("mine", 1));
+        let id = uuid::Uuid::new_v4();
+        *local.device.lock().unwrap() = Some(ThisDevice {
+            id,
+            name: "iPhone".into(),
+        });
+        let push = local.merge_and_serialize(&[], true).unwrap();
+        assert!(push.behind.is_empty());
+        assert!(
+            local.pending.lock().unwrap().is_some(),
+            "the count is written"
+        );
+        let devices = arc.lock().unwrap().devices().unwrap().to_vec();
+        assert_eq!(devices.len(), 1);
+        assert_eq!((devices[0].id, devices[0].uploads), (id, 1));
     }
 
     #[test]

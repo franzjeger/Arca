@@ -12,6 +12,9 @@
 
 import Foundation
 import os
+#if canImport(UIKit)
+import UIKit
+#endif
 
 #if canImport(AuthenticationServices)
 import AuthenticationServices
@@ -90,6 +93,24 @@ final class VaultSync: @unchecked Sendable {
                 throw SyncError.ffi(code: code, operation: "sync_disconnect")
             }
         }
+    }
+
+    /// Name this device, so every copy it pushes records the upload: that is
+    /// how other devices tell a current copy from an old one.
+    func setDevice(id: UUID, name: String) async throws {
+        try await VaultSession.runSync {
+            let code = id.uuidString.withCString { id in
+                name.withCString { vault_ffi_sync_set_device(self.handle, id, $0) }
+            }
+            guard code == VaultFFICode.ok else {
+                throw SyncError.ffi(code: code, operation: "sync_set_device")
+            }
+        }
+    }
+
+    /// The user has seen that Google Drive went back in time.
+    func acknowledgeRollback() async {
+        try? await VaultSession.runSync { vault_ffi_sync_acknowledge_rollback(self.handle) }
     }
 
     /// Local changes exist and should be pushed on the next cycle.
@@ -242,6 +263,32 @@ extension VaultSession {
             }
             return VaultSync(handle: out, session: self)
         }
+    }
+}
+
+// MARK: - This device
+
+/// This installation, as the copies it pushes name it: an id kept in this
+/// app's defaults, which never sync and do not survive a reinstall (a
+/// reinstall simply counts as a new device), and the device's name.
+enum SyncDeviceIdentity {
+    private static let key = "arca.syncDeviceId"
+
+    static var id: UUID {
+        if let stored = UserDefaults.standard.string(forKey: key), let id = UUID(uuidString: stored) {
+            return id
+        }
+        let id = UUID()
+        UserDefaults.standard.set(id.uuidString, forKey: key)
+        return id
+    }
+
+    @MainActor static var name: String {
+        #if canImport(UIKit)
+        UIDevice.current.name
+        #else
+        Host.current().localizedName ?? "Mac"
+        #endif
     }
 }
 

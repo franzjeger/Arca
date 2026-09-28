@@ -84,11 +84,12 @@ enum VaultShared {
     /// password change a new vault key, with `vault_ffi_sync_adopt_password`
     /// for taking on one made on another device; v19 added
     /// `vault_ffi_vault_load`, so a locked phone can take that change on with
-    /// the new password alone.
+    /// the new password alone; v20 made every copy say how often each device
+    /// has pushed it (`vault_ffi_sync_set_device`, `vault_ffi_devices`).
     /// Bump this in the SAME commit that bumps `ABI_VERSION`: nothing compiles
     /// against it, so a stale value is only ever caught at runtime, by this
     /// guard, on a device.
-    static let requiredAbiVersion: Int32 = 19
+    static let requiredAbiVersion: Int32 = 20
 
     // MARK: Password generation
 
@@ -609,6 +610,15 @@ struct VaultTotp: Decodable {
     let code: String
     let period: UInt64
     let remaining: UInt64
+}
+
+/// A device that syncs this vault, as `vault_ffi_devices` lists it.
+struct VaultDevice: Decodable, Sendable, Identifiable, Equatable {
+    let id: String
+    let name: String
+    let uploads: UInt64
+    /// When it last pushed a copy, by its own clock (Unix ms).
+    let lastUpload: Int64
 }
 
 /// One login identity (metadata only) as produced by `vault_ffi_identities`.
@@ -1389,6 +1399,26 @@ final class VaultSession: @unchecked Sendable {
             }
             defer { vault_ffi_free(vault, vaultLength) }
             try VaultShared.writeVault(Data(bytes: vault, count: vaultLength))
+        }
+    }
+
+    /// Every device that syncs this vault, as far as this copy knows.
+    func devices() async throws -> [VaultDevice] {
+        try await Self.run {
+            var json: UnsafeMutablePointer<UInt8>?
+            var length = 0
+            let code = vault_ffi_devices(self.handle, &json, &length)
+            guard code == VaultFFICode.ok else {
+                throw VaultError.ffi(code: code, operation: "devices")
+            }
+            guard let json else { return [] }
+            defer { vault_ffi_free(json, length) }
+            do {
+                return try JSONDecoder()
+                    .decode([VaultDevice].self, from: Data(bytes: json, count: length))
+            } catch {
+                throw VaultError.malformedIdentities
+            }
         }
     }
 

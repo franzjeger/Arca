@@ -99,7 +99,12 @@ pub mod sync;
 /// v19 adds `vault_ffi_vault_load`, a handle to a vault that is not open yet,
 /// so a phone that is still locked can sync, find a master password changed on
 /// another device, and open with that password alone.
-pub const ABI_VERSION: i32 = 19;
+///
+/// v20: every copy says how often each device has pushed it. Adds
+/// `vault_ffi_sync_set_device` (this device's id and name),
+/// `vault_ffi_sync_acknowledge_rollback`, `vault_ffi_devices`, and `rolledBack`
+/// in the sync status: devices whose latest changes the remote had lost.
+pub const ABI_VERSION: i32 = 20;
 
 // Return codes.
 pub(crate) const OK: i32 = 0;
@@ -1010,6 +1015,50 @@ pub unsafe extern "C" fn vault_ffi_identities(
     match guard_result(|| identities_json(&vault)) {
         Ok(json) => {
             emit(json.into_bytes(), out_json, out_json_len);
+            OK
+        }
+        Err(code) => code,
+    }
+}
+
+/// The devices that push this vault (ABI v20), as a UTF-8 JSON array:
+/// `[{"id","name","uploads","lastUpload"}, ...]`, `lastUpload` in Unix ms by
+/// that device's clock. `ERR_LOCKED` until the vault is open. Free the buffer
+/// with [`vault_ffi_free`].
+///
+/// # Safety
+/// `handle` must be valid; `out_json`/`out_json_len` writable pointers.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_devices(
+    handle: *mut VaultHandle,
+    out_json: *mut *mut u8,
+    out_json_len: *mut usize,
+) -> i32 {
+    if handle.is_null() || out_json.is_null() || out_json_len.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let vault = match lock_vault(&(*handle).vault) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let listed = guard_result(|| {
+        let devices: Vec<_> = vault
+            .devices()?
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "id": d.id.to_string(),
+                    "name": d.name,
+                    "uploads": d.uploads,
+                    "lastUpload": d.last_upload,
+                })
+            })
+            .collect();
+        serde_json::to_vec(&devices).map_err(|_| Error::Serialization)
+    });
+    match listed {
+        Ok(json) => {
+            emit(json, out_json, out_json_len);
             OK
         }
         Err(code) => code,
@@ -2347,8 +2396,8 @@ mod tests {
     // Pinned deliberately: clients gate features on this number, so a bump has
     // to be a conscious edit here, not a side effect.
     #[test]
-    fn abi_version_is_19() {
-        assert_eq!(vault_ffi_abi_version(), 19);
+    fn abi_version_is_20() {
+        assert_eq!(vault_ffi_abi_version(), 20);
     }
 
     /// A loaded handle is a vault not yet open: it answers what the header

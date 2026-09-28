@@ -547,12 +547,42 @@ final class VaultStore {
         return nil
     }
 
+    /// Devices whose latest changes Google Drive had lost. Sync has already
+    /// put them back; this says so until the user has seen it.
+    var driveLostChanges: [String] { syncStatus?.rolledBack ?? [] }
+
+    func acknowledgeLostChanges() async {
+        guard let sync else { return }
+        await sync.acknowledgeRollback()
+        guard self.sync === sync, let status = try? await sync.status(), self.sync === sync
+        else { return }
+        syncStatus = status
+    }
+
+    /// Every device that syncs this vault, this one first and then the most
+    /// recent. Empty until one of them has pushed.
+    func syncDevices() async -> [SyncedDevice] {
+        guard let session else { return [] }
+        let me = SyncDeviceIdentity.id
+        let devices = (try? await session.devices()) ?? []
+        return devices
+            .map { SyncedDevice(device: $0, isThisDevice: UUID(uuidString: $0.id) == me) }
+            .sorted { a, b in
+                a.isThisDevice != b.isThisDevice
+                    ? a.isThisDevice : a.device.lastUpload > b.device.lastUpload
+            }
+    }
+
     /// Build the engine for a freshly opened vault and, if this device is
     /// already signed in, reconnect and pull.
     private func startSync(_ session: VaultSession) async {
         do {
             guard self.session === session else { return }
             let engine = try await session.makeSync()
+            // Every copy this phone pushes then records the upload, which is
+            // how the other devices tell a current copy from one Drive held on
+            // to.
+            try await engine.setDevice(id: SyncDeviceIdentity.id, name: SyncDeviceIdentity.name)
             guard self.session === session else { return }
             sync = engine
             guard let token = SyncCredentialStore.load() else { return }
@@ -707,4 +737,12 @@ final class VaultStore {
             return false
         }
     }
+}
+
+/// A device that syncs this vault, as the devices sheet lists it.
+struct SyncedDevice: Identifiable {
+    let device: VaultDevice
+    let isThisDevice: Bool
+
+    var id: String { device.id }
 }
