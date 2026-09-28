@@ -91,8 +91,17 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 
-# Release profile: keep symbols light, no debug info leaking secrets via panics.
+# Release: stripped and LTO'd. A panicking desktop process stops instead of
+# carrying on in a state nobody tested.
 [profile.release]
 panic = "abort"
 strip = true
 lto = true
+
+# The Apple apps' static library. vault-ffi turns a panic into an error code
+# with `catch_unwind`, which only works when panics unwind; under `abort` a
+# panic kills the app or AutoFill extension instead. vault-ffi refuses to
+# compile any other way, so build it with `--profile release-ffi`.
+[profile.release-ffi]
+inherits = "release"
+panic = "unwind"

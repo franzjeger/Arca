@@ -14,6 +14,10 @@
   extension. A `minlength` of 2^64-1 overflowed the generator's allocation,
   and release builds abort on panic. Rule lengths are capped at 128 and the
   generator refuses anything longer.
+- The Apple apps' Rust library is built with its own `release-ffi` profile
+  that unwinds on panic. Under the release profile's `abort`, every
+  `catch_unwind` guard in vault-ffi was dead code and a panic killed the app
+  or AutoFill extension; vault-ffi now refuses to compile that way.
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native

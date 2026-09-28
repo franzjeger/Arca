@@ -138,7 +138,7 @@ if [ "${ARCA_ADHOC:-}" != "1" ]; then
   # Reusing desktop proc-macro artifacts under Xcode caused E0463 on this Mac.
   ( export CARGO_TARGET_DIR="$CARGO_OUTPUT/apple-ffi"
     cd "$REPO" || exit
-    cargo build -p vault-ffi --release --target aarch64-apple-darwin || exit
+    cargo build -p vault-ffi --profile release-ffi --target aarch64-apple-darwin || exit
     cd apps/macos || exit
     xcodegen generate >/dev/null || exit
     xcodebuild -project Arca.xcodeproj -scheme ArcaHost -configuration Release \

@@ -29,12 +29,19 @@
 //! wrapper over it. Network access is confined to the sync surface.
 //!
 //! Every entry point is wrapped so a panic becomes an error code instead of
-//! unwinding across the C boundary.
+//! unwinding across the C boundary. That needs `panic = "unwind"`, which the
+//! `release-ffi` profile provides and the check below enforces.
 //!
 //! SECURITY: returned buffers may contain secrets (a passkey private key, or a
 //! password). The caller must copy them into the platform credential / encrypted
 //! vault and free them promptly; [`vault_ffi_free`] zeroes them. Error codes
 //! never leak key material or plaintext.
+
+#[cfg(panic = "abort")]
+compile_error!(
+    "vault-ffi needs panic = \"unwind\" or its catch_unwind guards are dead: \
+     build with `--profile release-ffi`"
+);
 
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};

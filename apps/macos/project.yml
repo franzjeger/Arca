@@ -47,10 +47,10 @@ scriptDefaults: &buildFfi
     set -euo pipefail
     export PATH="$HOME/.cargo/bin:$PATH"
     cd "$SRCROOT/../.."
-    cargo build -p vault-ffi --release --target aarch64-apple-darwin
+    cargo build -p vault-ffi --profile release-ffi --target aarch64-apple-darwin
     mkdir -p "$SRCROOT/libs"
     CARGO_OUTPUT="$(python3 scripts/cargo-target-dir.py)"
-    cp -f "$CARGO_OUTPUT/aarch64-apple-darwin/release/libvault_ffi.a" "$SRCROOT/libs/libvault_ffi.a"
+    cp -f "$CARGO_OUTPUT/aarch64-apple-darwin/release-ffi/libvault_ffi.a" "$SRCROOT/libs/libvault_ffi.a"
 
 targets:
   # Provisioning helper: exists only so Xcode provisions the no.sybr.vault App ID

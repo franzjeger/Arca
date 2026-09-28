@@ -219,7 +219,7 @@ jobs:
         run: |
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
           for t in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
-            cargo build --locked -p vault-ffi --release --target "$t"
+            cargo build --locked -p vault-ffi --profile release-ffi --target "$t"
           done
 
       # The Swift in apps/ is written and reviewed on Linux, where no toolchain
