@@ -2,7 +2,7 @@
 //!
 //! On-disk layout produced by [`Vault::to_bytes`]:
 //! ```text
-//! "SYBRVLT5"            (8-byte magic; V4, V3, V2 and V1 remain readable)
+//! "SYBRVLT6"            (8-byte magic; V5 down to V1 remain readable)
 //! bincode(VaultBody {   (cleartext header + per-item ciphertext)
 //!     header,
 //!     items: [ { id, AeadBlob }, ... ],
@@ -12,6 +12,11 @@
 //! ```
 //! The header is cleartext (public KDF params + wrapped keys); every item is
 //! sealed individually with the vault key, with the item id bound as AAD.
+//!
+//! V1–V4 carry no tag, so nothing stops an attacker from relabelling a newer
+//! file as one of them. Two rules make that useless: from V6 the master wrap
+//! names the authenticated container in its AAD, and a key held by this device
+//! (quick unlock, a USB key) never opens an unauthenticated container.
 //!
 //! `purges` is cleartext but authenticated by the container tag: it records a
 //! hard delete, so a peer that still has the item cannot push it back. See
@@ -35,14 +40,27 @@ use crate::sync::Purge;
 /// Container magics. V1 framed the v2 header (no rewrap epoch); V2 added the
 /// rewrap epoch; V3 adds the purge list; V4 gates encrypted per-item revision
 /// ancestry so older clients cannot silently strip conflict metadata. V5 adds
-/// whole-container authentication. Legacy files upgrade on an unlocked save.
+/// whole-container authentication; V6 binds the master wrap to it. Legacy
+/// files upgrade on an unlocked save.
 const MAGIC_V1: &[u8; 8] = b"SYBRVLT1";
 const MAGIC_V2: &[u8; 8] = b"SYBRVLT2";
 const MAGIC_V3: &[u8; 8] = b"SYBRVLT3";
 const MAGIC_V4: &[u8; 8] = b"SYBRVLT4";
-const MAGIC: &[u8; 8] = b"SYBRVLT5";
-const AUTH_CONTEXT: &[u8] = b"arca/vault-container/SYBRVLT5\0";
+const MAGIC_V5: &[u8; 8] = b"SYBRVLT5";
+const MAGIC: &[u8; 8] = b"SYBRVLT6";
 const AUTH_LEN: usize = 32;
+
+/// First format version that is always authenticated by a container tag.
+const SEALED_SINCE: u16 = 5;
+
+/// Magic and tag context of an authenticated container of `version`.
+fn sealed_format(version: u16) -> (&'static [u8; 8], &'static [u8]) {
+    if version >= VaultHeader::BOUND_WRAP_VERSION {
+        (MAGIC, b"arca/vault-container/SYBRVLT6\0")
+    } else {
+        (MAGIC_V5, b"arca/vault-container/SYBRVLT5\0")
+    }
+}
 
 /// Long enough for months of edits while keeping malicious synced payloads
 /// from growing without bound. Losing very old ancestry can create a harmless
@@ -92,6 +110,8 @@ struct LegacyBodyV2 {
 enum VaultState {
     Locked {
         items: Vec<EncryptedItem>,
+        /// `None` only for a V1–V4 container, which nothing authenticated.
+        sealed: Option<Sealed>,
     },
     Unlocked {
         vault_key: SymmetricKey,
@@ -99,11 +119,38 @@ enum VaultState {
     },
 }
 
-fn deserialize_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+/// The authenticated bytes of a locked V5+ container, exactly as read or
+/// written: the tag is checked against these, never against a re-encoding.
+#[derive(Clone)]
+struct Sealed {
+    version: u16,
+    body: Vec<u8>,
+    tag: [u8; AUTH_LEN],
+}
+
+impl Sealed {
+    fn to_container(&self) -> Vec<u8> {
+        let (magic, _) = sealed_format(self.version);
+        [magic.as_slice(), &self.body, &self.tag].concat()
+    }
+}
+
+/// The one bincode configuration every container body is read and written with.
+fn body_codec() -> impl Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
-        .allow_trailing_bytes()
-        .with_limit((MAX_VAULT_BYTES - MAGIC.len()) as u64)
+        .reject_trailing_bytes()
+        .with_limit((MAX_VAULT_BYTES - MAGIC.len() - AUTH_LEN) as u64)
+}
+
+fn encode_body(body: &VaultBody) -> Result<Vec<u8>> {
+    body_codec()
+        .serialize(body)
+        .map_err(|_| Error::Serialization)
+}
+
+fn decode_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    body_codec()
         .deserialize(bytes)
         .map_err(|_| Error::Serialization)
 }
@@ -118,9 +165,6 @@ pub struct Vault {
     /// Hard deletes, so emptying the Trash survives a merge. Outside
     /// [`VaultState`] because it is not secret and must persist while locked.
     purges: Vec<Purge>,
-    /// Authenticates the complete locked body, including empty vaults, purges
-    /// and password rotations. Unlocked bodies are signed when serialized.
-    authentication: Option<[u8; AUTH_LEN]>,
     state: VaultState,
 }
 
@@ -131,7 +175,8 @@ impl Vault {
     pub fn create(master_password: &str, params: KdfParams) -> Result<Self> {
         let master_key = crypto::derive_master_key(master_password, &params)?;
         let vault_key = SymmetricKey::generate()?;
-        let master_wrapped_vault_key = crypto::wrap_key(&master_key, &vault_key, &params.aad())?;
+        let master_wrapped_vault_key =
+            crypto::wrap_key(&master_key, &vault_key, &params.master_wrap_aad(true))?;
 
         let header = VaultHeader {
             format_version: VaultHeader::FORMAT_VERSION,
@@ -145,7 +190,6 @@ impl Vault {
             session_id: Uuid::new_v4(),
             header,
             purges: Vec::new(),
-            authentication: None,
             state: VaultState::Unlocked {
                 vault_key,
                 items: Vec::new(),
@@ -159,36 +203,40 @@ impl Vault {
         if bytes.len() < MAGIC.len() || bytes.len() > MAX_VAULT_BYTES {
             return Err(Error::Format);
         }
-        let mut authentication = None;
-        let (header, items, purges) = match &bytes[..MAGIC.len()] {
-            m if m == MAGIC => {
-                if bytes.len() < MAGIC.len() + AUTH_LEN {
-                    return Err(Error::Decryption);
-                }
-                let split = bytes.len() - AUTH_LEN;
-                let body: VaultBody = bincode::DefaultOptions::new()
-                    .with_fixint_encoding()
-                    .reject_trailing_bytes()
-                    .with_limit(MAX_VAULT_BYTES as u64)
-                    .deserialize(&bytes[MAGIC.len()..split])
-                    .map_err(|_| Error::Decryption)?;
-                authentication = Some(bytes[split..].try_into().map_err(|_| Error::Decryption)?);
-                (body.header, body.items, body.purges)
+        let (magic, rest) = bytes.split_at(MAGIC.len());
+        let (header, items, purges, sealed) = match magic {
+            m if m == MAGIC || m == MAGIC_V5 => {
+                let version = if m == MAGIC {
+                    VaultHeader::BOUND_WRAP_VERSION
+                } else {
+                    SEALED_SINCE
+                };
+                // A torn or tampered authenticated file must not read as
+                // foreign: callers replace a `Format` file with their own.
+                let split = rest.len().checked_sub(AUTH_LEN).ok_or(Error::Decryption)?;
+                let (body, tag) = rest.split_at(split);
+                let parsed: VaultBody = decode_body(body).map_err(|_| Error::Decryption)?;
+                let sealed = Sealed {
+                    version,
+                    body: body.to_vec(),
+                    tag: tag.try_into().map_err(|_| Error::Decryption)?,
+                };
+                (parsed.header, parsed.items, parsed.purges, Some(sealed))
             }
             m if m == MAGIC_V4 || m == MAGIC_V3 => {
-                let body: VaultBody = deserialize_body(&bytes[MAGIC.len()..])?;
-                (body.header, body.items, body.purges)
+                let body: VaultBody = decode_body(rest)?;
+                (body.header, body.items, body.purges, None)
             }
             m if m == MAGIC_V2 => {
                 // Written before hard deletes left a record. An empty purge
                 // list is the truth about such a file, not a fallback.
-                let body: BodyWithoutPurges = deserialize_body(&bytes[MAGIC.len()..])?;
-                (body.header, body.items, Vec::new())
+                let body: BodyWithoutPurges = decode_body(rest)?;
+                (body.header, body.items, Vec::new(), None)
             }
             m if m == MAGIC_V1 => {
                 // Legacy container: v2 header without the rewrap epoch.
-                let body: LegacyBodyV2 = deserialize_body(&bytes[MAGIC.len()..])?;
-                (body.header.into(), body.items, Vec::new())
+                let body: LegacyBodyV2 = decode_body(rest)?;
+                (body.header.into(), body.items, Vec::new(), None)
             }
             // A container we do not know. Whether it is *ours* matters enormously:
             // callers treat `Format` as a torn upload and replace the file with
@@ -201,58 +249,69 @@ impl Vault {
             _ => return Err(Error::Format),
         };
         header.check_supported()?;
-        // Changing only the magic must not strip the integrity requirement.
-        if authentication.is_none() && header.format_version >= 5 {
+        // The magic must agree with the header it frames: relabelling either
+        // one must not strip the integrity requirement.
+        let consistent = match &sealed {
+            Some(sealed) => header.format_version == sealed.version,
+            None => header.format_version < SEALED_SINCE,
+        };
+        if !consistent {
             return Err(Error::Decryption);
         }
         Ok(Self {
             session_id: Uuid::nil(),
             header,
             purges,
-            authentication,
-            state: VaultState::Locked { items },
+            state: VaultState::Locked { items, sealed },
         })
     }
 
     /// Serialize the vault to bytes for persistence. Always emits ciphertext;
     /// when unlocked, items are re-sealed with fresh nonces.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let items = match &self.state {
-            VaultState::Locked { items } => items.clone(),
-            VaultState::Unlocked { vault_key, items } => encrypt_items(vault_key, items)?,
-        };
-        let mut header = self.header.clone();
-        let authenticated = self.is_unlocked() || self.authentication.is_some();
-        if authenticated {
-            header.format_version = VaultHeader::FORMAT_VERSION;
+        match &self.state {
+            VaultState::Unlocked { vault_key, items } => Ok(self
+                .seal(vault_key, encrypt_items(vault_key, items)?)?
+                .to_container()),
+            VaultState::Locked {
+                sealed: Some(sealed),
+                ..
+            } => Ok(sealed.to_container()),
+            // A locked legacy copy cannot be authenticated without its key.
+            // Keep it readable; the first unlocked save upgrades it.
+            VaultState::Locked {
+                items,
+                sealed: None,
+            } => {
+                let body = encode_body(&VaultBody {
+                    header: self.header.clone(),
+                    items: items.clone(),
+                    purges: self.purges.clone(),
+                })?;
+                Ok([MAGIC_V4.as_slice(), &body].concat())
+            }
         }
-        let body = VaultBody {
-            header,
+    }
+
+    /// Encode and tag a container body holding `items` (already encrypted).
+    fn seal(&self, vault_key: &SymmetricKey, items: Vec<EncryptedItem>) -> Result<Sealed> {
+        // Unlocked implies V5+: a legacy container only opens with the
+        // password, and that unlock binds the wrap (V6).
+        let version = self.header.format_version.max(SEALED_SINCE);
+        let body = encode_body(&VaultBody {
+            header: VaultHeader {
+                format_version: version,
+                ..self.header.clone()
+            },
             items,
             purges: self.purges.clone(),
-        };
-        let mut out = Vec::with_capacity(MAGIC.len() + 64);
-        // A locked legacy copy cannot be authenticated without its key. Keep
-        // it readable; the first unlocked save upgrades it.
-        out.extend_from_slice(if authenticated { MAGIC } else { MAGIC_V4 });
-        let encoded = bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .allow_trailing_bytes()
-            .with_limit((MAX_VAULT_BYTES - MAGIC.len() - AUTH_LEN) as u64)
-            .serialize(&body)
-            .map_err(|_| Error::Serialization)?;
-        out.extend_from_slice(&encoded);
-        match &self.state {
-            VaultState::Unlocked { vault_key, .. } => {
-                out.extend_from_slice(&authenticate_body(vault_key, &encoded));
-            }
-            VaultState::Locked { .. } => {
-                if let Some(tag) = self.authentication {
-                    out.extend_from_slice(&tag);
-                }
-            }
-        }
-        Ok(out)
+        })?;
+        let tag = container_mac(vault_key, version)
+            .chain_update(&body)
+            .finalize()
+            .into_bytes()
+            .into();
+        Ok(Sealed { version, body, tag })
     }
 
     // ----- locking --------------------------------------------------------
@@ -267,9 +326,25 @@ impl Vault {
         let vault_key = crypto::unwrap_key(
             &master_key,
             &self.header.master_wrapped_vault_key,
-            &self.header.kdf.aad(),
+            &self.header.master_wrap_aad(),
         )?;
-        self.finish_unlock(vault_key)
+        // Holding the master key is the only chance to bind an older wrap;
+        // until then a relabelled copy of this vault still opens with it.
+        let bound = if self.header.master_wrap_is_bound() {
+            None
+        } else {
+            Some(crypto::wrap_key(
+                &master_key,
+                &vault_key,
+                &self.header.kdf.master_wrap_aad(true),
+            )?)
+        };
+        self.finish_unlock(vault_key)?;
+        if let Some(wrap) = bound {
+            self.header.master_wrapped_vault_key = wrap;
+            self.header.format_version = VaultHeader::BOUND_WRAP_VERSION;
+        }
+        Ok(())
     }
 
     /// Verify the master password WITHOUT changing lock state. Returns `true`
@@ -284,7 +359,7 @@ impl Vault {
         let Ok(candidate) = crypto::unwrap_key(
             &master_key,
             &self.header.master_wrapped_vault_key,
-            &self.header.kdf.aad(),
+            &self.header.master_wrap_aad(),
         ) else {
             return false;
         };
@@ -300,6 +375,7 @@ impl Vault {
         if self.is_unlocked() {
             return Ok(());
         }
+        self.require_sealed()?;
         let wrapped = self
             .header
             .device_wrapped_vault_key
@@ -309,11 +385,21 @@ impl Vault {
         self.finish_unlock(vault_key)
     }
 
+    /// A key this device holds says nothing about who wrote the file, so it
+    /// only opens a container the vault key authenticated. An unauthenticated
+    /// (V1–V4) file needs the master password once, which also upgrades it.
+    fn require_sealed(&self) -> Result<()> {
+        match &self.state {
+            VaultState::Locked { sealed: None, .. } => Err(Error::Decryption),
+            _ => Ok(()),
+        }
+    }
+
     /// Common tail of the two unlock paths: decrypt items, transition state.
     fn finish_unlock(&mut self, vault_key: SymmetricKey) -> Result<()> {
         self.verify_authentication(&vault_key)?;
         let items = match &self.state {
-            VaultState::Locked { items } => decrypt_items(&vault_key, items)?,
+            VaultState::Locked { items, .. } => decrypt_items(&vault_key, items)?,
             // unreachable: callers guard on `is_unlocked()` first.
             VaultState::Unlocked { .. } => return Ok(()),
         };
@@ -330,19 +416,13 @@ impl Vault {
             // fails, keeping the still-unlocked state is safer than silently
             // replacing the user's item set with an empty locked vault.
             let resealed = encrypt_items(vault_key, items)?;
-            let mut header = self.header.clone();
-            header.format_version = VaultHeader::FORMAT_VERSION;
-            let body = bincode::serialize(&VaultBody {
-                header: header.clone(),
-                items: resealed.clone(),
-                purges: self.purges.clone(),
-            })
-            .map_err(|_| Error::Serialization)?;
-            let tag = authenticate_body(vault_key, &body);
+            let sealed = self.seal(vault_key, resealed.clone())?;
+            self.header.format_version = sealed.version;
             // Reassigning drops the old Unlocked state → key + plaintext zeroized.
-            self.state = VaultState::Locked { items: resealed };
-            self.header = header;
-            self.authentication = Some(tag);
+            self.state = VaultState::Locked {
+                items: resealed,
+                sealed: Some(sealed),
+            };
         }
         Ok(())
     }
@@ -398,7 +478,15 @@ impl Vault {
         let remote = Self::from_bytes(remote_bytes)?;
         let vault_key = self.vault_key()?;
         remote.verify_authentication(vault_key)?;
-        if remote.authentication.is_none() {
+        let VaultState::Locked {
+            items: remote_enc,
+            sealed,
+        } = remote.state
+        else {
+            // `from_bytes` always yields a locked vault.
+            return Err(Error::Format);
+        };
+        if sealed.is_none() {
             // Legacy item ciphertext can still be authenticated individually.
             // Destructive metadata cannot: only accept purge records already
             // known locally, and never adopt an unsigned password rotation.
@@ -412,24 +500,16 @@ impl Vault {
             {
                 return Err(Error::Decryption);
             }
-            // Even an empty legacy file must belong to this vault. An exact
-            // master wrap proves it was copied from the same header; any new
-            // rotation needs the authenticated format above.
-            if remote.header.master_wrapped_vault_key.nonce
-                != self.header.master_wrapped_vault_key.nonce
-                || remote.header.master_wrapped_vault_key.ciphertext
-                    != self.header.master_wrapped_vault_key.ciphertext
-            {
+            // Even an empty legacy file must belong to this vault: the same KDF
+            // salt proves it was copied from this password's header. (Not the
+            // wrap bytes: unlocking rebinds our wrap while the file on disk may
+            // still be the legacy copy we just opened.)
+            if remote.header.kdf.aad() != self.header.kdf.aad() {
                 return Err(Error::Decryption);
             }
         }
         let remote_header = remote.header;
         let remote_purges = remote.purges;
-        let remote_enc = match remote.state {
-            VaultState::Locked { items } => items,
-            // `from_bytes` always yields a locked vault.
-            VaultState::Unlocked { .. } => return Err(Error::Format),
-        };
         let VaultState::Unlocked { vault_key, items } = &mut self.state else {
             return Err(Error::Locked);
         };
@@ -443,12 +523,19 @@ impl Vault {
             &self.purges,
         );
         // Header: adopt a NEWER master rewrap (password rotation / KDF upgrade)
-        // from the peer. The vault key itself never changes on rotation, so the
+        // from the peer, or the same one already bound to authenticated
+        // containers. The vault key itself never changes on rotation, so the
         // local device wrap stays valid and is kept.
-        if remote_header.rewrap_epoch > self.header.rewrap_epoch {
+        let newer = remote_header.rewrap_epoch > self.header.rewrap_epoch;
+        let binds = remote_header.rewrap_epoch == self.header.rewrap_epoch
+            && remote_header.master_wrap_is_bound()
+            && !self.header.master_wrap_is_bound();
+        if newer || binds {
             self.header.kdf = remote_header.kdf;
             self.header.master_wrapped_vault_key = remote_header.master_wrapped_vault_key;
             self.header.rewrap_epoch = remote_header.rewrap_epoch;
+            // The wrap's AAD depends on it; `seal` keeps the file at V5+.
+            self.header.format_version = remote_header.format_version;
         }
         Ok(())
     }
@@ -679,9 +766,10 @@ impl Vault {
         let vault_key = self.vault_key()?.clone();
         let new_params = KdfParams::new_default()?;
         let master_key = crypto::derive_master_key(new_password, &new_params)?;
-        let wrapped = crypto::wrap_key(&master_key, &vault_key, &new_params.aad())?;
+        let wrapped = crypto::wrap_key(&master_key, &vault_key, &new_params.master_wrap_aad(true))?;
         self.header.kdf = new_params;
         self.header.master_wrapped_vault_key = wrapped;
+        self.header.format_version = VaultHeader::BOUND_WRAP_VERSION;
         // Monotonic epoch: peers adopt the higher-epoch header on merge, so the
         // rotation propagates instead of being reverted by a stale header.
         self.header.rewrap_epoch += 1;
@@ -750,6 +838,7 @@ impl Vault {
         if self.is_unlocked() {
             return Ok(());
         }
+        self.require_sealed()?;
         let vault_key = crypto::unwrap_key(key, wrapped, aad)?;
         self.finish_unlock(vault_key)
     }
@@ -783,20 +872,17 @@ impl Vault {
     // ----- internals ------------------------------------------------------
 
     fn verify_authentication(&self, key: &SymmetricKey) -> Result<()> {
-        let (Some(tag), VaultState::Locked { items }) = (&self.authentication, &self.state) else {
+        let VaultState::Locked {
+            sealed: Some(sealed),
+            ..
+        } = &self.state
+        else {
             return Ok(());
         };
-        let body = bincode::serialize(&VaultBody {
-            header: self.header.clone(),
-            items: items.clone(),
-            purges: self.purges.clone(),
-        })
-        .map_err(|_| Error::Serialization)?;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts a 32-byte key");
-        mac.update(AUTH_CONTEXT);
-        mac.update(&body);
-        mac.verify_slice(tag).map_err(|_| Error::Decryption)
+        container_mac(key, sealed.version)
+            .chain_update(&sealed.body)
+            .verify_slice(&sealed.tag)
+            .map_err(|_| Error::Decryption)
     }
 
     fn vault_key(&self) -> Result<&SymmetricKey> {
@@ -841,12 +927,12 @@ impl Vault {
     }
 }
 
-fn authenticate_body(key: &SymmetricKey, body: &[u8]) -> [u8; AUTH_LEN] {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts a 32-byte key");
-    mac.update(AUTH_CONTEXT);
-    mac.update(body);
-    mac.finalize().into_bytes().into()
+/// HMAC over a container body of `version`, keyed and domain-separated.
+fn container_mac(key: &SymmetricKey, version: u16) -> Hmac<Sha256> {
+    let (_, context) = sealed_format(version);
+    Hmac::<Sha256>::new_from_slice(key.as_bytes())
+        .expect("HMAC accepts a 32-byte key")
+        .chain_update(context)
 }
 
 /// Encode an item payload (the plaintext that gets sealed) with CBOR.
@@ -1018,6 +1104,70 @@ mod tests {
         }
     }
 
+    /// The body of a sealed (V5+) file, without its magic and tag.
+    fn body_of(bytes: &[u8]) -> VaultBody {
+        decode_body(&bytes[MAGIC.len()..bytes.len() - AUTH_LEN]).unwrap()
+    }
+
+    /// `vault`'s header as a build before V6 wrote it: the same vault key under
+    /// the same password, in a wrap that does not name the sealed container.
+    fn legacy_header(vault: &Vault, password: &str, format_version: u16) -> VaultHeader {
+        let master_key = crypto::derive_master_key(password, &vault.header.kdf).unwrap();
+        let wrap = crypto::wrap_key(
+            &master_key,
+            vault.vault_key().unwrap(),
+            &vault.header.kdf.aad(),
+        )
+        .unwrap();
+        VaultHeader {
+            format_version,
+            master_wrapped_vault_key: wrap,
+            ..vault.header.clone()
+        }
+    }
+
+    /// The unlocked `vault` saved the way a build before V6 saved it.
+    fn legacy_file(vault: &Vault, password: &str, magic: &[u8; 8]) -> Vec<u8> {
+        let version = match magic {
+            m if m == MAGIC_V5 => 5,
+            m if m == MAGIC_V4 => 4,
+            _ => 3,
+        };
+        let VaultState::Unlocked { vault_key, items } = &vault.state else {
+            panic!("legacy_file needs an unlocked vault");
+        };
+        let body = encode_body(&VaultBody {
+            header: legacy_header(vault, password, version),
+            items: encrypt_items(vault_key, items).unwrap(),
+            purges: vault.purges.clone(),
+        })
+        .unwrap();
+        let mut file = [magic.as_slice(), &body].concat();
+        if version == 5 {
+            file.extend(
+                container_mac(vault_key, 5)
+                    .chain_update(&body)
+                    .finalize()
+                    .into_bytes(),
+            );
+        }
+        file
+    }
+
+    /// Relabel a sealed file as V4 by rewriting the magic and the header's
+    /// `format_version`: two bytes, no key needed.
+    fn relabel_as_v4(file: &[u8], keep_tag: bool) -> Vec<u8> {
+        let end = if keep_tag {
+            file.len()
+        } else {
+            file.len() - AUTH_LEN
+        };
+        let mut out = file[..end].to_vec();
+        out[..MAGIC.len()].copy_from_slice(MAGIC_V4);
+        out[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&4u16.to_le_bytes());
+        out
+    }
+
     #[test]
     fn verify_master_password_checks_without_unlock_shortcut() {
         // A freshly created vault is unlocked; verification must still re-check
@@ -1050,8 +1200,7 @@ mod tests {
     #[test]
     fn container_rejects_untrusted_kdf_costs_before_unlock() {
         let vault = Vault::create("pw", cheap_params()).unwrap();
-        let bytes = vault.to_bytes().unwrap();
-        let mut body: VaultBody = deserialize_body(&bytes[MAGIC.len()..]).unwrap();
+        let mut body = body_of(&vault.to_bytes().unwrap());
         body.header.kdf.m_cost_kib = KdfParams::MAX_M_COST_KIB + 1;
 
         let mut forged = MAGIC.to_vec();
@@ -1165,14 +1314,10 @@ mod tests {
     }
 
     #[test]
-    fn v3_container_is_read_and_rewritten_as_v5() {
+    fn v3_container_is_read_and_rewritten_as_v6() {
         let mut vault = Vault::create("pw", cheap_params()).unwrap();
         vault.upsert_item(login_item(1, "legacy", 10)).unwrap();
-        let current = vault.to_bytes().unwrap();
-        let mut body: VaultBody = deserialize_body(&current[MAGIC.len()..]).unwrap();
-        body.header.format_version = 3;
-        let mut old = MAGIC_V3.to_vec();
-        old.extend_from_slice(&bincode::serialize(&body).unwrap());
+        let old = legacy_file(&vault, "pw", MAGIC_V3);
 
         let mut loaded = Vault::from_bytes(&old).unwrap();
         loaded.unlock("pw").unwrap();
@@ -1244,7 +1389,7 @@ mod tests {
         // list, old magic.
         let items = match &vault.state {
             VaultState::Unlocked { vault_key, items } => encrypt_items(vault_key, items).unwrap(),
-            VaultState::Locked { items } => items.clone(),
+            VaultState::Locked { items, .. } => items.clone(),
         };
         #[derive(Serialize)]
         struct OldBody {
@@ -1252,8 +1397,7 @@ mod tests {
             items: Vec<EncryptedItem>,
         }
         let mut old = MAGIC_V2.to_vec();
-        let mut header = vault.header.clone();
-        header.format_version = 3;
+        let header = legacy_header(&vault, "pw", 3);
         old.extend_from_slice(&bincode::serialize(&OldBody { header, items }).unwrap());
 
         let mut reloaded = Vault::from_bytes(&old).unwrap();
@@ -1328,7 +1472,7 @@ mod tests {
         // confirm it round-trips through the current reader.
         let mut v = Vault::create("pw", cheap_params()).unwrap();
         v.upsert_item(login_item(3, "Old", 5)).unwrap();
-        let header = v.header().clone();
+        let header = legacy_header(&v, "pw", 2);
         #[derive(serde::Serialize)]
         struct OldHeader<'a> {
             format_version: u16,
@@ -1423,7 +1567,7 @@ mod tests {
         local.upsert_item(login_item(1, "keep", 10)).unwrap();
         let original = local.to_bytes().unwrap();
         for tamper in 0..4 {
-            let mut body: VaultBody = deserialize_body(&original[MAGIC.len()..]).unwrap();
+            let mut body = body_of(&original);
             match tamper {
                 0 => body.purges.push(Purge {
                     id: Uuid::from_bytes([1; 16]),
@@ -1473,9 +1617,8 @@ mod tests {
         peer.unlock("pw").unwrap();
         peer.upsert_item(login_item(2, "legacy peer edit", 20))
             .unwrap();
-        let mut body: VaultBody =
-            deserialize_body(&peer.to_bytes().unwrap()[MAGIC.len()..]).unwrap();
-        body.header.format_version = 4;
+        let mut body = body_of(&peer.to_bytes().unwrap());
+        body.header = legacy_header(&peer, "pw", 4);
         let legacy = |body: &VaultBody| {
             let mut out = MAGIC_V4.to_vec();
             out.extend(bincode::serialize(body).unwrap());
@@ -1526,5 +1669,133 @@ mod tests {
         loaded.disable_device_unlock().unwrap();
         let mut loaded = Vault::from_bytes(&loaded.to_bytes().unwrap()).unwrap();
         loaded.unlock("pw").unwrap();
+    }
+
+    // ---- downgrade: an unauthenticated relabel must not open -------------
+
+    #[test]
+    fn a_v6_file_relabelled_as_v4_does_not_open() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let device_key = SymmetricKey::generate().unwrap();
+        vault.enable_device_unlock(&device_key).unwrap();
+        let file = vault.to_bytes().unwrap();
+        assert!(file.starts_with(MAGIC));
+
+        // The tag left behind is trailing garbage to a V4 reader.
+        assert!(Vault::from_bytes(&relabel_as_v4(&file, true)).is_err());
+
+        let mut relabelled = Vault::from_bytes(&relabel_as_v4(&file, false)).unwrap();
+        assert!(matches!(relabelled.unlock("pw"), Err(Error::Decryption)));
+        assert!(matches!(
+            relabelled.unlock_with_device_key(&device_key),
+            Err(Error::Decryption)
+        ));
+        assert!(!relabelled.is_unlocked());
+    }
+
+    #[test]
+    fn a_v6_file_relabelled_as_v5_does_not_open() {
+        let vault = Vault::create("pw", cheap_params()).unwrap();
+        let file = vault.to_bytes().unwrap();
+
+        // Magic alone: the header still says 6.
+        let mut magic_only = file.clone();
+        magic_only[..MAGIC.len()].copy_from_slice(MAGIC_V5);
+        assert!(matches!(
+            Vault::from_bytes(&magic_only),
+            Err(Error::Decryption)
+        ));
+
+        // Magic and header: the tag was made under the V6 context.
+        magic_only[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&5u16.to_le_bytes());
+        let mut relabelled = Vault::from_bytes(&magic_only).unwrap();
+        assert!(matches!(relabelled.unlock("pw"), Err(Error::Decryption)));
+    }
+
+    #[test]
+    fn a_v5_vault_binds_its_wrap_on_the_next_password_unlock() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let v5 = legacy_file(&vault, "pw", MAGIC_V5);
+
+        let mut loaded = Vault::from_bytes(&v5).unwrap();
+        loaded.unlock("pw").unwrap();
+        assert_eq!(loaded.header().format_version, 6);
+        let upgraded = loaded.to_bytes().unwrap();
+        assert!(upgraded.starts_with(MAGIC));
+
+        let mut reopened = Vault::from_bytes(&upgraded).unwrap();
+        reopened.unlock("pw").unwrap();
+        assert_eq!(reopened.list_items(false).unwrap().len(), 1);
+        let mut relabelled = Vault::from_bytes(&relabel_as_v4(&upgraded, false)).unwrap();
+        assert!(matches!(relabelled.unlock("pw"), Err(Error::Decryption)));
+    }
+
+    #[test]
+    fn device_keys_only_open_authenticated_containers() {
+        const AAD: &[u8] = b"test/external/v1";
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let device_key = SymmetricKey::generate().unwrap();
+        vault.enable_device_unlock(&device_key).unwrap();
+        let sidecar = vault.wrap_vault_key(&device_key, AAD).unwrap();
+
+        // A genuine V4 file: its password opens it, a device key never does.
+        let v4 = legacy_file(&vault, "pw", MAGIC_V4);
+        let mut old = Vault::from_bytes(&v4).unwrap();
+        assert!(matches!(
+            old.unlock_with_device_key(&device_key),
+            Err(Error::Decryption)
+        ));
+        assert!(matches!(
+            old.unlock_with_wrapped_key(&device_key, &sidecar, AAD),
+            Err(Error::Decryption)
+        ));
+        old.unlock("pw").unwrap();
+        assert!(old.to_bytes().unwrap().starts_with(MAGIC));
+
+        // A genuine V5 file is authenticated, so the device key works; the
+        // wrap stays V5 until the master password is used.
+        let v5 = legacy_file(&vault, "pw", MAGIC_V5);
+        let mut quick = Vault::from_bytes(&v5).unwrap();
+        quick.unlock_with_device_key(&device_key).unwrap();
+        let saved = quick.to_bytes().unwrap();
+        assert!(saved.starts_with(MAGIC_V5));
+        let mut later = Vault::from_bytes(&saved).unwrap();
+        later.unlock("pw").unwrap();
+        assert!(later.to_bytes().unwrap().starts_with(MAGIC));
+    }
+
+    #[test]
+    fn a_bound_wrap_is_adopted_from_a_peer_at_the_same_epoch() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let device_key = SymmetricKey::generate().unwrap();
+        vault.enable_device_unlock(&device_key).unwrap();
+
+        // This device only ever uses quick unlock, so it cannot bind its wrap.
+        let mut phone = Vault::from_bytes(&legacy_file(&vault, "pw", MAGIC_V5)).unwrap();
+        phone.unlock_with_device_key(&device_key).unwrap();
+        assert_eq!(phone.header().format_version, 5);
+
+        phone.merge_remote(&vault.to_bytes().unwrap()).unwrap();
+        assert_eq!(phone.header().format_version, 6);
+        let saved = phone.to_bytes().unwrap();
+        assert!(saved.starts_with(MAGIC));
+        Vault::from_bytes(&saved).unwrap().unlock("pw").unwrap();
+    }
+
+    #[test]
+    fn an_upgraded_vault_still_merges_the_legacy_file_it_came_from() {
+        // iOS folds the file on disk into every write. Right after the unlock
+        // that binds the wrap, that file is still the legacy copy.
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let v4 = legacy_file(&vault, "pw", MAGIC_V4);
+        let mut loaded = Vault::from_bytes(&v4).unwrap();
+        loaded.unlock("pw").unwrap();
+        loaded.merge_remote(&v4).unwrap();
+        assert_eq!(loaded.list_items(false).unwrap().len(), 1);
     }
 }

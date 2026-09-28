@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Security: vault files are now `SYBRVLT6`. Relabelling a V5 file as the
+  unauthenticated V4 format took two bytes and no key, and the result unlocked
+  and was re-signed on the next save — so whoever could write the file could
+  drop items, bring back purged ones or restore an old password's header.
+  The master-password wrap now names the authenticated container, and quick
+  unlock or a USB key only opens authenticated files. A vault upgrades the
+  next time it is unlocked with the master password. Earlier builds refuse V6
+  files as newer: update every device before syncing.
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native

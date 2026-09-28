@@ -8,18 +8,27 @@ changes.
 
 ## Authenticated files and concurrent writes
 
-New unlocked saves use `SYBRVLT5`. A domain-separated HMAC-SHA256 under the
+New unlocked saves use `SYBRVLT6`. A domain-separated HMAC-SHA256 under the
 vault key covers the complete serialized body: header, encrypted item list and
 purge records. Unlock and sync verify it before accepting changes, including
 empty remote vaults. Per-item AEAD remains unchanged. Invalid authentication is
 an error and never permission to replace a remote file.
 
-V1–V4 files still open; saving after unlock upgrades them. A locked legacy copy
-stays in the legacy format until the key is available. During migration, legacy
-sync can import authenticated item ciphertext with the same master wrapping,
-but cannot introduce unverified purge records or password rotations. Start by
-opening and syncing the latest existing copy with the updated app. Update all
-devices before continuing: older Arca builds intentionally refuse V5 files.
+V1–V4 files carry no tag, so anyone who can write a file could once relabel a
+newer one as V4 and have it unlock. From V6 the master-password wrap names the
+authenticated container in its AAD, so a relabelled file no longer opens with
+the password, and quick unlock or a USB key never opens an unauthenticated
+file at all. A V5 vault binds its wrap the next time it is unlocked with the
+master password; a device that only uses quick unlock adopts the bound wrap
+from the first V6 file it syncs.
+
+V1–V4 files still open with the master password; saving after unlock upgrades
+them. A locked legacy copy stays in the legacy format until the key is
+available. During migration, legacy sync can import authenticated item
+ciphertext from the same password's header, but cannot introduce unverified
+purge records or password rotations. Start by opening and syncing the latest
+existing copy with the updated app. Update all devices before continuing: older
+Arca builds intentionally refuse V6 files.
 Legacy formats have no whole-file integrity protection; this upgrade cannot
 retroactively authenticate an old file or provide protection against replay of
 an entire previously valid file.

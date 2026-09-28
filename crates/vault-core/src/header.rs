@@ -93,7 +93,21 @@ impl KdfParams {
         v.extend_from_slice(&self.salt);
         v
     }
+
+    /// AAD for the master-password wrap. A `bound` wrap names the
+    /// authenticated container, so it cannot be opened from inside an older,
+    /// unauthenticated one.
+    pub(crate) fn master_wrap_aad(&self, bound: bool) -> Vec<u8> {
+        let params = self.aad();
+        if bound {
+            [BOUND_WRAP_CONTEXT, &params].concat()
+        } else {
+            params
+        }
+    }
 }
+
+const BOUND_WRAP_CONTEXT: &[u8] = b"arca/master-wrap/authenticated-container\0";
 
 /// The cleartext vault header.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,10 +135,28 @@ impl VaultHeader {
     pub fn check_master_password(&self, password: &str) -> bool {
         crypto::derive_master_key(password, &self.kdf)
             .and_then(|key| {
-                crypto::unwrap_key(&key, &self.master_wrapped_vault_key, &self.kdf.aad())
+                crypto::unwrap_key(
+                    &key,
+                    &self.master_wrapped_vault_key,
+                    &self.master_wrap_aad(),
+                )
             })
             .is_ok()
     }
+
+    /// Whether the master wrap is bound to authenticated containers (v6+).
+    pub(crate) fn master_wrap_is_bound(&self) -> bool {
+        self.format_version >= Self::BOUND_WRAP_VERSION
+    }
+
+    /// The AAD this header's master wrap was sealed with.
+    pub(crate) fn master_wrap_aad(&self) -> Vec<u8> {
+        self.kdf.master_wrap_aad(self.master_wrap_is_bound())
+    }
+
+    /// First version whose master wrap only opens an authenticated container.
+    pub(crate) const BOUND_WRAP_VERSION: u16 = 6;
+
     /// Current on-disk format version understood by this build.
     ///
     /// v1 (never released with real data): item payloads encoded with bincode.
@@ -136,7 +168,9 @@ impl VaultHeader {
     /// v4: item payloads carry encrypted revision ancestry; `SYBRVLT4` prevents
     ///     older clients from silently accepting and then stripping it.
     /// v5: the complete container carries a vault-key authentication tag.
-    pub const FORMAT_VERSION: u16 = 5;
+    /// v6: the master wrap is bound to that tag's container (`SYBRVLT6`), so a
+    ///     file relabelled as v4 or older no longer opens with the password.
+    pub const FORMAT_VERSION: u16 = 6;
 
     /// Validate that this build can read the header.
     pub(crate) fn check_supported(&self) -> Result<()> {
