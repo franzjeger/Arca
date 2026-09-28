@@ -35,3 +35,8 @@ zeroize.workspace = true
 p256 = { workspace = true }
 # Only to decode the attestation object in the registration test.
 ciborium = { workspace = true }
+
+# Not the workspace's lints, which forbid `unsafe`: this crate is the C ABI
+# the Swift apps call, and every entry point takes raw pointers.
+[lints.clippy]
+too_many_lines = "warn"

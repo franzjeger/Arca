@@ -1429,116 +1429,85 @@ pub fn get_item(state: St<'_>, id: String) -> Result<ItemDetailDto, CmdError> {
 fn do_get_item(state: &Mutex<AppState>, id: &str) -> Result<ItemDetailDto, CmdError> {
     let st = guard(state)?;
     let item = st.vault()?.get_item(parse_id(id)?)?;
-    let (title, username, url, notes, has_password, has_totp, password_strength) = match &item.data
-    {
-        VaultItem::Login {
-            title,
-            username,
-            url,
-            notes,
-            password,
-            totp_secret,
-        } => (
-            title.clone(),
-            username.clone(),
-            url.clone(),
-            notes.clone(),
-            !password.is_empty(),
-            totp_secret
-                .as_deref()
-                .map(|s| !s.is_empty())
-                .unwrap_or(false),
-            if password.is_empty() {
-                None
-            } else {
-                Some(strength_str(estimate_strength(password)).to_string())
-            },
-        ),
-        VaultItem::Wifi {
-            title,
-            password,
-            notes,
-            ..
-        } => (
-            title.clone(),
-            String::new(),
-            String::new(),
-            notes.clone(),
-            !password.is_empty(),
-            false,
-            if password.is_empty() {
-                None
-            } else {
-                Some(strength_str(estimate_strength(password)).to_string())
-            },
-        ),
-        // Secure note: the body rides in `notes` (shown directly in the detail
-        // pane, like a login's notes; the vault is unlocked to view it).
-        VaultItem::SecureNote { title, body } => (
-            title.clone(),
-            String::new(),
-            String::new(),
-            body.clone(),
-            false,
-            false,
-            None,
-        ),
-        // A bookmark's URL is the whole point of it, so it must not fall into
-        // the stub arm below and arrive with nothing but a title.
-        VaultItem::Bookmark {
-            title, url, notes, ..
-        } => (
-            title.clone(),
-            String::new(),
-            url.clone(),
-            notes.clone(),
-            false,
-            false,
-            None,
-        ),
-        // Stub kinds expose only their title for now.
-        other => (
-            other.title().to_string(),
-            String::new(),
-            String::new(),
-            String::new(),
-            false,
-            false,
-            None,
-        ),
-    };
-    // Wi-Fi-only metadata (empty/false for every other kind).
-    let (ssid, security, hidden) = match &item.data {
-        VaultItem::Wifi {
-            ssid,
-            security,
-            hidden,
-            ..
-        } => (ssid.clone(), security.clone(), *hidden),
-        _ => (String::new(), String::new(), false),
-    };
-    let folder = match &item.data {
-        VaultItem::Bookmark { folder, .. } => folder.clone(),
-        _ => String::new(),
-    };
-    Ok(ItemDetailDto {
-        id: item.id.to_string(),
-        kind: kind_str(item.data.kind()).to_string(),
-        title,
-        username,
-        url,
-        notes,
-        has_password,
-        has_totp,
-        password_strength,
-        is_deleted: item.is_deleted(),
-        created_at: item.created_at,
-        modified_at: item.modified_at,
-        ssid,
-        security,
-        hidden,
-        folder,
-    })
+    Ok(ItemDetailDto::of(&item))
+}
+
+impl ItemDetailDto {
+    /// What the detail pane shows of `item`: everything but the secrets, which
+    /// are fetched one at a time when asked for.
+    fn of(item: &Item) -> Self {
+        let mut dto = Self {
+            id: item.id.to_string(),
+            kind: kind_str(item.data.kind()).to_string(),
+            // Stub kinds expose only their title for now.
+            title: item.data.title().to_string(),
+            username: String::new(),
+            url: String::new(),
+            notes: String::new(),
+            has_password: false,
+            has_totp: false,
+            password_strength: None,
+            is_deleted: item.is_deleted(),
+            created_at: item.created_at,
+            modified_at: item.modified_at,
+            ssid: String::new(),
+            security: String::new(),
+            hidden: false,
+            folder: String::new(),
+        };
+        match &item.data {
+            VaultItem::Login {
+                username,
+                url,
+                notes,
+                password,
+                totp_secret,
+                ..
+            } => {
+                dto.username = username.clone();
+                dto.url = url.clone();
+                dto.notes = notes.clone();
+                dto.describe_password(password);
+                dto.has_totp = totp_secret.as_deref().is_some_and(|s| !s.is_empty());
+            }
+            VaultItem::Wifi {
+                password,
+                notes,
+                ssid,
+                security,
+                hidden,
+                ..
+            } => {
+                dto.notes = notes.clone();
+                dto.describe_password(password);
+                dto.ssid = ssid.clone();
+                dto.security = security.clone();
+                dto.hidden = *hidden;
+            }
+            // Secure note: the body rides in `notes` (shown directly in the detail
+            // pane, like a login's notes; the vault is unlocked to view it).
+            VaultItem::SecureNote { body, .. } => dto.notes = body.clone(),
+            // A bookmark's URL is the whole point of it, so it must not arrive
+            // with nothing but a title.
+            VaultItem::Bookmark {
+                url, notes, folder, ..
+            } => {
+                dto.url = url.clone();
+                dto.notes = notes.clone();
+                dto.folder = folder.clone();
+            }
+            _ => {}
+        }
+        dto
+    }
+
+    /// Whether there is a password, and how strong: never the password itself.
+    fn describe_password(&mut self, password: &str) {
+        self.has_password = !password.is_empty();
+        self.password_strength = self
+            .has_password
+            .then(|| strength_str(estimate_strength(password)).to_string());
+    }
 }
 
 #[derive(Serialize)]
@@ -1573,26 +1542,7 @@ pub async fn check_breaches(
     app: tauri::AppHandle,
     state: St<'_>,
 ) -> Result<BreachReport, CmdError> {
-    // (id, prefix, suffix) for every login, computed under the lock.
-    let entries: Vec<(String, String, String)> = {
-        let st = guard(state.inner())?;
-        let vault = st.vault.as_ref().ok_or_else(CmdError::no_vault)?;
-        if !vault.is_unlocked() {
-            return Err(CmdError::new("locked", "Unlock the vault first."));
-        }
-        let mut out = Vec::new();
-        if let Ok(active) = vault.active_items() {
-            for item in active {
-                if let VaultItem::Login { password, .. } = &item.data {
-                    if !password.is_empty() {
-                        let (p, suf) = vault_core::breach::prefix_suffix(password);
-                        out.push((item.id.to_string(), p, suf));
-                    }
-                }
-            }
-        }
-        out
-    };
+    let entries = breach_entries(state.inner())?;
     if entries.is_empty() {
         return Ok(BreachReport {
             hits: Vec::new(),
@@ -1600,45 +1550,77 @@ pub async fn check_breaches(
             unchecked: 0,
         });
     }
-
     tauri::async_runtime::spawn_blocking(move || {
-        use std::collections::{HashMap, HashSet};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Mutex};
+        let ranges = fetch_breach_ranges(&app, &entries);
+        breach_report(&entries, &ranges)
+    })
+    .await
+    .map_err(|_| CmdError::new("internal", "breach-check task failed"))
+}
 
-        // Fetch each DISTINCT prefix exactly once. Work used to be split by
-        // login, with a per-worker cache, so a vault with reused passwords (or
-        // simply two logins whose hashes share a prefix) fetched the same range
-        // several times: ~640 requests for ~640 logins, minutes of waiting. Only
-        // the prefix set actually costs network time; matching suffixes is local.
-        let prefixes: Vec<String> = entries
-            .iter()
-            .map(|(_, p, _)| p.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let total = prefixes.len();
+/// A login to look up: its id, and its password's hash prefix and suffix.
+struct BreachEntry {
+    id: String,
+    prefix: String,
+    suffix: String,
+}
 
-        // Each response is padded to a uniform ~80 KB, so latency dominates and
-        // concurrency is what helps. The range API is a cached, public endpoint
-        // designed for exactly this.
-        const WORKERS: usize = 16;
+/// Every login with a password, hashed under the lock. Nothing else leaves it.
+fn breach_entries(state: &Mutex<AppState>) -> Result<Vec<BreachEntry>, CmdError> {
+    let st = guard(state)?;
+    let vault = st.vault.as_ref().ok_or_else(CmdError::no_vault)?;
+    if !vault.is_unlocked() {
+        return Err(CmdError::new("locked", "Unlock the vault first."));
+    }
+    let mut entries = Vec::new();
+    for item in vault.active_items()? {
+        if let VaultItem::Login { password, .. } = &item.data {
+            if !password.is_empty() {
+                let (prefix, suffix) = vault_core::breach::prefix_suffix(password);
+                entries.push(BreachEntry {
+                    id: item.id.to_string(),
+                    prefix,
+                    suffix,
+                });
+            }
+        }
+    }
+    Ok(entries)
+}
 
-        let prefixes = Arc::new(prefixes);
-        let ranges: Arc<Mutex<HashMap<String, String>>> = Arc::default();
-        let next = Arc::new(AtomicUsize::new(0));
-        let done = Arc::new(AtomicUsize::new(0));
+/// The HaveIBeenPwned range for each distinct prefix, by prefix. A prefix
+/// whose range could not be fetched is simply absent.
+fn fetch_breach_ranges(
+    app: &tauri::AppHandle,
+    entries: &[BreachEntry],
+) -> std::collections::HashMap<String, String> {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let mut handles = Vec::new();
+    // Fetch each DISTINCT prefix exactly once. Work used to be split by login,
+    // with a per-worker cache, so a vault with reused passwords (or simply two
+    // logins whose hashes share a prefix) fetched the same range several
+    // times: ~640 requests for ~640 logins, minutes of waiting. Only the prefix
+    // set actually costs network time; matching suffixes is local.
+    let prefixes: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.prefix.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let total = prefixes.len();
+
+    // Each response is padded to a uniform ~80 KB, so latency dominates and
+    // concurrency is what helps. The range API is a cached, public endpoint
+    // designed for exactly this.
+    const WORKERS: usize = 16;
+
+    let ranges: Mutex<HashMap<String, String>> = Mutex::default();
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
         for _ in 0..WORKERS.min(total.max(1)) {
-            let (prefixes, ranges, next, done) = (
-                Arc::clone(&prefixes),
-                Arc::clone(&ranges),
-                Arc::clone(&next),
-                Arc::clone(&done),
-            );
-            let app = app.clone();
-            handles.push(std::thread::spawn(move || {
+            scope.spawn(|| {
                 let Ok(client) = reqwest::blocking::Client::builder()
                     .timeout(std::time::Duration::from_secs(20))
                     .build()
@@ -1647,74 +1629,72 @@ pub async fn check_breaches(
                 };
                 // Pull from a shared cursor rather than a fixed slice, so one
                 // slow response cannot leave other workers idle.
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(prefix) = prefixes.get(i) else { break };
-                    // One retry: the endpoint is rate-limited and throughput
-                    // measured wildly variable, so a single failure is usually
-                    // transient — and an unfetched prefix means those logins go
-                    // UNCHECKED, which must never be reported as "no breaches".
-                    let mut body = None;
-                    for attempt in 0..2 {
-                        if attempt > 0 {
-                            std::thread::sleep(std::time::Duration::from_millis(750));
-                        }
-                        // `Add-Padding` makes every response a uniform size, so
-                        // an on-path observer cannot infer the prefix from it.
-                        body = client
-                            .get(format!("https://api.pwnedpasswords.com/range/{prefix}"))
-                            .header("Add-Padding", "true")
-                            .send()
-                            .and_then(reqwest::blocking::Response::error_for_status)
-                            .and_then(reqwest::blocking::Response::text)
-                            .ok();
-                        if body.is_some() {
-                            break;
-                        }
-                    }
-                    if let Some(body) = body {
+                while let Some(prefix) = prefixes.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    if let Some(body) = fetch_breach_range(&client, prefix) {
                         if let Ok(mut map) = ranges.lock() {
-                            map.insert(prefix.clone(), body);
+                            map.insert((*prefix).to_string(), body);
                         }
                     }
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                     // Minutes of indeterminate spinner is not acceptable UI.
                     let _ = app.emit("breach-progress", (n, total));
                 }
-            }));
+            });
         }
-        for h in handles {
-            let _ = h.join();
-        }
+    });
+    ranges.into_inner().unwrap_or_default()
+}
 
-        let ranges = ranges
-            .lock()
-            .map_err(|_| CmdError::new("internal", "breach-check task failed"))?;
-        let mut hits = Vec::new();
-        // Logins whose range never arrived are UNCHECKED, not clean. Counting
-        // them lets the UI say so instead of implying an all-clear.
-        let mut unchecked = 0usize;
-        for (id, prefix, suffix) in &entries {
-            match ranges.get(prefix) {
-                Some(body) => {
-                    if let Some(count) = vault_core::breach::count_in_range(suffix, body) {
-                        hits.push(BreachHit {
-                            id: id.clone(),
-                            count,
-                        });
-                    }
-                }
-                None => unchecked += 1,
-            }
+/// One range, with one retry: the endpoint is rate-limited and throughput
+/// measured wildly variable, so a single failure is usually transient — and
+/// an unfetched prefix means those logins go UNCHECKED, which must never be
+/// reported as "no breaches".
+fn fetch_breach_range(client: &reqwest::blocking::Client, prefix: &str) -> Option<String> {
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(750));
         }
-        Ok(BreachReport {
-            checked: entries.len() - unchecked,
-            unchecked,
-            hits,
-        })
-    })
-    .await
-    .map_err(|_| CmdError::new("internal", "breach-check task failed"))?
+        // `Add-Padding` makes every response a uniform size, so an on-path
+        // observer cannot infer the prefix from it.
+        let body = client
+            .get(format!("https://api.pwnedpasswords.com/range/{prefix}"))
+            .header("Add-Padding", "true")
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::text);
+        if let Ok(body) = body {
+            return Some(body);
+        }
+    }
+    None
+}
+
+fn breach_report(
+    entries: &[BreachEntry],
+    ranges: &std::collections::HashMap<String, String>,
+) -> BreachReport {
+    let mut hits = Vec::new();
+    // Logins whose range never arrived are UNCHECKED, not clean. Counting them
+    // lets the UI say so instead of implying an all-clear.
+    let mut unchecked = 0usize;
+    for entry in entries {
+        match ranges.get(&entry.prefix) {
+            Some(body) => {
+                if let Some(count) = vault_core::breach::count_in_range(&entry.suffix, body) {
+                    hits.push(BreachHit {
+                        id: entry.id.clone(),
+                        count,
+                    });
+                }
+            }
+            None => unchecked += 1,
+        }
+    }
+    BreachReport {
+        checked: entries.len() - unchecked,
+        unchecked,
+        hits,
+    }
 }
 
 /// Password-health audit (weak/reused) over the active login items.
@@ -1755,151 +1735,130 @@ fn do_import_logins(state: &Mutex<AppState>, path: &str) -> Result<ImportSummary
     let mut st = write_guard(state)?;
     st.touch();
     let now = now_millis();
-
-    // Index existing active logins by (normalized host, lowercased username) so
-    // re-importing an export updates/skips instead of duplicating. Entries
-    // without a URL are never merged (a bare username is too weak an identity).
-    let mut by_key: std::collections::HashMap<(String, String), Uuid> = st
-        .vault()?
-        .list_items(false)?
-        .into_iter()
-        .filter(|s| !crate::bridge::host_of(&s.url).is_empty())
-        .map(|s| {
-            let key = (crate::bridge::host_of(&s.url), s.subtitle.to_lowercase());
-            (key, s.id)
-        })
-        .collect();
-
-    let mut imported = 0usize;
-    let mut updated = 0usize;
-    let mut duplicates = 0usize;
-    for p in parsed {
-        // A bad/unsupported TOTP value shouldn't drop the whole login: keep the
-        // credentials and just omit the code.
-        let totp_secret = vault_core::edit::normalize_totp(&p.totp).unwrap_or(None);
-
-        let host = crate::bridge::host_of(&p.url);
-        let key = (host.clone(), p.username.to_lowercase());
-        let existing = if host.is_empty() {
-            None
-        } else {
-            by_key.get(&key).copied()
-        };
-
-        if let Some(id) = existing {
-            let current = st.vault()?.get_item(id)?;
-            let (cur_title, cur_username, cur_url, cur_password, cur_totp, cur_notes) =
-                match &current.data {
-                    VaultItem::Login {
-                        title,
-                        username,
-                        url,
-                        password,
-                        totp_secret,
-                        notes,
-                    } => (
-                        title.clone(),
-                        username.clone(),
-                        url.clone(),
-                        password.clone(),
-                        totp_secret.clone(),
-                        notes.clone(),
-                    ),
-                    // The merge key comes from a Login summary, so a non-Login
-                    // hit is impossible; treat it as "not found" defensively.
-                    _ => {
-                        let item = Item::new(
-                            VaultItem::Login {
-                                title: p.title,
-                                username: p.username,
-                                password: p.password,
-                                url: p.url,
-                                totp_secret,
-                                notes: p.notes,
-                            },
-                            now,
-                        );
-                        st.vault_mut()?.upsert_item(item)?;
-                        imported += 1;
-                        continue;
-                    }
-                };
-
-            // Merge, never destroy: an empty CSV column keeps the existing
-            // value (so a username-only row can't wipe a stored password, and a
-            // browser export without TOTP/notes doesn't erase them). Title/URL/
-            // username are the user's to own — imports refresh secrets, they
-            // don't overwrite labels the user may have customized.
-            let new_password = if p.password.is_empty() {
-                cur_password.clone()
-            } else {
-                p.password
-            };
-            let new_totp = totp_secret.or_else(|| cur_totp.clone());
-            let new_notes = if p.notes.is_empty() {
-                cur_notes.clone()
-            } else {
-                p.notes
-            };
-
-            let changed =
-                new_password != cur_password || new_totp != cur_totp || new_notes != cur_notes;
-            if !changed {
-                duplicates += 1;
-                continue;
-            }
-
-            let item = Item {
-                id: current.id,
-                created_at: current.created_at,
-                modified_at: now,
-                deleted_at: None,
-                revision: current.revision,
-                revision_ancestors: current.revision_ancestors.clone(),
-                password_history: current.password_history.clone(),
-                sync_conflict: current.sync_conflict.clone(),
-                data: VaultItem::Login {
-                    title: cur_title,
-                    username: cur_username,
-                    url: cur_url,
-                    password: new_password,
-                    totp_secret: new_totp,
-                    notes: new_notes,
-                },
-            };
-            st.vault_mut()?.upsert_item(item)?;
-            updated += 1;
-            continue;
+    let mut known = logins_by_site_and_user(st.vault()?)?;
+    let mut summary = ImportSummary {
+        imported: 0,
+        updated: 0,
+        duplicates: 0,
+        skipped,
+    };
+    for row in parsed {
+        match import_login(st.vault_mut()?, &mut known, row, now)? {
+            Imported::New => summary.imported += 1,
+            Imported::Updated => summary.updated += 1,
+            Imported::Unchanged => summary.duplicates += 1,
         }
-
-        let item = Item::new(
-            VaultItem::Login {
-                title: p.title,
-                username: p.username,
-                password: p.password,
-                url: p.url,
-                totp_secret,
-                notes: p.notes,
-            },
-            now,
-        );
-        // Register the new item so a second row for the same site + username
-        // within this file dedupes against it instead of importing twice.
-        if !host.is_empty() {
-            by_key.insert(key, item.id);
-        }
-        st.vault_mut()?.upsert_item(item)?;
-        imported += 1;
     }
-    if imported > 0 || updated > 0 {
+    if summary.imported > 0 || summary.updated > 0 {
         persist(&mut st)?;
     }
-    Ok(ImportSummary {
-        imported,
-        updated,
-        duplicates,
-        skipped,
-    })
+    Ok(summary)
+}
+
+/// What one imported row did.
+enum Imported {
+    New,
+    Updated,
+    Unchanged,
+}
+
+/// What a re-import is matched on: the normalized host and the lowercased
+/// username. A row without a URL never merges; a bare username is too weak an
+/// identity.
+type LoginKey = (String, String);
+
+fn login_key(url: &str, username: &str) -> Option<LoginKey> {
+    let host = crate::bridge::host_of(url);
+    (!host.is_empty()).then(|| (host, username.to_lowercase()))
+}
+
+/// The active logins by [`login_key`], so re-importing an export updates or
+/// skips instead of duplicating.
+fn logins_by_site_and_user(
+    vault: &Vault,
+) -> Result<std::collections::HashMap<LoginKey, Uuid>, CmdError> {
+    Ok(vault
+        .list_items(false)?
+        .into_iter()
+        .filter(|login| login.kind == ItemKind::Login)
+        .filter_map(|login| Some((login_key(&login.url, &login.subtitle)?, login.id)))
+        .collect())
+}
+
+/// Add `row`, or refresh the login it matches. Merge, never destroy: an empty
+/// column keeps what is stored, so a username-only row cannot wipe a password
+/// and a browser export without TOTP or notes does not erase them. Title, URL
+/// and username stay as they are: an import refreshes secrets, not labels the
+/// user may have customized.
+fn import_login(
+    vault: &mut Vault,
+    known: &mut std::collections::HashMap<LoginKey, Uuid>,
+    row: ParsedLogin,
+    now: i64,
+) -> Result<Imported, CmdError> {
+    // A bad or unsupported TOTP value shouldn't drop the whole login: keep the
+    // credentials and just omit the code.
+    let totp = vault_core::edit::normalize_totp(&row.totp).unwrap_or(None);
+    let key = login_key(&row.url, &row.username);
+    let Some(id) = key.as_ref().and_then(|key| known.get(key)).copied() else {
+        let id = vault.save_login(
+            None,
+            vault_core::LoginEdit {
+                title: row.title,
+                username: row.username,
+                url: row.url,
+                password: Change::Set(row.password),
+                totp_secret: totp.map_or(Change::Keep, Change::Set),
+                notes: Change::Set(row.notes),
+            },
+            now,
+        )?;
+        // A second row for the same site and username in this file dedupes
+        // against this one instead of importing twice.
+        if let Some(key) = key {
+            known.insert(key, id);
+        }
+        return Ok(Imported::New);
+    };
+
+    let current = vault.get_item(id)?;
+    let VaultItem::Login {
+        title,
+        username,
+        url,
+        password,
+        totp_secret,
+        notes,
+    } = &current.data
+    else {
+        return Err(vault_core::Error::WrongKind.into());
+    };
+    let replaces = |new: &str, old: &str| !new.is_empty() && new != old;
+    let changed = replaces(&row.password, password)
+        || totp
+            .as_ref()
+            .is_some_and(|new| Some(new) != totp_secret.as_ref())
+        || replaces(&row.notes, notes);
+    if !changed {
+        return Ok(Imported::Unchanged);
+    }
+    let keep_if_empty = |value: String| {
+        if value.is_empty() {
+            Change::Keep
+        } else {
+            Change::Set(value)
+        }
+    };
+    let edit = vault_core::LoginEdit {
+        title: title.clone(),
+        username: username.clone(),
+        url: url.clone(),
+        password: keep_if_empty(row.password),
+        totp_secret: totp.map_or(Change::Keep, Change::Set),
+        notes: keep_if_empty(row.notes),
+    };
+    vault.save_login(Some(id), edit, now)?;
+    Ok(Imported::Updated)
 }
 
 /// Open the system password manager app (macOS "Passwords"), as a convenience

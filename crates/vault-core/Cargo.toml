@@ -30,8 +30,8 @@ ciborium.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

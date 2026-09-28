@@ -415,8 +415,12 @@ fn ask_window_to_unlock(app: Option<&AppHandle>) {
 }
 
 fn unauthorized() -> Response {
+    error("unauthorized")
+}
+
+fn error(message: impl Into<String>) -> Response {
     Response::Error {
-        message: "unauthorized".into(),
+        message: message.into(),
     }
 }
 
@@ -450,9 +454,7 @@ fn hello(
             return unauthorized();
         };
         let Some(app_nonce) = vault_bridge::auth::nonce() else {
-            return Response::Error {
-                message: "internal".into(),
-            };
+            return error("internal");
         };
         let proof = vault_bridge::auth::app_proof(token, &client_nonce, &app_nonce);
         *session = Session::Challenged {
@@ -473,9 +475,7 @@ fn hello(
     // because we do not know what it means and guessing is worse than
     // saying so. Absent is the pre-versioning native host, i.e. v1.
     if protocol.is_some_and(|v| !(1..=PROTOCOL_VERSION).contains(&v)) {
-        return Response::Error {
-            message: "unsupported_protocol".into(),
-        };
+        return error("unsupported_protocol");
     }
     *session = Session::Authed;
     welcome(nonce.map(|n| vault_bridge::auth::v2_proof(token, &n)))
@@ -659,16 +659,10 @@ fn list_matches(ctx: &mut Ctx, url: String) -> Response {
     let state = ctx.state;
     let st = match state.lock() {
         Ok(s) => s,
-        Err(_) => {
-            return Response::Error {
-                message: "internal".into(),
-            }
-        }
+        Err(_) => return error("internal"),
     };
     let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
-        return Response::Error {
-            message: "locked".into(),
-        };
+        return error("locked");
     };
     let mut items = Vec::new();
     // Passkeys whose rp_id does not match this page directly. Resolved
@@ -750,26 +744,16 @@ fn fill(ctx: &mut Ctx, id: String, url: String) -> Response {
     {
         let st = match state.lock() {
             Ok(s) => s,
-            Err(_) => {
-                return Response::Error {
-                    message: "internal".into(),
-                }
-            }
+            Err(_) => return error("internal"),
         };
         let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
+            return error("locked");
         };
         let Ok(uuid) = Uuid::parse_str(&id) else {
-            return Response::Error {
-                message: "not_found".into(),
-            };
+            return error("not_found");
         };
         let Ok(item) = vault.get_item(uuid) else {
-            return Response::Error {
-                message: "not_found".into(),
-            };
+            return error("not_found");
         };
         // Trashed is trashed. `get_item` answers for deleted items too —
         // it is the Trash view's reader as much as autofill's — so a
@@ -779,9 +763,7 @@ fn fill(ctx: &mut Ctx, id: String, url: String) -> Response {
         // earlier session or from something else on this machine, and
         // invisible to the user either way.
         if item.is_deleted() {
-            return Response::Error {
-                message: "not_found".into(),
-            };
+            return error("not_found");
         }
         let VaultItem::Login {
             url: u,
@@ -791,15 +773,11 @@ fn fill(ctx: &mut Ctx, id: String, url: String) -> Response {
             ..
         } = &item.data
         else {
-            return Response::Error {
-                message: "not_found".into(),
-            };
+            return error("not_found");
         };
         // Origin binding: never hand a credential to a non-matching host.
         if !domain_matches(u, &url) {
-            return Response::Error {
-                message: "origin_mismatch".into(),
-            };
+            return error("origin_mismatch");
         }
         confirm = st.settings.confirm_autofill;
         username = un.clone();
@@ -815,9 +793,7 @@ fn fill(ctx: &mut Ctx, id: String, url: String) -> Response {
             title: title.clone(),
         };
         if !consent(&ctx) {
-            return Response::Error {
-                message: "denied".into(),
-            };
+            return error("denied");
         }
         // The prompt can outlast the vault: with lock-on-blur, glancing
         // back at the browser while Arca asks locks it, and a credential
@@ -827,9 +803,7 @@ fn fill(ctx: &mut Ctx, id: String, url: String) -> Response {
             .map(|st| !st.vault.as_ref().is_some_and(|v| v.is_unlocked()))
             .unwrap_or(true);
         if locked {
-            return Response::Error {
-                message: "locked".into(),
-            };
+            return error("locked");
         }
     }
 
@@ -854,9 +828,7 @@ fn passkey_create(
     // the browser / platform authenticator takes over (the shim falls
     // back on this error). No prompt, ever.
     if !passkeys_enabled(state) {
-        return Response::Error {
-            message: "passkeys_disabled".into(),
-        };
+        return error("passkeys_disabled");
     }
     // Anti-phishing: the RP id must belong to the page's origin.
     log_passkey_request(state, &origin, &rp_id, true);
@@ -864,86 +836,20 @@ fn passkey_create(
     // registered for login.microsoft.com must be usable on the page
     // Microsoft actually redirects you to. No lock is held here.
     if !rp_id_allows_origin(&rp_id, &origin) {
-        return Response::Error {
-            message: "origin_mismatch".into(),
-        };
+        return error("origin_mismatch");
     }
-    // Must be unlocked before we prompt the user.
-    let mut blocked_same_account = false;
-    {
-        let st = match state.lock() {
-            Ok(s) => s,
-            Err(_) => {
-                return Response::Error {
-                    message: "internal".into(),
-                }
+    match registered_already(state, &rp_id, &user_handle, &exclude_credentials) {
+        Err(response) => return response,
+        Ok(Some(Registered::Excluded)) => return error("excluded"),
+        Ok(Some(Registered::SameAccount)) => {
+            // Emitted outside the state lock: this reaches the webview, and
+            // the webview answers by calling commands that take that lock.
+            if let Some(app) = app {
+                let _ = app.emit("passkey-registration-blocked", rp_id.clone());
             }
-        };
-        let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
-        };
-        // Refuse a create WITHOUT prompting when we already hold a
-        // passkey for this relying party — this is the loop killer.
-        // Sites like GitHub re-fire `create` on nearly every sign-in;
-        // if we serviced each one we'd pop a Touch ID prompt and pile up
-        // a duplicate credential every single time (exactly the reported
-        // bug). Refusing here makes the page see InvalidStateError, the
-        // spec's "you already have a credential" signal, so it stops.
-        //
-        // Two conditions trigger the refusal, both BEFORE any prompt:
-        //   1. The site listed a credential we hold in excludeCredentials
-        //      (the polite, spec-driven path), OR
-        //   2. we hold ANY passkey for this rp_id with the same
-        //      user_handle — even when the site sent no exclude list.
-        //      Byte-equal handle so a genuinely different account can
-        //      still register once. (An RP that legitimately wants to
-        //      re-register must first remove the old passkey in Arca.)
-        //
-        // Case 2 is a house rule, not the spec, and it has a nasty
-        // failure mode: if the RP does NOT actually hold the credential
-        // — a registration it rejected, or one deleted server-side —
-        // then re-registering is the only way back, and this silently
-        // refuses it. The page renders our InvalidStateError as "you
-        // already have a passkey", which is a lie from the RP's point of
-        // view, and nothing anywhere says the way out is to delete the
-        // passkey in Arca first. So case 2 is reported to the user;
-        // case 1 is the RP's own polite signal and needs no narration.
-        if let Ok(active) = vault.active_items() {
-            for item in active {
-                if let VaultItem::Passkey {
-                    rp_id: r,
-                    credential_id: cid,
-                    user_handle: uh,
-                    ..
-                } = &item.data
-                {
-                    if *r != rp_id {
-                        continue;
-                    }
-                    if exclude_credentials.iter().any(|e| e == cid) {
-                        return Response::Error {
-                            message: "excluded".into(),
-                        };
-                    }
-                    if *uh == user_handle {
-                        blocked_same_account = true;
-                        break;
-                    }
-                }
-            }
-        };
-    }
-    if blocked_same_account {
-        // Emitted outside the state lock: this reaches the webview, and
-        // the webview answers by calling commands that take that lock.
-        if let Some(app) = app {
-            let _ = app.emit("passkey-registration-blocked", rp_id.clone());
+            return error("excluded");
         }
-        return Response::Error {
-            message: "excluded".into(),
-        };
+        Ok(None) => {}
     }
     // Registration ALWAYS requires an explicit user approval; a silent
     // create must never register a credential. `true` = this is a NEW
@@ -951,94 +857,16 @@ fn passkey_create(
     let require_password = passkey_reprompt(state);
     let Some(user_verified) = approve_passkey(&rp_id, true, app, consent, false, require_password)
     else {
-        return Response::Error {
-            message: "denied".into(),
-        };
+        return error("denied");
     };
     let Ok(new_pk) = vault_core::passkey::create(&rp_id, user_verified) else {
-        return Response::Error {
-            message: "internal".into(),
-        };
+        return error("internal");
     };
     let credential_id = new_pk.credential_id.clone();
     let attestation_object = new_pk.attestation_object;
-    {
-        let mut st = match state.lock() {
-            Ok(s) => s,
-            Err(_) => {
-                return Response::Error {
-                    message: "internal".into(),
-                }
-            }
-        };
-        let AppState { store, vault, .. } = &mut *st;
-        let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
-        };
-        // Dedup: if a passkey for the same relying party AND the same
-        // user handle already exists, REPLACE it (reuse its id) instead
-        // of piling up a duplicate. Only when the user handle is
-        // non-empty — an empty handle can't distinguish accounts, so we
-        // must not collapse them.
-        //
-        // This is a RACE GUARD, not the ordinary path: the check above
-        // already refused that exact condition before prompting, so the
-        // only way to arrive here holding a match is for one to have
-        // been written while the approval dialog was open. Do not read
-        // it as "re-registration replaces the old key" — re-registration
-        // never gets this far.
-        let existing_id = if user_handle.is_empty() {
-            None
-        } else {
-            vault.active_items().ok().and_then(|mut active| {
-                active.find_map(|item| match &item.data {
-                    VaultItem::Passkey {
-                        rp_id: r,
-                        user_handle: uh,
-                        ..
-                    } if *r == rp_id && *uh == user_handle => Some(item.id),
-                    _ => None,
-                })
-            })
-        };
-        let mut item = Item::new(
-            VaultItem::Passkey {
-                title: rp_id.clone(),
-                rp_id: rp_id.clone(),
-                user_name,
-                user_handle,
-                credential_id: new_pk.credential_id,
-                private_key: new_pk.private_key.to_vec(),
-                sign_count: 0,
-            },
-            crate::state::now_millis(),
-        );
-        if let Some(id) = existing_id {
-            item.id = id;
-        }
-        let new_id = item.id;
-        if vault.upsert_item(item).is_err() {
-            return Response::Error {
-                message: "internal".into(),
-            };
-        }
-        if store.save_synced(vault).is_err() {
-            // Roll the in-memory passkey back out. Left in place, it is
-            // an orphan the site never registered, and the exclude-list
-            // check would answer "excluded" on every retry — locking the
-            // user out of registering until they hunt it down by hand.
-            // Only for a fresh registration: reusing an existing id via
-            // the race guard means undoing would delete a real passkey.
-            if existing_id.is_none() {
-                let _ = vault.purge_item(new_id, crate::state::now_millis());
-            }
-            return Response::Error {
-                message: "internal".into(),
-            };
-        }
-        crate::sync::mark_dirty();
+    let key = (new_pk.credential_id, new_pk.private_key.to_vec());
+    if let Err(response) = store_new_passkey(state, &rp_id, user_name, user_handle, key) {
+        return response;
     }
     if let Some(app) = app {
         let _ = app.emit("passkey-created", rp_id);
@@ -1047,6 +875,147 @@ fn passkey_create(
         credential_id,
         attestation_object,
     }
+}
+
+/// A passkey this relying party already has, which a registration would
+/// duplicate.
+enum Registered {
+    /// The site listed it in `excludeCredentials`.
+    Excluded,
+    /// Same relying party and user handle, whatever the site listed.
+    SameAccount,
+}
+
+/// Checked before the user is asked anything, with the vault unlocked.
+fn registered_already(
+    state: &Mutex<AppState>,
+    rp_id: &str,
+    user_handle: &[u8],
+    exclude_credentials: &[Vec<u8>],
+) -> Result<Option<Registered>, Response> {
+    let st = state.lock().map_err(|_| error("internal"))?;
+    let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
+        return Err(error("locked"));
+    };
+    // Refuse a create WITHOUT prompting when we already hold a
+    // passkey for this relying party — this is the loop killer.
+    // Sites like GitHub re-fire `create` on nearly every sign-in;
+    // if we serviced each one we'd pop a Touch ID prompt and pile up
+    // a duplicate credential every single time (exactly the reported
+    // bug). Refusing here makes the page see InvalidStateError, the
+    // spec's "you already have a credential" signal, so it stops.
+    //
+    // Two conditions trigger the refusal, both BEFORE any prompt:
+    //   1. The site listed a credential we hold in excludeCredentials
+    //      (the polite, spec-driven path), OR
+    //   2. we hold ANY passkey for this rp_id with the same
+    //      user_handle — even when the site sent no exclude list.
+    //      Byte-equal handle so a genuinely different account can
+    //      still register once. (An RP that legitimately wants to
+    //      re-register must first remove the old passkey in Arca.)
+    //
+    // Case 2 is a house rule, not the spec, and it has a nasty
+    // failure mode: if the RP does NOT actually hold the credential
+    // — a registration it rejected, or one deleted server-side —
+    // then re-registering is the only way back, and this silently
+    // refuses it. The page renders our InvalidStateError as "you
+    // already have a passkey", which is a lie from the RP's point of
+    // view, and nothing anywhere says the way out is to delete the
+    // passkey in Arca first. So case 2 is reported to the user;
+    // case 1 is the RP's own polite signal and needs no narration.
+    for item in vault.active_items().into_iter().flatten() {
+        if let VaultItem::Passkey {
+            rp_id: r,
+            credential_id: cid,
+            user_handle: uh,
+            ..
+        } = &item.data
+        {
+            if r.as_str() != rp_id {
+                continue;
+            }
+            if exclude_credentials.iter().any(|e| e == cid) {
+                return Ok(Some(Registered::Excluded));
+            }
+            if uh.as_slice() == user_handle {
+                return Ok(Some(Registered::SameAccount));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Store a passkey just created for `rp_id`: its credential id and private
+/// key. Rolled back out if the vault cannot be saved.
+fn store_new_passkey(
+    state: &Mutex<AppState>,
+    rp_id: &str,
+    user_name: String,
+    user_handle: Vec<u8>,
+    (credential_id, private_key): (Vec<u8>, Vec<u8>),
+) -> Result<(), Response> {
+    let mut st = state.lock().map_err(|_| error("internal"))?;
+    let AppState { store, vault, .. } = &mut *st;
+    let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
+        return Err(error("locked"));
+    };
+    // Dedup: if a passkey for the same relying party AND the same
+    // user handle already exists, REPLACE it (reuse its id) instead
+    // of piling up a duplicate. Only when the user handle is
+    // non-empty — an empty handle can't distinguish accounts, so we
+    // must not collapse them.
+    //
+    // This is a RACE GUARD, not the ordinary path: the check above
+    // already refused that exact condition before prompting, so the
+    // only way to arrive here holding a match is for one to have
+    // been written while the approval dialog was open. Do not read
+    // it as "re-registration replaces the old key" — re-registration
+    // never gets this far.
+    let existing_id = if user_handle.is_empty() {
+        None
+    } else {
+        vault.active_items().ok().and_then(|mut active| {
+            active.find_map(|item| match &item.data {
+                VaultItem::Passkey {
+                    rp_id: r,
+                    user_handle: uh,
+                    ..
+                } if r == rp_id && *uh == user_handle => Some(item.id),
+                _ => None,
+            })
+        })
+    };
+    let mut item = Item::new(
+        VaultItem::Passkey {
+            title: rp_id.to_owned(),
+            rp_id: rp_id.to_owned(),
+            user_name,
+            user_handle,
+            credential_id,
+            private_key,
+            sign_count: 0,
+        },
+        crate::state::now_millis(),
+    );
+    if let Some(id) = existing_id {
+        item.id = id;
+    }
+    let new_id = item.id;
+    vault.upsert_item(item).map_err(|_| error("internal"))?;
+    if store.save_synced(vault).is_err() {
+        // Roll the in-memory passkey back out. Left in place, it is
+        // an orphan the site never registered, and the exclude-list
+        // check would answer "excluded" on every retry — locking the
+        // user out of registering until they hunt it down by hand.
+        // Only for a fresh registration: reusing an existing id via
+        // the race guard means undoing would delete a real passkey.
+        if existing_id.is_none() {
+            let _ = vault.purge_item(new_id, crate::state::now_millis());
+        }
+        return Err(error("internal"));
+    }
+    crate::sync::mark_dirty();
+    Ok(())
 }
 
 fn passkey_get(
@@ -1061,66 +1030,23 @@ fn passkey_get(
     let app = ctx.app;
     let consent = &mut *ctx.consent;
     if !passkeys_enabled(state) {
-        return Response::Error {
-            message: "passkeys_disabled".into(),
-        };
+        return error("passkeys_disabled");
     }
     log_passkey_request(state, &origin, &rp_id, false);
     // Related Origin Requests apply to the ceremony too — a passkey
     // registered for login.microsoft.com must be usable on the page
     // Microsoft actually redirects you to. No lock is held here.
     if !rp_id_allows_origin(&rp_id, &origin) {
-        return Response::Error {
-            message: "origin_mismatch".into(),
-        };
+        return error("origin_mismatch");
     }
     // Discover eligible accounts without choosing the first matching key.
-    let choices = {
-        let st = match state.lock() {
-            Ok(s) => s,
-            Err(_) => {
-                return Response::Error {
-                    message: "internal".into(),
-                }
-            }
-        };
-        let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
-        };
-        vault
-            .active_items()
-            .into_iter()
-            .flatten()
-            .filter_map(|item| {
-                if let VaultItem::Passkey {
-                    rp_id: r,
-                    credential_id,
-                    user_name,
-                    ..
-                } = &item.data
-                {
-                    let allowed =
-                        allow_credentials.is_empty() || allow_credentials.contains(credential_id);
-                    if *r == rp_id && allowed {
-                        return Some(PasskeyChoice {
-                            id: item.id.to_string(),
-                            account: user_name.clone(),
-                            title: item.data.title().to_owned(),
-                            credential_id: credential_id.clone(),
-                        });
-                    }
-                }
-                None
-            })
-            .collect::<Vec<_>>()
+    let choices = match passkey_choices(state, &rp_id, &allow_credentials) {
+        Ok(choices) => choices,
+        Err(response) => return response,
     };
     if choices.is_empty() {
         log_passkey_outcome(state, &rp_id, "no_passkey_stored");
-        return Response::Error {
-            message: "not_found".into(),
-        };
+        return error("not_found");
     }
     // Who chooses, and whether choosing already counts as approving.
     //
@@ -1135,66 +1061,28 @@ fn passkey_get(
         (1, _) if picked => (choices[0].id.clone(), true),
         (1, None) => (choices[0].id.clone(), false),
         (_, None) => {
-            return Response::Error {
-                message: "account_selection_required".into(),
-            };
+            return error("account_selection_required");
         }
         (_, Some(app)) => {
             let Some(id) = request_passkey_choice(app, &rp_id, &choices) else {
                 log_passkey_outcome(state, &rp_id, "declined_in_chooser");
-                return Response::Error {
-                    message: "account_selection_cancelled".into(),
-                };
+                return error("account_selection_cancelled");
             };
             (id, true)
         }
     };
     let Some(choice) = choices.iter().find(|c| c.id == selected) else {
-        return Response::Error {
-            message: "account_selection_cancelled".into(),
-        };
+        return error("account_selection_cancelled");
     };
     // Reload after the choice: the vault may have locked or synced while
     // the dialog was open. Never substitute a different account.
-    let (credential_id, user_handle, private_key) = {
-        let st = match state.lock() {
-            Ok(s) => s,
-            Err(_) => {
-                return Response::Error {
-                    message: "internal".into(),
-                }
-            }
-        };
-        let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
-        };
-        let item = selected
-            .parse::<Uuid>()
-            .ok()
-            .and_then(|id| vault.get_item(id).ok());
-        match &item {
-            Some(Item {
-                data:
-                    VaultItem::Passkey {
-                        rp_id: r,
-                        credential_id: cid,
-                        user_handle,
-                        private_key,
-                        ..
-                    },
-                deleted_at: None,
-                ..
-            }) if *r == rp_id && *cid == choice.credential_id => {
-                (cid.clone(), user_handle.clone(), private_key.clone())
-            }
-            _ => {
-                return Response::Error {
-                    message: "not_found".into(),
-                }
-            }
-        }
+    let ChosenPasskey {
+        credential_id,
+        user_handle,
+        private_key,
+    } = match chosen_passkey(state, &selected, &rp_id, &choice.credential_id) {
+        Ok(chosen) => chosen,
+        Err(response) => return response,
     };
 
     // An assertion ALWAYS requires an explicit user approval — otherwise
@@ -1208,9 +1096,7 @@ fn passkey_get(
         // Cancelled, or a biometric prompt that never came back — which
         // looks to the user like the browser hanging on the sign-in.
         log_passkey_outcome(state, &rp_id, "declined_or_no_verification");
-        return Response::Error {
-            message: "denied".into(),
-        };
+        return error("denied");
     };
 
     // The prompt can outlast the vault, exactly as it can for a fill:
@@ -1225,17 +1111,13 @@ fn passkey_get(
         .unwrap_or(true);
     if locked {
         log_passkey_outcome(state, &rp_id, "locked_during_prompt");
-        return Response::Error {
-            message: "locked".into(),
-        };
+        return error("locked");
     }
 
     let Ok((authenticator_data, signature)) =
         vault_core::passkey::assert(&private_key, &rp_id, &client_data_hash, user_verified)
     else {
-        return Response::Error {
-            message: "internal".into(),
-        };
+        return error("internal");
     };
     log_passkey_outcome(state, &rp_id, "signed");
     if let Some(app) = app {
@@ -1249,12 +1131,93 @@ fn passkey_get(
     }
 }
 
+/// The passkeys stored for `rp_id` that the site allows, as accounts to
+/// choose from.
+fn passkey_choices(
+    state: &Mutex<AppState>,
+    rp_id: &str,
+    allow_credentials: &[Vec<u8>],
+) -> Result<Vec<PasskeyChoice>, Response> {
+    let st = state.lock().map_err(|_| error("internal"))?;
+    let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
+        return Err(error("locked"));
+    };
+    Ok(vault
+        .active_items()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            if let VaultItem::Passkey {
+                rp_id: r,
+                credential_id,
+                user_name,
+                ..
+            } = &item.data
+            {
+                let allowed =
+                    allow_credentials.is_empty() || allow_credentials.contains(credential_id);
+                if r == rp_id && allowed {
+                    return Some(PasskeyChoice {
+                        id: item.id.to_string(),
+                        account: user_name.clone(),
+                        title: item.data.title().to_owned(),
+                        credential_id: credential_id.clone(),
+                    });
+                }
+            }
+            None
+        })
+        .collect())
+}
+
+/// What signing an assertion needs of the passkey the user chose.
+struct ChosenPasskey {
+    credential_id: Vec<u8>,
+    user_handle: Vec<u8>,
+    private_key: Vec<u8>,
+}
+
+/// The chosen passkey, if it is still the one chosen: same item, relying
+/// party and credential, and not deleted.
+fn chosen_passkey(
+    state: &Mutex<AppState>,
+    selected: &str,
+    rp_id: &str,
+    credential_id: &[u8],
+) -> Result<ChosenPasskey, Response> {
+    let st = state.lock().map_err(|_| error("internal"))?;
+    let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
+        return Err(error("locked"));
+    };
+    let item = selected
+        .parse::<Uuid>()
+        .ok()
+        .and_then(|id| vault.get_item(id).ok());
+    match &item {
+        Some(Item {
+            data:
+                VaultItem::Passkey {
+                    rp_id: r,
+                    credential_id: cid,
+                    user_handle,
+                    private_key,
+                    ..
+                },
+            deleted_at: None,
+            ..
+        }) if r == rp_id && cid.as_slice() == credential_id => Ok(ChosenPasskey {
+            credential_id: cid.clone(),
+            user_handle: user_handle.clone(),
+            private_key: private_key.clone(),
+        }),
+        _ => Err(error("not_found")),
+    }
+}
+
 fn import_bookmarks(ctx: &mut Ctx, items: Vec<BookmarkWire>) -> Response {
     let state = ctx.state;
     let Ok(mut st) = state.lock() else {
-        return Response::Error {
-            message: "internal".into(),
-        };
+        return error("internal");
     };
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     // The ids, not just a count: a save that fails has to be undone item
@@ -1263,9 +1226,7 @@ fn import_bookmarks(ctx: &mut Ctx, items: Vec<BookmarkWire>) -> Response {
     let now = crate::state::now_millis();
     {
         let Some(vault) = st.vault.as_mut().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
+            return error("locked");
         };
         if let Ok(active) = vault.active_items() {
             for item in active {
@@ -1307,9 +1268,7 @@ fn import_bookmarks(ctx: &mut Ctx, items: Vec<BookmarkWire>) -> Response {
                 for id in &added {
                     let _ = v.purge_item(*id, now);
                 }
-                return Response::Error {
-                    message: "internal".into(),
-                };
+                return error("internal");
             }
         }
         // Every other bridge write marks dirty; this one didn't, so an
@@ -1322,14 +1281,10 @@ fn import_bookmarks(ctx: &mut Ctx, items: Vec<BookmarkWire>) -> Response {
 fn list_bookmarks(ctx: &mut Ctx) -> Response {
     let state = ctx.state;
     let Ok(st) = state.lock() else {
-        return Response::Error {
-            message: "internal".into(),
-        };
+        return error("internal");
     };
     let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
-        return Response::Error {
-            message: "locked".into(),
-        };
+        return error("locked");
     };
     let mut items = Vec::new();
     if let Ok(active) = vault.active_items() {
@@ -1359,11 +1314,7 @@ fn save_probe(ctx: &mut Ctx, url: String, username: String, password: String) ->
     }
     let st = match state.lock() {
         Ok(s) => s,
-        Err(_) => {
-            return Response::Error {
-                message: "internal".into(),
-            }
-        }
+        Err(_) => return error("internal"),
     };
     if !st.settings.save_prompt {
         return Response::SaveDecision {
@@ -1399,35 +1350,23 @@ fn save_login(ctx: &mut Ctx, url: String, username: String, password: String) ->
     let state = ctx.state;
     let app = ctx.app;
     if password.is_empty() {
-        return Response::Error {
-            message: "empty".into(),
-        };
+        return error("empty");
     }
     let mut st = match state.lock() {
         Ok(s) => s,
-        Err(_) => {
-            return Response::Error {
-                message: "internal".into(),
-            }
-        }
+        Err(_) => return error("internal"),
     };
     if !st.settings.save_prompt {
-        return Response::Error {
-            message: "disabled".into(),
-        };
+        return error("disabled");
     }
     let host = host_of(&url);
     if host.is_empty() {
-        return Response::Error {
-            message: "invalid".into(),
-        };
+        return error("invalid");
     }
     {
         let AppState { store, vault, .. } = &mut *st;
         let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
+            return error("locked");
         };
         match find_login_for_save(vault, &url, &username) {
             // Already stored with this password: nothing to do.
@@ -1435,9 +1374,7 @@ fn save_login(ctx: &mut Ctx, url: String, username: String, password: String) ->
             // Same site + username, new password: update in place.
             Some((id, _, _)) => {
                 let Ok(current) = vault.get_item(id) else {
-                    return Response::Error {
-                        message: "internal".into(),
-                    };
+                    return error("internal");
                 };
                 if let VaultItem::Login {
                     title,
@@ -1467,9 +1404,7 @@ fn save_login(ctx: &mut Ctx, url: String, username: String, password: String) ->
                         },
                     };
                     if vault.upsert_item(item).is_err() {
-                        return Response::Error {
-                            message: "internal".into(),
-                        };
+                        return error("internal");
                     }
                     if let Err(e) = store.save_synced(vault) {
                         // Put the OLD password back. The disk still has
@@ -1482,9 +1417,7 @@ fn save_login(ctx: &mut Ctx, url: String, username: String, password: String) ->
                         // the app quits. An honest failure the browser
                         // can retry is worth more than a lost secret.
                         let _ = vault.upsert_item(current);
-                        return Response::Error {
-                            message: save_failure_reason(&e),
-                        };
+                        return error(save_failure_reason(&e));
                     }
                 }
             }
@@ -1503,9 +1436,7 @@ fn save_login(ctx: &mut Ctx, url: String, username: String, password: String) ->
                 );
                 let new_id = item.id;
                 if vault.upsert_item(item).is_err() {
-                    return Response::Error {
-                        message: "internal".into(),
-                    };
+                    return error("internal");
                 }
                 if let Err(e) = store.save_synced(vault) {
                     // Same trade as the update branch, from the other
@@ -1515,9 +1446,7 @@ fn save_login(ctx: &mut Ctx, url: String, username: String, password: String) ->
                     // never a vault entry, and it must not surface in
                     // the Trash as something the user could restore.
                     let _ = vault.purge_item(new_id, crate::state::now_millis());
-                    return Response::Error {
-                        message: save_failure_reason(&e),
-                    };
+                    return error(save_failure_reason(&e));
                 }
             }
         }
@@ -1587,17 +1516,15 @@ fn unlock_for_browser(ctx: &mut Ctx) -> Response {
         #[cfg(target_os = "macos")]
         let unlocked = match crate::protected_unlock::unlock(state, app) {
             Ok(()) => true,
-            Err(error)
-                if error.code == "biometric_failed"
-                    || error.code == "unlock_cancelled"
-                    || error.code == "unlock_in_progress" =>
+            Err(failure)
+                if failure.code == "biometric_failed"
+                    || failure.code == "unlock_cancelled"
+                    || failure.code == "unlock_in_progress" =>
             {
-                return if error.code == "unlock_in_progress" {
+                return if failure.code == "unlock_in_progress" {
                     Response::UnlockRequested
                 } else {
-                    Response::Error {
-                        message: "unlock_cancelled".to_string(),
-                    }
+                    error("unlock_cancelled")
                 }
             }
             Err(_) => false,
@@ -1658,9 +1585,7 @@ fn generate(opts: vault_core::password::PasswordOptions) -> Response {
         Ok(pw) => Response::GeneratedPassword {
             password: pw.to_string(),
         },
-        Err(_) => Response::Error {
-            message: "internal".into(),
-        },
+        Err(_) => error("internal"),
     }
 }
 
@@ -1675,31 +1600,21 @@ fn create_login(
 ) -> Response {
     let state = ctx.state;
     if title.trim().is_empty() {
-        return Response::Error {
-            message: "title_required".into(),
-        };
+        return error("title_required");
     }
     let Ok(password) = vault_core::password::generate_password(&opts) else {
-        return Response::Error {
-            message: "internal".into(),
-        };
+        return error("internal");
     };
     let password = password.to_string();
 
     let mut st = match state.lock() {
         Ok(s) => s,
-        Err(_) => {
-            return Response::Error {
-                message: "internal".into(),
-            }
-        }
+        Err(_) => return error("internal"),
     };
     let id = {
         let AppState { store, vault, .. } = &mut *st;
         let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
+            return error("locked");
         };
         let item = vault_core::Item::new(
             VaultItem::Login {
@@ -1714,9 +1629,7 @@ fn create_login(
         );
         let id = item.id;
         if vault.upsert_item(item).is_err() {
-            return Response::Error {
-                message: "internal".into(),
-            };
+            return error("internal");
         }
         if store.save_synced(vault).is_err() {
             // The caller is told the creation failed, so the login must
@@ -1725,9 +1638,7 @@ fn create_login(
             // create — offered by autofill until the app quits, then
             // gone, with the account on the far end still expecting it.
             let _ = vault.purge_item(id, crate::state::now_millis());
-            return Response::Error {
-                message: "internal".into(),
-            };
+            return error("internal");
         }
         id
     };
@@ -1744,17 +1655,11 @@ fn delete_bookmarks(ctx: &mut Ctx, url: String, folder: String) -> Response {
     if url.trim().is_empty() && folder.trim().is_empty() {
         // Would match the whole collection. Refused rather than
         // interpreted generously.
-        return Response::Error {
-            message: "need a url or a folder".into(),
-        };
+        return error("need a url or a folder");
     }
     let mut st = match state.lock() {
         Ok(s) => s,
-        Err(_) => {
-            return Response::Error {
-                message: "internal".into(),
-            }
-        }
+        Err(_) => return error("internal"),
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1763,9 +1668,7 @@ fn delete_bookmarks(ctx: &mut Ctx, url: String, folder: String) -> Response {
     let removed = {
         let AppState { store, vault, .. } = &mut *st;
         let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
+            return error("locked");
         };
         let mut hits = Vec::new();
         if let Ok(active) = vault.active_items() {
@@ -1807,9 +1710,7 @@ fn delete_bookmarks(ctx: &mut Ctx, url: String, folder: String) -> Response {
                 for id in &deleted {
                     let _ = vault.restore_item(*id, now);
                 }
-                return Response::Error {
-                    message: "internal".into(),
-                };
+                return error("internal");
             }
             deleted.len()
         }
@@ -1823,17 +1724,11 @@ fn delete_bookmarks(ctx: &mut Ctx, url: String, folder: String) -> Response {
 fn delete_item(ctx: &mut Ctx, id: String) -> Response {
     let state = ctx.state;
     let Ok(uuid) = id.parse::<uuid::Uuid>() else {
-        return Response::Error {
-            message: "invalid_id".into(),
-        };
+        return error("invalid_id");
     };
     let mut st = match state.lock() {
         Ok(s) => s,
-        Err(_) => {
-            return Response::Error {
-                message: "internal".into(),
-            }
-        }
+        Err(_) => return error("internal"),
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1842,16 +1737,12 @@ fn delete_item(ctx: &mut Ctx, id: String) -> Response {
     let title = {
         let AppState { store, vault, .. } = &mut *st;
         let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
-            return Response::Error {
-                message: "locked".into(),
-            };
+            return error("locked");
         };
         // Read the title BEFORE deleting, so the reply can say what
         // went even though the item is now flagged.
         let Ok(item) = vault.get_item(uuid) else {
-            return Response::Error {
-                message: "not_found".into(),
-            };
+            return error("not_found");
         };
         // Already in the Trash: `get_item` finds it, `delete_item`
         // cheerfully re-stamps it, and the reply claimed a retraction
@@ -1860,15 +1751,11 @@ fn delete_item(ctx: &mut Ctx, id: String) -> Response {
         // told something untrue. The bridge only ever sees active items
         // anyway, so from its side the item is simply not there.
         if item.is_deleted() {
-            return Response::Error {
-                message: "not_found".into(),
-            };
+            return error("not_found");
         }
         let title = item.data.title().to_string();
         if vault.delete_item(uuid, now).is_err() {
-            return Response::Error {
-                message: "internal".into(),
-            };
+            return error("internal");
         }
         if store.save_synced(vault).is_err() {
             // Take it back out of the Trash. The disk still has it
@@ -1877,9 +1764,7 @@ fn delete_item(ctx: &mut Ctx, id: String) -> Response {
             // file and it reappears with no explanation. Safe because
             // the item was demonstrably NOT deleted a moment ago.
             let _ = vault.restore_item(uuid, now);
-            return Response::Error {
-                message: "internal".into(),
-            };
+            return error("internal");
         }
         title
     };
@@ -1890,42 +1775,28 @@ fn delete_item(ctx: &mut Ctx, id: String) -> Response {
 fn read_password(ctx: &mut Ctx, id: String) -> Response {
     let state = ctx.state;
     let Ok(uuid) = id.parse::<uuid::Uuid>() else {
-        return Response::Error {
-            message: "invalid_id".into(),
-        };
+        return error("invalid_id");
     };
     let st = match state.lock() {
         Ok(s) => s,
-        Err(_) => {
-            return Response::Error {
-                message: "internal".into(),
-            }
-        }
+        Err(_) => return error("internal"),
     };
     let Some(vault) = st.vault.as_ref().filter(|v| v.is_unlocked()) else {
-        return Response::Error {
-            message: "locked".into(),
-        };
+        return error("locked");
     };
     match vault.get_item(uuid) {
         // A trashed login is not a login you can read, for the same
         // reason `fill` refuses one: the user retired that credential,
         // and nothing in the app still offers it. `get_item` serves the
         // Trash view as well as this one, so the filter has to be here.
-        Ok(item) if item.is_deleted() => Response::Error {
-            message: "not_found".into(),
-        },
+        Ok(item) if item.is_deleted() => error("not_found"),
         Ok(item) => match &item.data {
             VaultItem::Login { password, .. } => Response::Password {
                 password: password.clone(),
             },
-            _ => Response::Error {
-                message: "not_a_login".into(),
-            },
+            _ => error("not_a_login"),
         },
-        Err(_) => Response::Error {
-            message: "not_found".into(),
-        },
+        Err(_) => error("not_found"),
     }
 }
 
@@ -2457,10 +2328,8 @@ fn serve(stream: TcpStream, app: &AppHandle, token: &str) -> std::io::Result<()>
             break;
         }
         if read > MAX_BRIDGE_MESSAGE_BYTES {
-            let out = serde_json::to_string(&Response::Error {
-                message: "bad_request".into(),
-            })
-            .unwrap_or_else(|_| String::from("{\"type\":\"error\"}"));
+            let out = serde_json::to_string(&error("bad_request"))
+                .unwrap_or_else(|_| String::from("{\"type\":\"error\"}"));
             writer.write_all(out.as_bytes())?;
             writer.write_all(b"\n")?;
             writer.flush()?;
@@ -2478,9 +2347,7 @@ fn serve(stream: TcpStream, app: &AppHandle, token: &str) -> std::io::Result<()>
                 Some(app),
                 &mut consent,
             ),
-            Err(_) => Response::Error {
-                message: "bad_request".into(),
-            },
+            Err(_) => error("bad_request"),
         };
         // One wrong token ends the connection: no unlimited retries on an
         // open socket.

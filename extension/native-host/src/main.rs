@@ -235,64 +235,19 @@ fn password_kind() -> String {
 
 fn handle(request: Request) -> Response {
     match request {
-        Request::Hello { protocol, .. } => {
-            if protocol.unwrap_or(1) != PROTOCOL_VERSION {
-                return Response::Error {
-                    message: "unsupported_protocol".to_string(),
-                };
-            }
-            let app = desktop_app_info();
-            Response::Hello {
-                name: HOST_NAME.to_string(),
-                version: VERSION.to_string(),
-                protocol: PROTOCOL_VERSION,
-                app_connected: app.is_some(),
-                app_launchable: launch::available(),
-                app_version: app.as_ref().and_then(|a| a.version.clone()),
-                app_build: app.as_ref().and_then(|a| a.build.clone()),
-                app_commit: app.as_ref().and_then(|a| a.commit.clone()),
-                app_pid: app.as_ref().and_then(|a| a.pid),
-            }
-        }
+        Request::Hello { protocol, .. } => hello(protocol),
         Request::Ping => Response::Pong,
-        Request::DeleteBookmarks { url, folder } => {
-            match bridge_request(serde_json::json!({
-                "type": "delete_bookmarks", "url": url, "folder": folder,
-            })) {
-                Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("deleted_bookmarks") => {
-                    Response::DeletedBookmarks {
-                        removed: v.get("removed").and_then(|r| r.as_u64()).unwrap_or(0),
-                    }
-                }
-                _ => Response::Error {
-                    message: "Could not delete (app locked or not running).".to_string(),
-                },
-            }
-        }
         Request::Log { level, message } => {
             write_extension_log(&level, &message);
             Response::Pong
         }
-        Request::ListMatchingLogins { url } => match query_desktop_app(&url) {
-            Some(items) => Response::Logins {
-                url,
-                app_connected: true,
-                items,
-                note: None,
-            },
-            None => Response::Logins {
-                url,
-                app_connected: false,
-                items: Vec::new(),
-                note: Some("The Arca desktop app isn't running or is locked.".to_string()),
-            },
-        },
+        Request::ListMatchingLogins { url } => list_matching_logins(url),
         Request::Fill { id, url } => match fill_credential(&id, &url) {
             Ok((username, password)) => Response::Credentials { username, password },
             // The reason verbatim, for the extension to act on. It renders the
             // wording; a host that pre-writes prose forces the UI to string-match
             // its own sentences to tell "locked" from "wrong site".
-            Err(reason) => Response::Error { message: reason },
+            Err(reason) => error(reason),
         },
         Request::PasskeyCreate {
             origin,
@@ -311,7 +266,7 @@ fn handle(request: Request) -> Response {
                 credential_id,
                 attestation_object,
             },
-            Err(message) => Response::Error { message },
+            Err(message) => error(message),
         },
         Request::PasskeyGet {
             origin,
@@ -334,67 +289,18 @@ fn handle(request: Request) -> Response {
                     user_handle,
                 }
             }
-            Err(message) => Response::Error { message },
+            Err(message) => error(message),
         },
-        Request::ImportBookmarks { items } => {
-            match bridge_request(serde_json::json!({
-                "type": "import_bookmarks", "items": items,
-            })) {
-                Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("imported_bookmarks") => {
-                    Response::ImportedBookmarks {
-                        added: v.get("added").and_then(|a| a.as_u64()).unwrap_or(0),
-                    }
-                }
-                _ => Response::Error {
-                    message: "Could not import bookmarks (app locked or not running).".to_string(),
-                },
-            }
-        }
-        Request::ListBookmarks => {
-            match bridge_request(serde_json::json!({ "type": "list_bookmarks" })) {
-                Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("bookmarks") => {
-                    Response::Bookmarks {
-                        items: v
-                            .get("items")
-                            .and_then(|i| i.as_array())
-                            .cloned()
-                            .unwrap_or_default(),
-                    }
-                }
-                // The app ANSWERED, and what it said was not a bookmark list —
-                // in practice "locked". A known state, and the caller may act
-                // on it at once: bookmarks vanishing when the vault locks is
-                // the entire point of the feature.
-                Some(v) => Response::Error {
-                    message: v
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("locked")
-                        .to_string(),
-                },
-                // No answer at all. A quit app looks like this — and so does a
-                // blip: a host that failed to spawn, a bridge file being
-                // rewritten, a lost race at browser startup.
-                //
-                // These two used to share one message, "app locked or not
-                // running", and the caller deleted the user's bookmark folder
-                // on either. So a momentary miss destroyed the folder, which is
-                // what "saving bookmarks doesn't work" actually was. Say which
-                // one it is and let the caller decide.
-                None => Response::Error {
-                    message: "unreachable".to_string(),
-                },
-            }
-        }
+        Request::DeleteBookmarks { url, folder } => delete_bookmarks(url, folder),
+        Request::ImportBookmarks { items } => import_bookmarks(items),
+        Request::ListBookmarks => list_bookmarks(),
         Request::SaveProbe {
             url,
             username,
             password,
         } => match save_probe(&url, &username, &password) {
             Some((action, username)) => Response::SaveDecision { action, username },
-            None => Response::Error {
-                message: "Save probe failed (app locked or not running).".to_string(),
-            },
+            None => error("Save probe failed (app locked or not running)."),
         },
         Request::SaveLogin {
             url,
@@ -404,39 +310,128 @@ fn handle(request: Request) -> Response {
             if save_login(&url, &username, &password) {
                 Response::Saved
             } else {
-                Response::Error {
-                    message: "Could not save login (app locked or not running).".to_string(),
-                }
+                error("Could not save login (app locked or not running).")
             }
         }
-        Request::Unlock => {
-            if let Err(message) = launch::ensure_running(|| desktop_app_info().is_some()) {
-                return Response::Error { message };
-            }
-            // Send once only: a lost response must never replay a user prompt.
-            match bridge_request(serde_json::json!({ "type": "request_unlock" })) {
-                Some(response) if response["type"] == "unlock_requested" => {
-                    Response::UnlockRequested
-                }
-                Some(response) => Response::Error {
-                    message: response["message"]
-                        .as_str()
-                        .unwrap_or("invalid_response")
-                        .to_string(),
-                },
-                None => Response::Error {
-                    message: "Could not reach Arca after startup. Try again.".to_string(),
-                },
-            }
-        }
+        Request::Unlock => unlock(),
         Request::GeneratePassword { length, symbols } => match generate_password(length, symbols) {
             Some(password) => Response::GeneratedPassword { password },
             // Unlike the others this cannot mean "locked": the app generates
             // without an unlocked vault. If it failed, it is not running.
-            None => Response::Error {
-                message: "Could not generate a password (app not running).".to_string(),
-            },
+            None => error("Could not generate a password (app not running)."),
         },
+    }
+}
+
+fn error(message: impl Into<String>) -> Response {
+    Response::Error {
+        message: message.into(),
+    }
+}
+
+fn hello(protocol: Option<u32>) -> Response {
+    if protocol.unwrap_or(1) != PROTOCOL_VERSION {
+        return error("unsupported_protocol");
+    }
+    let app = desktop_app_info();
+    Response::Hello {
+        name: HOST_NAME.to_string(),
+        version: VERSION.to_string(),
+        protocol: PROTOCOL_VERSION,
+        app_connected: app.is_some(),
+        app_launchable: launch::available(),
+        app_version: app.as_ref().and_then(|a| a.version.clone()),
+        app_build: app.as_ref().and_then(|a| a.build.clone()),
+        app_commit: app.as_ref().and_then(|a| a.commit.clone()),
+        app_pid: app.as_ref().and_then(|a| a.pid),
+    }
+}
+
+fn list_matching_logins(url: String) -> Response {
+    match query_desktop_app(&url) {
+        Some(items) => Response::Logins {
+            url,
+            app_connected: true,
+            items,
+            note: None,
+        },
+        None => Response::Logins {
+            url,
+            app_connected: false,
+            items: Vec::new(),
+            note: Some("The Arca desktop app isn't running or is locked.".to_string()),
+        },
+    }
+}
+
+fn delete_bookmarks(url: String, folder: String) -> Response {
+    match bridge_request(serde_json::json!({
+        "type": "delete_bookmarks", "url": url, "folder": folder,
+    })) {
+        Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("deleted_bookmarks") => {
+            Response::DeletedBookmarks {
+                removed: v.get("removed").and_then(|r| r.as_u64()).unwrap_or(0),
+            }
+        }
+        _ => error("Could not delete (app locked or not running)."),
+    }
+}
+
+fn import_bookmarks(items: Vec<serde_json::Value>) -> Response {
+    match bridge_request(serde_json::json!({
+        "type": "import_bookmarks", "items": items,
+    })) {
+        Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("imported_bookmarks") => {
+            Response::ImportedBookmarks {
+                added: v.get("added").and_then(|a| a.as_u64()).unwrap_or(0),
+            }
+        }
+        _ => error("Could not import bookmarks (app locked or not running)."),
+    }
+}
+
+fn list_bookmarks() -> Response {
+    match bridge_request(serde_json::json!({ "type": "list_bookmarks" })) {
+        Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("bookmarks") => {
+            Response::Bookmarks {
+                items: v
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+            }
+        }
+        // The app ANSWERED, and what it said was not a bookmark list — in
+        // practice "locked". A known state, and the caller may act on it at
+        // once: bookmarks vanishing when the vault locks is the entire point
+        // of the feature.
+        Some(v) => error(
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("locked"),
+        ),
+        // No answer at all. A quit app looks like this — and so does a blip: a
+        // host that failed to spawn, a bridge file being rewritten, a lost race
+        // at browser startup.
+        //
+        // These two used to share one message, "app locked or not running",
+        // and the caller deleted the user's bookmark folder on either. So a
+        // momentary miss destroyed the folder, which is what "saving bookmarks
+        // doesn't work" actually was. Say which one it is and let the caller
+        // decide.
+        None => error("unreachable"),
+    }
+}
+
+fn unlock() -> Response {
+    if let Err(message) = launch::ensure_running(|| desktop_app_info().is_some()) {
+        return error(message);
+    }
+    // Send once only: a lost response must never replay a user prompt.
+    match bridge_request(serde_json::json!({ "type": "request_unlock" })) {
+        Some(response) if response["type"] == "unlock_requested" => Response::UnlockRequested,
+        Some(response) => error(response["message"].as_str().unwrap_or("invalid_response")),
+        None => error("Could not reach Arca after startup. Try again."),
     }
 }
 

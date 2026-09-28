@@ -18,3 +18,9 @@ publish.workspace = true
 # time, via CARGO_CFG_TARGET_OS, whether there is any Objective-C to compile.
 [build-dependencies]
 cc = "1"
+
+# Not the workspace's lints, which forbid `unsafe`: this crate makes the one
+# Objective-C call that resolves the App Group container, so nothing else has
+# to.
+[lints.clippy]
+too_many_lines = "warn"

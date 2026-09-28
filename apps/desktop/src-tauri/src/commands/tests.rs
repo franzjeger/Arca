@@ -741,3 +741,32 @@ fn import_bookmarks_requires_unlocked_vault_and_valid_file() {
     let err_locked = do_import_bookmarks(&locked_state, &empty_file).unwrap_err();
     assert_eq!(err_locked.code, "no_vault");
 }
+
+/// A login whose range never arrived is unchecked, not clean: reporting it as
+/// breach-free would turn a network problem into a false all-clear.
+#[test]
+fn a_breach_range_that_never_arrived_leaves_its_login_unchecked() {
+    let entry = |id: &str, prefix: &str, suffix: &str| BreachEntry {
+        id: id.into(),
+        prefix: prefix.into(),
+        suffix: suffix.into(),
+    };
+    let entries = [
+        entry("leaked", "5BAA6", "1E4C9B93F3F0682250B6CF8331B7EE68FD8"),
+        entry("fine", "5BAA6", "0000000000000000000000000000000000A"),
+        entry("unknown", "FFFFF", "0000000000000000000000000000000000B"),
+    ];
+    let ranges = std::collections::HashMap::from([(
+        "5BAA6".to_string(),
+        "1e4c9b93f3f0682250b6cf8331b7ee68fd8:9545824\r\n0000000000000000000000000000000000C:3"
+            .to_string(),
+    )]);
+
+    let report = breach_report(&entries, &ranges);
+    assert_eq!((report.checked, report.unchecked), (2, 1));
+    assert_eq!(report.hits.len(), 1);
+    assert_eq!(
+        (report.hits[0].id.as_str(), report.hits[0].count),
+        ("leaked", 9_545_824)
+    );
+}

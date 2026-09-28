@@ -42,6 +42,17 @@ repository = "https://github.com/franzjeger/Arca"
 # Arca's parts, not libraries for others: nothing here goes to crates.io.
 publish = false
 
+[workspace.lints.rust]
+# Safe by default. The crates that wrap an OS or C interface opt out in their
+# own manifests, where it shows.
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# A function longer than a screen hides its structure. This is what keeps the
+# next thousand-line match out; a test that reads as one scenario is exempted
+# where it is written.
+too_many_lines = "warn"
+
 [workspace.dependencies]
 # --- internal ---
 vault-core = { path = "crates/vault-core" }

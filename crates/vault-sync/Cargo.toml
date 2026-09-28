@@ -23,5 +23,5 @@ data-encoding.workspace = true
 # Tokens are wiped when they go out of scope; they are never written to disk.
 zeroize.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

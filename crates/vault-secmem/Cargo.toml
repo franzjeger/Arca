@@ -12,3 +12,6 @@ publish.workspace = true
 [dependencies]
 region.workspace = true
 zeroize.workspace = true
+
+[lints]
+workspace = true

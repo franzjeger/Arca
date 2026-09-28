@@ -1948,6 +1948,8 @@ pub unsafe extern "C" fn vault_ffi_delete_item(
     }
 }
 
+// A test reads as one scenario, top to bottom; splitting it hides the story.
+#[allow(clippy::too_many_lines)]
 #[cfg(test)]
 mod tests {
     use super::*;

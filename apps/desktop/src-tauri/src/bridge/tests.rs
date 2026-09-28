@@ -1,3 +1,6 @@
+// A test reads as one scenario, top to bottom; splitting it hides the story.
+#![allow(clippy::too_many_lines)]
+
 use super::*;
 use crate::clipboard::ClipboardManager;
 use crate::commands::{do_upsert_item, LoginInput};
