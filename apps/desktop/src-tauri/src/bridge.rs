@@ -55,30 +55,10 @@ const MAX_BRIDGE_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 ///
 /// Bump this when an existing request or response changes shape in a way an
 /// older client would get *wrong*. Adding a new request type, or a field an
-/// older client simply ignores, is not such a change.
-const PROTOCOL_VERSION: u32 = 2;
+/// older client simply ignores, is not such a change. Shared with the clients
+/// through `vault-bridge-auth`, which owns the handshake it names.
+const PROTOCOL_VERSION: u32 = vault_bridge_auth::PROTOCOL;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The app's half of the handshake: `HMAC-SHA256(token, nonce)`, hex.
-///
-/// Authentication used to run one way — the client proved it had the token and
-/// the app proved nothing, so any process answering `{"type":"ok"}` on the
-/// port was believed. Arca's port is freed the moment it exits, and nothing
-/// removed the info file, so the next `save_probe` after a crash could hand a
-/// submitted password to whoever had bound that port; a `fill` answer could
-/// push attacker-chosen credentials into a login form. Only the real app knows
-/// the token, so only the real app can produce this.
-pub(crate) fn handshake_proof(token: &str, nonce: &str) -> String {
-    use hmac::Mac;
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(token.as_bytes())
-        .expect("HMAC accepts any key length");
-    mac.update(nonce.as_bytes());
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
 
 /// Pending autofill-consent requests, keyed by a per-request id. When
 /// `confirm_autofill` is on, the bridge thread parks on the receiver while the
@@ -140,17 +120,23 @@ pub struct BookmarkWire {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Request {
+    /// The first message on a connection. See `vault_bridge_auth`.
     Hello {
-        token: String,
+        /// Protocols 1 and 2 sent the token itself. Protocol 3 never does.
+        #[serde(default)]
+        token: Option<String>,
         /// Protocol the client speaks. Absent means a client written before
         /// versioning existed, which by definition speaks version 1.
         #[serde(default)]
         protocol: Option<u32>,
-        /// Client-chosen random challenge. The reply carries an HMAC of it
-        /// under the shared token, which is how the client knows it is talking
-        /// to Arca and not to whoever grabbed the port. Absent from v1 clients.
+        /// Client-chosen random challenge, which the app's proof covers.
+        /// Required from protocol 3; absent from v1 clients.
         #[serde(default)]
         nonce: Option<String>,
+    },
+    /// Protocol 3: the client's proof over both nonces, answering `Challenge`.
+    Auth {
+        proof: String,
     },
     Match {
         url: String,
@@ -307,14 +293,6 @@ enum Request {
 }
 
 impl Request {
-    /// Whether this request is the user deciding to use the vault, as opposed
-    /// to the extension talking to us on its own.
-    ///
-    /// Only the deliberate ones reset the idle timer. `Hello` and `Ping` are
-    /// connection checks, `Match` fires when a password field takes focus, and
-    /// `SaveProbe` fires on every submitted form — counting any of those would
-    /// let one open tab hold the vault unlocked indefinitely. That is not a
-    /// longer timeout, it is no timeout, arrived at by accident.
     /// Requests the USB key may open a locked vault for: the ones a person is
     /// directly behind. `Match` is included because it is what puts
     /// credentials in the picker when a field takes focus — without it the
@@ -333,6 +311,14 @@ impl Request {
         )
     }
 
+    /// Whether this request is the user deciding to use the vault, as opposed
+    /// to the extension talking to us on its own.
+    ///
+    /// Only the deliberate ones reset the idle timer. `Hello` and `Auth` are
+    /// the handshake, `Match` fires when a password field takes focus, and
+    /// `SaveProbe` fires on every submitted form — counting any of those would
+    /// let one open tab hold the vault unlocked indefinitely. That is not a
+    /// longer timeout, it is no timeout, arrived at by accident.
     fn is_deliberate_use(&self) -> bool {
         match self {
             // Picked a credential, approved a passkey, chose to save, asked for
@@ -351,6 +337,7 @@ impl Request {
             // alive by asking to unlock.
             Request::Unlock
             | Request::Hello { .. }
+            | Request::Auth { .. }
             | Request::Match { .. }
             // Bookmark sync is one request that completes on its own, and
             // push-out is the kind of thing that later grows a timer. Counting
@@ -376,10 +363,15 @@ enum Response {
         build: &'static str,
         commit: &'static str,
         pid: u32,
-        /// `HMAC-SHA256(token, nonce)`, hex. Present whenever the client sent a
-        /// nonce; it is the app's half of the mutual authentication.
+        /// Protocol 2's proof, `HMAC-SHA256(token, nonce)`, for a v2 client
+        /// that sent a nonce. Protocol 3 proves the app in `Challenge`.
         #[serde(skip_serializing_if = "Option::is_none")]
         proof: Option<String>,
+    },
+    /// Protocol 3: the app's nonce and its proof over both nonces.
+    Challenge {
+        nonce: String,
+        proof: String,
     },
     Logins {
         items: Vec<LoginMatch>,
@@ -724,14 +716,100 @@ fn ask_window_to_unlock(app: Option<&AppHandle>) {
     let _ = app.emit("unlock-requested", ());
 }
 
-/// Handle one parsed request. `authed` tracks whether this connection has
-/// presented the token. Factored out (no sockets) so the security gates are
-/// unit-testable.
+fn unauthorized() -> Response {
+    Response::Error {
+        message: "unauthorized".into(),
+    }
+}
+
+/// What an authenticated client learns about this build.
+fn welcome(proof: Option<String>) -> Response {
+    Response::Ok {
+        protocol: PROTOCOL_VERSION,
+        version: APP_VERSION,
+        build: env!("ARCA_BUILD"),
+        commit: env!("ARCA_COMMIT"),
+        pid: std::process::id(),
+        proof,
+    }
+}
+
+/// The first message on a connection; see `vault_bridge_auth` for protocol 3.
+fn hello(
+    token: &str,
+    presented: Option<String>,
+    protocol: Option<u32>,
+    nonce: Option<String>,
+    session: &mut Session,
+) -> Response {
+    *session = Session::New;
+    let Some(presented) = presented else {
+        // Protocol 3: prove ourselves first, without the token crossing.
+        if protocol != Some(PROTOCOL_VERSION) {
+            return unauthorized();
+        }
+        let Some(client_nonce) = nonce.filter(|n| vault_bridge_auth::is_nonce(n)) else {
+            return unauthorized();
+        };
+        let Some(app_nonce) = vault_bridge_auth::nonce() else {
+            return Response::Error {
+                message: "internal".into(),
+            };
+        };
+        let proof = vault_bridge_auth::app_proof(token, &client_nonce, &app_nonce);
+        *session = Session::Challenged {
+            client_nonce,
+            app_nonce: app_nonce.clone(),
+        };
+        return Response::Challenge {
+            nonce: app_nonce,
+            proof,
+        };
+    };
+    // Protocols 1 and 2 put the token in this message. Checked before the
+    // version, so a caller that cannot authenticate learns nothing about us.
+    if !vault_bridge_auth::same(&presented, token) {
+        return unauthorized();
+    }
+    // We can serve a client older than us; we cannot serve one newer,
+    // because we do not know what it means and guessing is worse than
+    // saying so. Absent is the pre-versioning native host, i.e. v1.
+    if protocol.is_some_and(|v| !(1..=PROTOCOL_VERSION).contains(&v)) {
+        return Response::Error {
+            message: "unsupported_protocol".into(),
+        };
+    }
+    *session = Session::Authed;
+    welcome(nonce.map(|n| vault_bridge_auth::v2_proof(token, &n)))
+}
+
+/// Where one connection stands in the handshake.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) enum Session {
+    #[default]
+    New,
+    /// Protocol 3: the app has proved itself over the client's nonce and is
+    /// waiting for the client's proof over the pair.
+    Challenged {
+        client_nonce: String,
+        app_nonce: String,
+    },
+    Authed,
+}
+
+impl Session {
+    fn is_authed(&self) -> bool {
+        matches!(self, Session::Authed)
+    }
+}
+
+/// Handle one parsed request. `session` tracks this connection's handshake.
+/// Factored out (no sockets) so the security gates are unit-testable.
 fn handle_request(
     req: Request,
     state: &Mutex<AppState>,
     token: &str,
-    authed: &mut bool,
+    session: &mut Session,
     app: Option<&AppHandle>,
     consent: &mut dyn FnMut(&ConsentContext) -> bool,
 ) -> Response {
@@ -745,19 +823,22 @@ fn handle_request(
     // a site's automatic passkey retries against a suppressed origin, or fills
     // refused on origin mismatch, kept the vault open with nobody at the desk —
     // the accidental "no timeout" the deliberate-use list warns about.
-    let deliberate = *authed && req.is_deliberate_use();
+    let deliberate = session.is_authed() && req.is_deliberate_use();
     // A USB key enrolled and inserted: a request that needs the vault open
     // finds it open, with no window and no password. This is the
     // whole point of the key — "unlock" stops being a step between the
     // browser and the credential. Only for requests the user is behind (a
     // field they focused, a fill, a passkey); a form submit's save probe or a
     // bookmark timer must not be what keeps the vault open.
-    if *authed && req.wants_vault_open() && crate::keyfile_unlock::unlock_if_locked(state) {
+    if session.is_authed()
+        && req.wants_vault_open()
+        && crate::keyfile_unlock::unlock_if_locked(state)
+    {
         if let Some(app) = app {
             let _ = app.emit("vault-unlocked", ());
         }
     }
-    let resp = dispatch(req, state, token, authed, app, consent);
+    let resp = dispatch(req, state, token, session, app, consent);
     if deliberate && !matches!(resp, Response::Error { .. }) {
         if let Ok(mut st) = state.lock() {
             st.touch();
@@ -770,7 +851,7 @@ fn dispatch(
     req: Request,
     state: &Mutex<AppState>,
     token: &str,
-    authed: &mut bool,
+    session: &mut Session,
     app: Option<&AppHandle>,
     consent: &mut dyn FnMut(&ConsentContext) -> bool,
 ) -> Response {
@@ -779,47 +860,23 @@ fn dispatch(
             token: presented,
             protocol,
             nonce,
-        } => {
-            // Token first: an unauthenticated caller must not learn anything
-            // about this build, not even which protocol it speaks.
-            // Constant-time: SECURITY.md lists it as a design property, and a
-            // byte-by-byte compare on a loopback socket leaks a timing signal
-            // for free. `subtle` because `==` on String short-circuits.
-            let ok = presented.len() == token.len()
-                && bool::from(subtle::ConstantTimeEq::ct_eq(
-                    presented.as_bytes(),
-                    token.as_bytes(),
-                ));
-            if !ok {
-                return Response::Error {
-                    message: "unauthorized".into(),
-                };
+        } => hello(token, presented, protocol, nonce, session),
+        Request::Auth { proof } => {
+            let Session::Challenged {
+                client_nonce,
+                app_nonce,
+            } = std::mem::take(session)
+            else {
+                return unauthorized();
+            };
+            let expected = vault_bridge_auth::client_proof(token, &client_nonce, &app_nonce);
+            if !vault_bridge_auth::same(&proof, &expected) {
+                return unauthorized();
             }
-            // We can serve a client older than us; we cannot serve one newer,
-            // because we do not know what it means and guessing is worse than
-            // saying so. Absent is the pre-versioning native host, i.e. v1.
-            match protocol {
-                None => {}
-                Some(v) if (1..=PROTOCOL_VERSION).contains(&v) => {}
-                Some(_) => {
-                    return Response::Error {
-                        message: "unsupported_protocol".into(),
-                    }
-                }
-            }
-            *authed = true;
-            Response::Ok {
-                protocol: PROTOCOL_VERSION,
-                version: APP_VERSION,
-                build: env!("ARCA_BUILD"),
-                commit: env!("ARCA_COMMIT"),
-                pid: std::process::id(),
-                proof: nonce.as_deref().map(|n| handshake_proof(token, n)),
-            }
+            *session = Session::Authed;
+            welcome(None)
         }
-        _ if !*authed => Response::Error {
-            message: "unauthorized".into(),
-        },
+        _ if !session.is_authed() => unauthorized(),
         Request::Match { url } => {
             let st = match state.lock() {
                 Ok(s) => s,
@@ -2612,7 +2669,7 @@ fn serve(stream: TcpStream, app: &AppHandle, token: &str) -> std::io::Result<()>
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     let state = app.state::<Mutex<AppState>>();
-    let mut authed = false;
+    let mut session = Session::New;
     let mut consent = |ctx: &ConsentContext| request_consent(app, ctx);
     loop {
         let mut line = String::new();
@@ -2641,7 +2698,7 @@ fn serve(stream: TcpStream, app: &AppHandle, token: &str) -> std::io::Result<()>
                 req,
                 state.inner(),
                 token,
-                &mut authed,
+                &mut session,
                 Some(app),
                 &mut consent,
             ),

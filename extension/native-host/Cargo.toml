@@ -18,10 +18,7 @@ serde_json.workspace = true
 # Locate the desktop app's per-user data dir (where the bridge writes its
 # connection-info file), matching Tauri's app_data_dir resolution.
 dirs = "5"
-hmac.workspace = true
-sha2.workspace = true
-subtle.workspace = true
-getrandom.workspace = true
+vault-bridge-auth.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

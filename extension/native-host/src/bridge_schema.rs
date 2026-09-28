@@ -12,11 +12,13 @@ pub struct BookmarkWire {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BridgeRequest {
     Hello {
-        token: String,
         #[serde(default)]
         protocol: Option<u32>,
         #[serde(default)]
         nonce: Option<String>,
+    },
+    Auth {
+        proof: String,
     },
     Match {
         url: String,
@@ -109,6 +111,10 @@ pub enum BridgeResponse {
         pid: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
         proof: Option<String>,
+    },
+    Challenge {
+        nonce: String,
+        proof: String,
     },
     Logins {
         items: Vec<BridgeLoginMatch>,

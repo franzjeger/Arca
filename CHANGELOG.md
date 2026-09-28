@@ -22,6 +22,15 @@
   phone's editors never show notes, so every save sent none and the FFI
   stored that as empty; sync then carried the loss to every device. An edit
   that leaves notes out now keeps them (C ABI v17, as v11 did for TOTP codes).
+- Security: the browser bridge's handshake no longer sends its token. The
+  native host and `arca` put the token in their first message and then
+  checked the app's proof, which anyone holding the port could compute from
+  that very message — so a process that bound the port after Arca exited
+  was sent the next submitted password. Protocol 3 proves both sides over
+  two nonces without the token crossing, from one shared crate
+  (`vault-bridge-auth`) instead of three copies. Checking whether the app
+  runs is now the handshake alone; it used to be a `match`, which unlocked
+  the vault whenever a USB key was inserted.
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native

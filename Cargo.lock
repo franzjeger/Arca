@@ -101,11 +101,8 @@ name = "arca-cli"
 version = "0.6.2"
 dependencies = [
  "dirs 5.0.1",
- "getrandom 0.2.17",
- "hmac",
  "serde_json",
- "sha2",
- "subtle",
+ "vault-bridge-auth",
 ]
 
 [[package]]
@@ -5668,6 +5665,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vault-bridge-auth"
+version = "0.6.2"
+dependencies = [
+ "getrandom 0.2.17",
+ "hmac",
+ "sha2",
+ "subtle",
+]
+
+[[package]]
 name = "vault-core"
 version = "0.6.2"
 dependencies = [
@@ -5726,6 +5733,7 @@ dependencies = [
  "url",
  "uuid",
  "vault-appgroup",
+ "vault-bridge-auth",
  "vault-core",
  "vault-credstore",
  "vault-sharedkey",
@@ -5755,12 +5763,9 @@ name = "vault-native-host"
 version = "0.6.2"
 dependencies = [
  "dirs 5.0.1",
- "getrandom 0.2.17",
- "hmac",
  "serde",
  "serde_json",
- "sha2",
- "subtle",
+ "vault-bridge-auth",
 ]
 
 [[package]]

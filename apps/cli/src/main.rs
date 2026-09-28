@@ -32,7 +32,7 @@ use std::process::Command;
 use std::time::Duration;
 
 const HOST_NAME: &str = "no.sybr.vault";
-const BRIDGE_PROTOCOL: u32 = 2;
+const BRIDGE_PROTOCOL: u32 = vault_bridge_auth::PROTOCOL;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -342,9 +342,9 @@ impl std::fmt::Display for Fault {
 /// Send one request to the desktop app and return its reply.
 ///
 /// The same connection-info file and handshake the browser's native messaging
-/// host uses. Duplicated rather than shared because that host is a separate
-/// binary with a different job, and forty lines of socket code is a smaller
-/// price than a crate the two must agree on forever.
+/// host uses. The handshake itself comes from `vault_bridge_auth`, so the app
+/// and both clients cannot compute it differently; the socket code around it
+/// is small enough to keep here.
 fn bridge(payload: serde_json::Value) -> Result<serde_json::Value, Fault> {
     let info_path = dirs::data_dir()
         .map(|d| d.join(HOST_NAME).join("native-bridge.json"))
@@ -369,36 +369,24 @@ fn bridge(payload: serde_json::Value) -> Result<serde_json::Value, Fault> {
     let mut writer = stream.try_clone().map_err(|_| Fault::Unreachable)?;
     let mut reader = BufReader::new(stream);
 
-    // Challenge the app to prove it holds the same token. Without this the
-    // handshake was one-way: anything answering on the port was believed, and
-    // Arca's port is freed the moment it exits.
-    let nonce = fresh_nonce().ok_or(Fault::Unreachable)?;
-    writeln!(
-        writer,
-        "{}",
-        serde_json::json!({
-            "type": "hello",
-            "token": token,
-            "protocol": BRIDGE_PROTOCOL,
-            "nonce": nonce,
-        })
-    )
-    .map_err(|_| Fault::Unreachable)?;
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|_| Fault::Unreachable)?;
-    let hello: serde_json::Value =
-        serde_json::from_str(line.trim()).map_err(|_| Fault::Protocol)?;
-    validate_bridge_hello(&hello)?;
-    verify_bridge_proof(&hello, token, &nonce)?;
+    // Protocol 3 (see `vault_bridge_auth`): the token never leaves this
+    // process, and the app proves it holds it before we write the request.
+    // Arca's port is freed the moment it exits, so whatever answers on it has
+    // to earn our trust.
+    let nonce = vault_bridge_auth::nonce().ok_or(Fault::Unreachable)?;
+    let hello = serde_json::json!({"type": "hello", "protocol": BRIDGE_PROTOCOL, "nonce": nonce});
+    send_json(&mut writer, &hello)?;
+    let challenge = read_json(&mut reader)?;
+    let app_nonce = verify_challenge(&challenge, token, &nonce)?;
+    let proof = vault_bridge_auth::client_proof(token, &nonce, &app_nonce);
+    send_json(
+        &mut writer,
+        &serde_json::json!({"type": "auth", "proof": proof}),
+    )?;
+    validate_bridge_hello(&read_json(&mut reader)?)?;
 
-    writeln!(writer, "{payload}").map_err(|_| Fault::Unreachable)?;
-    line.clear();
-    reader
-        .read_line(&mut line)
-        .map_err(|_| Fault::Unreachable)?;
-    let resp: serde_json::Value = serde_json::from_str(line.trim()).map_err(|_| Fault::Protocol)?;
+    send_json(&mut writer, &payload)?;
+    let resp = read_json(&mut reader)?;
 
     if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
         let msg = resp
@@ -416,45 +404,41 @@ fn bridge(payload: serde_json::Value) -> Result<serde_json::Value, Fault> {
     Ok(resp)
 }
 
-/// A fresh 128-bit challenge for the app to sign, hex-encoded. From the OS
-/// CSPRNG: a predictable nonce would let an impostor replay a captured proof.
-fn fresh_nonce() -> Option<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).ok()?;
-    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+fn send_json(writer: &mut impl Write, message: &serde_json::Value) -> Result<(), Fault> {
+    writeln!(writer, "{message}").map_err(|_| Fault::Unreachable)
 }
 
-/// `HMAC-SHA256(token, nonce)`, hex. Must match `handshake_proof` in the app's
-/// `bridge.rs`; the protocol-version guard keeps the two in step.
-fn handshake_proof(token: &str, nonce: &str) -> String {
-    use hmac::Mac;
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(token.as_bytes())
-        .expect("HMAC accepts any key length");
-    mac.update(nonce.as_bytes());
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+fn read_json(reader: &mut impl BufRead) -> Result<serde_json::Value, Fault> {
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|_| Fault::Unreachable)?;
+    serde_json::from_str(line.trim()).map_err(|_| Fault::Protocol)
 }
 
-/// The app's half of the mutual authentication, checked before the real request
-/// (which may carry a password) is written.
-fn verify_bridge_proof(hello: &serde_json::Value, token: &str, nonce: &str) -> Result<(), Fault> {
-    let proof = hello
-        .get("proof")
-        .and_then(|v| v.as_str())
-        .ok_or(Fault::Impostor)?;
-    let expected = handshake_proof(token, nonce);
-    let ok = proof.len() == expected.len()
-        && bool::from(subtle::ConstantTimeEq::ct_eq(
-            proof.as_bytes(),
-            expected.as_bytes(),
-        ));
-    if ok {
-        Ok(())
-    } else {
-        Err(Fault::Impostor)
+/// The app's half of the handshake, checked before we prove ourselves or
+/// write the request (which may carry a password). Returns the app's nonce.
+fn verify_challenge(
+    challenge: &serde_json::Value,
+    token: &str,
+    nonce: &str,
+) -> Result<String, Fault> {
+    match challenge.get("type").and_then(|v| v.as_str()) {
+        Some("challenge") => {
+            let field = |name| challenge.get(name).and_then(|v| v.as_str());
+            let (Some(app_nonce), Some(proof)) = (field("nonce"), field("proof")) else {
+                return Err(Fault::Impostor);
+            };
+            let expected = vault_bridge_auth::app_proof(token, nonce, app_nonce);
+            if vault_bridge_auth::is_nonce(app_nonce) && vault_bridge_auth::same(proof, &expected) {
+                Ok(app_nonce.to_string())
+            } else {
+                Err(Fault::Impostor)
+            }
+        }
+        // An app older than protocol 3 cannot read a hello without a token.
+        Some("error") => Err(Fault::IncompatibleProtocol(0)),
+        _ => Err(Fault::Protocol),
     }
 }
 
@@ -522,17 +506,38 @@ mod tests {
             .contains("not_a_login"));
     }
 
-    /// Shared handshake test vector.
-    ///
-    /// The app, the native host and the CLI each compute this MAC in their own
-    /// crate, and a silent disagreement would break every bridge connection at
-    /// once. The same three assertions live in `bridge.rs`, the native host and
-    /// the CLI, so a change to one without the others fails here.
     #[test]
-    fn handshake_proof_matches_the_shared_vector() {
+    fn the_app_must_prove_it_holds_the_token() {
+        let nonce = vault_bridge_auth::nonce().unwrap();
+        let app_nonce = vault_bridge_auth::nonce().unwrap();
+        let challenge = |token: &str, app_nonce: &str| {
+            serde_json::json!({
+                "type": "challenge",
+                "nonce": app_nonce,
+                "proof": vault_bridge_auth::app_proof(token, &nonce, app_nonce),
+            })
+        };
         assert_eq!(
-            handshake_proof("arca-test-token", "0123456789abcdef"),
-            "e7b61fca20478c27d56236c0e24e1fc97e29d2a3ed757d7a61d0cee09b66c1fc"
+            verify_challenge(&challenge("t", &app_nonce), "t", &nonce),
+            Ok(app_nonce.clone())
+        );
+        // Whoever holds the port without the token.
+        assert_eq!(
+            verify_challenge(&challenge("guess", &app_nonce), "t", &nonce),
+            Err(Fault::Impostor)
+        );
+        assert_eq!(
+            verify_challenge(&challenge("t", "cafebabe"), "t", &nonce),
+            Err(Fault::Impostor)
+        );
+        // An app from before protocol 3.
+        assert_eq!(
+            verify_challenge(
+                &serde_json::json!({"type": "error", "message": "bad_request"}),
+                "t",
+                &nonce
+            ),
+            Err(Fault::IncompatibleProtocol(0))
         );
     }
 

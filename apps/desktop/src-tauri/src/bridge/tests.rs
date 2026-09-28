@@ -22,6 +22,10 @@ fn every_desktop_response_is_accepted_by_the_native_host() {
             pid: 1,
             proof: Some("proof".into()),
         },
+        Response::Challenge {
+            nonce: "0123456789abcdef0123456789abcdef".into(),
+            proof: "proof".into(),
+        },
         Response::Logins {
             items: vec![
                 LoginMatch {
@@ -93,6 +97,28 @@ fn every_desktop_response_is_accepted_by_the_native_host() {
         let decoded: native_host_schema::BridgeResponse = serde_json::from_value(wire.clone())
             .unwrap_or_else(|error| panic!("{}: {error}", wire["type"]));
         assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+    }
+}
+
+/// And the other way: the handshake messages the native host sends must parse
+/// as the app's own requests.
+#[test]
+fn the_native_host_handshake_is_accepted_by_the_app() {
+    for request in [
+        native_host_schema::BridgeRequest::Hello {
+            protocol: Some(PROTOCOL_VERSION),
+            nonce: vault_bridge_auth::nonce(),
+        },
+        native_host_schema::BridgeRequest::Auth {
+            proof: "proof".into(),
+        },
+    ] {
+        let wire = serde_json::to_string(&request).unwrap();
+        let parsed: Request = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(
+            parsed,
+            Request::Hello { token: None, .. } | Request::Auth { .. }
+        ));
     }
 }
 
@@ -248,9 +274,9 @@ fn writes_failed(message: &str) -> bool {
 fn a_save_that_never_reached_the_disk_is_rolled_back_out_of_memory() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
     let request =
-        |req, authed: &mut bool| handle_request(req, &state, "t", authed, None, &mut allow());
+        |req, authed: &mut Session| handle_request(req, &state, "t", authed, None, &mut allow());
     let stored_password = |host: &str, user: &str| {
         let st = state.lock().unwrap();
         find_login(st.vault.as_ref().unwrap(), host, user).map(|(_, pw)| pw)
@@ -342,9 +368,9 @@ fn a_save_that_never_reached_the_disk_is_rolled_back_out_of_memory() {
 fn a_failed_persist_leaves_creates_deletes_and_imports_undone() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
     let request =
-        |req, authed: &mut bool| handle_request(req, &state, "t", authed, None, &mut allow());
+        |req, authed: &mut Session| handle_request(req, &state, "t", authed, None, &mut allow());
     let active = || {
         let st = state.lock().unwrap();
         st.vault.as_ref().unwrap().list_items(false).unwrap()
@@ -484,7 +510,7 @@ fn a_www_page_may_use_its_own_hostname_as_the_rp_id() {
     // End to end: register on the www page and sign in with it.
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
     let credential_id = match handle_request(
         Request::PasskeyCreate {
             origin: "https://www.example.com/signup".into(),
@@ -574,9 +600,9 @@ fn a_quick_unlock_that_did_not_happen_is_reported_as_failure() {
 fn a_trashed_login_is_neither_filled_nor_read_nor_deleted_twice() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
     let request =
-        |req, authed: &mut bool| handle_request(req, &state, "t", authed, None, &mut allow());
+        |req, authed: &mut Session| handle_request(req, &state, "t", authed, None, &mut allow());
     let id = add(&state, "GitHub", "frank", "gh-pw", "https://github.com");
 
     // While it is active, both work — the refusal below has to come from
@@ -634,7 +660,7 @@ fn a_trashed_login_is_neither_filled_nor_read_nor_deleted_twice() {
 fn a_passkey_get_that_outlasts_the_lock_refuses_to_sign() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
 
     let credential_id = match handle_request(
         Request::PasskeyCreate {
@@ -820,10 +846,11 @@ fn browser_use_resets_the_idle_timer_but_polling_does_not() {
 
     let automatic = [
         Request::Hello {
-            token: "t".into(),
+            token: Some("t".into()),
             protocol: None,
             nonce: None,
         },
+        Request::Auth { proof: "p".into() },
         Request::Match {
             url: "https://github.com".into(),
         },
@@ -854,7 +881,7 @@ fn generating_a_password_does_not_need_an_unlocked_vault() {
     let (clip, _) = ClipboardManager::memory();
     // No vault at all: stricter than locked, and it still has to answer.
     let state = Mutex::new(AppState::new(store, None, clip));
-    let mut authed = true;
+    let mut authed = Session::Authed;
 
     let mut generate = |length: Option<usize>| {
         handle_request(
@@ -897,7 +924,7 @@ fn generating_a_password_does_not_need_an_unlocked_vault() {
 fn requires_token_before_serving() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = false;
+    let mut authed = Session::New;
     // Match without hello -> unauthorized.
     let r = handle_request(
         Request::Match {
@@ -913,7 +940,7 @@ fn requires_token_before_serving() {
     // Wrong token -> unauthorized, stays unauthed.
     let r = handle_request(
         Request::Hello {
-            token: "nope".into(),
+            token: Some("nope".into()),
             protocol: None,
             nonce: None,
         },
@@ -924,11 +951,11 @@ fn requires_token_before_serving() {
         &mut allow(),
     );
     assert!(matches!(r, Response::Error { .. }));
-    assert!(!authed);
+    assert!(!authed.is_authed());
     // Correct token -> ok.
     let r = handle_request(
         Request::Hello {
-            token: "secret".into(),
+            token: Some("secret".into()),
             protocol: None,
             nonce: None,
         },
@@ -949,7 +976,7 @@ fn requires_token_before_serving() {
             proof: None,
         }
     );
-    assert!(authed);
+    assert!(authed.is_authed());
 }
 
 /// A second consumer now opens this socket directly (a passkey client
@@ -960,10 +987,10 @@ fn the_handshake_negotiates_a_protocol_version() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
 
-    let hello = |protocol, token: &str, authed: &mut bool| {
+    let hello = |protocol, token: &str, authed: &mut Session| {
         handle_request(
             Request::Hello {
-                token: token.into(),
+                token: Some(token.into()),
                 protocol,
                 nonce: None,
             },
@@ -976,7 +1003,7 @@ fn the_handshake_negotiates_a_protocol_version() {
     };
 
     // Absent: the native host as it was written before versioning existed.
-    let mut authed = false;
+    let mut authed = Session::New;
     assert_eq!(
         hello(None, "secret", &mut authed),
         Response::Ok {
@@ -988,10 +1015,10 @@ fn the_handshake_negotiates_a_protocol_version() {
             proof: None,
         }
     );
-    assert!(authed);
+    assert!(authed.is_authed());
 
     // Our own version, stated explicitly.
-    let mut authed = false;
+    let mut authed = Session::New;
     assert_eq!(
         hello(Some(PROTOCOL_VERSION), "secret", &mut authed),
         Response::Ok {
@@ -1003,37 +1030,37 @@ fn the_handshake_negotiates_a_protocol_version() {
             proof: None,
         }
     );
-    assert!(authed);
+    assert!(authed.is_authed());
 
     // A client from the future is refused rather than served responses it
     // would misread, and does not get to send anything afterwards.
-    let mut authed = false;
+    let mut authed = Session::New;
     assert_eq!(
         hello(Some(PROTOCOL_VERSION + 1), "secret", &mut authed),
         Response::Error {
             message: "unsupported_protocol".into()
         }
     );
-    assert!(!authed);
+    assert!(!authed.is_authed());
 
     // Zero is not a version anyone speaks.
-    let mut authed = false;
+    let mut authed = Session::New;
     assert!(matches!(
         hello(Some(0), "secret", &mut authed),
         Response::Error { .. }
     ));
-    assert!(!authed);
+    assert!(!authed.is_authed());
 
     // The token is checked first, so a caller that cannot authenticate
     // learns nothing about this build — not even that its version is wrong.
-    let mut authed = false;
+    let mut authed = Session::New;
     assert_eq!(
         hello(Some(PROTOCOL_VERSION + 1), "wrong", &mut authed),
         Response::Error {
             message: "unauthorized".into()
         }
     );
-    assert!(!authed);
+    assert!(!authed.is_authed());
 }
 
 #[test]
@@ -1043,7 +1070,7 @@ fn match_and_fill_respect_origin_and_unlock() {
     let gh = add(&state, "GitHub", "frank", "gh-pw", "https://github.com");
     add(&state, "Google", "frank@g", "g-pw", "https://google.com");
 
-    let mut authed = true;
+    let mut authed = Session::Authed;
 
     // Match returns only the github.com login for a github.com page.
     let r = handle_request(
@@ -1128,7 +1155,7 @@ fn match_labels_passwords_and_passkeys_by_kind() {
     let state = unlocked_state(&dir);
     // A password login and a passkey, both for github.com.
     add(&state, "GitHub", "frank", "gh-pw", "https://github.com");
-    let mut authed = true;
+    let mut authed = Session::Authed;
     let r = handle_request(
         Request::PasskeyCreate {
             origin: "https://github.com".into(),
@@ -1174,7 +1201,7 @@ fn fill_requires_consent_when_confirm_is_enabled() {
     let state = unlocked_state(&dir);
     let gh = add(&state, "GitHub", "frank", "gh-pw", "https://github.com");
     state.lock().unwrap().settings.confirm_autofill = true;
-    let mut authed = true;
+    let mut authed = Session::Authed;
 
     // Denied consent -> no credential.
     let mut deny = |_: &ConsentContext| false;
@@ -1224,7 +1251,7 @@ fn passkey_create_then_get_binds_to_origin_and_signs() {
 
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
     let mut create = |origin: &str, rp: &str| {
         handle_request(
             Request::PasskeyCreate {
@@ -1381,8 +1408,8 @@ fn rp_id_rejects_public_suffixes_and_cross_origin() {
 fn save_probe_and_login_add_update_and_dedupe() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
-    let probe = |url: &str, user: &str, pw: &str, authed: &mut bool| {
+    let mut authed = Session::Authed;
+    let probe = |url: &str, user: &str, pw: &str, authed: &mut Session| {
         handle_request(
             Request::SaveProbe {
                 url: url.into(),
@@ -1396,7 +1423,7 @@ fn save_probe_and_login_add_update_and_dedupe() {
             &mut allow(),
         )
     };
-    let save = |url: &str, user: &str, pw: &str, authed: &mut bool| {
+    let save = |url: &str, user: &str, pw: &str, authed: &mut Session| {
         handle_request(
             Request::SaveLogin {
                 url: url.into(),
@@ -1495,9 +1522,9 @@ fn save_probe_and_login_add_update_and_dedupe() {
 fn password_reset_save_never_crosses_an_origin_port() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
     let request =
-        |req, authed: &mut bool| handle_request(req, &state, "t", authed, None, &mut allow());
+        |req, authed: &mut Session| handle_request(req, &state, "t", authed, None, &mut allow());
 
     assert_eq!(
         request(
@@ -1569,8 +1596,8 @@ fn password_reset_save_never_crosses_an_origin_port() {
 fn save_with_no_username_updates_the_only_host_login() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
-    let probe = |user: &str, pw: &str, authed: &mut bool| {
+    let mut authed = Session::Authed;
+    let probe = |user: &str, pw: &str, authed: &mut Session| {
         handle_request(
             Request::SaveProbe {
                 url: "https://connect.visma.com/emailtokenverify".into(),
@@ -1584,7 +1611,7 @@ fn save_with_no_username_updates_the_only_host_login() {
             &mut allow(),
         )
     };
-    let save = |user: &str, pw: &str, authed: &mut bool| {
+    let save = |user: &str, pw: &str, authed: &mut Session| {
         handle_request(
             Request::SaveLogin {
                 url: "https://connect.visma.com/emailtokenverify".into(),
@@ -1660,8 +1687,8 @@ fn save_with_no_username_updates_the_only_host_login() {
 fn save_probe_names_the_login_an_update_would_overwrite() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
-    let probe = |user: &str, pw: &str, authed: &mut bool| {
+    let mut authed = Session::Authed;
+    let probe = |user: &str, pw: &str, authed: &mut Session| {
         handle_request(
             Request::SaveProbe {
                 url: "https://connect.visma.com/emailtokenverify".into(),
@@ -1716,7 +1743,7 @@ fn save_probe_names_the_login_an_update_would_overwrite() {
 fn a_refused_request_does_not_reset_the_idle_timer() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
 
     // Age the vault's last-use marker, then make a request that fails.
     let before = {
@@ -1761,85 +1788,173 @@ fn a_refused_request_does_not_reset_the_idle_timer() {
     );
 }
 
-/// Shared handshake test vector.
-///
-/// The app, the native host and the CLI each compute this MAC in their own
-/// crate, and a silent disagreement would break every bridge connection at
-/// once. The same assertion lives in all three, so changing one without the
-/// others fails here.
+/// Protocol 3, the way the native host and the CLI now speak it: the app
+/// proves itself over the client's nonce before the client says anything that
+/// matters, and the token itself never crosses the socket in either direction.
 #[test]
-fn handshake_proof_matches_the_shared_vector() {
-    assert_eq!(
-        handshake_proof("arca-test-token", "0123456789abcdef"),
-        "e7b61fca20478c27d56236c0e24e1fc97e29d2a3ed757d7a61d0cee09b66c1fc"
-    );
-}
-
-/// The handshake has to run BOTH ways.
-///
-/// It used to run one: the client proved it had the token, the app proved
-/// nothing, and a client believed anything that answered `{"type":"ok"}`.
-/// Arca's port is released the instant it exits and the file naming that
-/// port outlived it, so whatever bound the port next was handed the next
-/// submitted password.
-#[test]
-fn the_app_proves_it_holds_the_token_before_a_client_trusts_it() {
+fn protocol_3_authenticates_both_sides_without_sending_the_token() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = false;
+    let token = "the-real-token";
+    let mut session = Session::New;
+    let send = |req: Request, session: &mut Session| {
+        handle_request(req, &state, token, session, None, &mut allow())
+    };
 
-    let hello = |nonce: Option<&str>, token: &str, authed: &mut bool| {
+    let client_nonce = vault_bridge_auth::nonce().unwrap();
+    let Response::Challenge { nonce, proof } = send(
+        Request::Hello {
+            token: None,
+            protocol: Some(PROTOCOL_VERSION),
+            nonce: Some(client_nonce.clone()),
+        },
+        &mut session,
+    ) else {
+        panic!("a tokenless hello must be answered with a challenge");
+    };
+    assert!(vault_bridge_auth::same(
+        &proof,
+        &vault_bridge_auth::app_proof(token, &client_nonce, &nonce)
+    ));
+    assert!(!session.is_authed());
+
+    // Nothing is served between the challenge and the client's proof.
+    let early = send(Request::ListBookmarks, &mut session);
+    assert_eq!(early, unauthorized());
+
+    let mut session = Session::Challenged {
+        client_nonce: client_nonce.clone(),
+        app_nonce: nonce.clone(),
+    };
+    let ok = send(
+        Request::Auth {
+            proof: vault_bridge_auth::client_proof(token, &client_nonce, &nonce),
+        },
+        &mut session,
+    );
+    assert_eq!(ok, welcome(None));
+    assert!(session.is_authed());
+}
+
+#[test]
+fn protocol_3_refuses_a_client_that_cannot_prove_itself() {
+    let dir = TempDir::new().unwrap();
+    let state = unlocked_state(&dir);
+    let token = "the-real-token";
+    let mut send = |req: Request, session: &mut Session| {
+        handle_request(req, &state, token, session, None, &mut allow())
+    };
+    let challenge = |send: &mut dyn FnMut(Request, &mut Session) -> Response,
+                     session: &mut Session| {
+        let client_nonce = vault_bridge_auth::nonce().unwrap();
+        let Response::Challenge { nonce, .. } = send(
+            Request::Hello {
+                token: None,
+                protocol: Some(PROTOCOL_VERSION),
+                nonce: Some(client_nonce.clone()),
+            },
+            session,
+        ) else {
+            panic!("expected a challenge");
+        };
+        (client_nonce, nonce)
+    };
+
+    // A proof made without the token.
+    let mut session = Session::New;
+    let (c, a) = challenge(&mut send, &mut session);
+    let forged = vault_bridge_auth::client_proof("a-guessed-token", &c, &a);
+    assert_eq!(
+        send(Request::Auth { proof: forged }, &mut session),
+        unauthorized()
+    );
+    assert!(!session.is_authed());
+
+    // The app's own proof, echoed back: different label, so it never works.
+    let mut session = Session::New;
+    let (c, a) = challenge(&mut send, &mut session);
+    let echoed = vault_bridge_auth::app_proof(token, &c, &a);
+    assert_eq!(
+        send(Request::Auth { proof: echoed }, &mut session),
+        unauthorized()
+    );
+
+    // A proof from an earlier connection: the app's nonce is fresh each time.
+    let mut session = Session::New;
+    let (c, a) = challenge(&mut send, &mut session);
+    let replay = vault_bridge_auth::client_proof(token, &c, &a);
+    let mut session = Session::New;
+    challenge(&mut send, &mut session);
+    assert_eq!(
+        send(Request::Auth { proof: replay }, &mut session),
+        unauthorized()
+    );
+
+    // No challenge outstanding.
+    let mut session = Session::New;
+    let proof = vault_bridge_auth::client_proof(token, &c, &a);
+    assert_eq!(send(Request::Auth { proof }, &mut session), unauthorized());
+
+    // Without a well-formed nonce, or claiming a protocol that sent the token.
+    for (protocol, nonce) in [
+        (Some(PROTOCOL_VERSION), None),
+        (Some(PROTOCOL_VERSION), Some("cafebabe".to_string())),
+        (Some(2), vault_bridge_auth::nonce()),
+        (None, vault_bridge_auth::nonce()),
+    ] {
+        let mut session = Session::New;
+        let hello = Request::Hello {
+            token: None,
+            protocol,
+            nonce,
+        };
+        assert_eq!(send(hello, &mut session), unauthorized());
+        assert_eq!(session, Session::New);
+    }
+}
+
+/// Clients built before protocol 3 still send the token in their hello and
+/// check protocol 2's proof. Serving them adds nothing an attacker can use:
+/// it takes the token to get in either way.
+#[test]
+fn a_protocol_2_client_is_still_served() {
+    let dir = TempDir::new().unwrap();
+    let state = unlocked_state(&dir);
+    let hello = |token: &str, session: &mut Session| {
         handle_request(
             Request::Hello {
-                token: token.into(),
-                protocol: Some(PROTOCOL_VERSION),
-                nonce: nonce.map(str::to_string),
+                token: Some(token.into()),
+                protocol: Some(2),
+                nonce: Some("cafebabe".into()),
             },
             &state,
             "the-real-token",
-            authed,
+            session,
             None,
             &mut allow(),
         )
     };
 
-    // A client that challenges gets a MAC it can check against its own.
-    match hello(Some("cafebabe"), "the-real-token", &mut authed) {
-        Response::Ok { proof, .. } => assert_eq!(
-            proof.as_deref(),
-            Some(handshake_proof("the-real-token", "cafebabe").as_str()),
-            "the proof must be HMAC(token, nonce) so a client can verify it"
-        ),
-        other => panic!("expected ok, got {other:?}"),
-    }
-
-    // The proof is bound to THIS nonce, so a proof captured from an earlier
-    // handshake cannot be replayed into a later one.
-    assert_ne!(
-        handshake_proof("the-real-token", "cafebabe"),
-        handshake_proof("the-real-token", "d00dfeed"),
+    let mut session = Session::New;
+    assert_eq!(
+        hello("the-real-token", &mut session),
+        welcome(Some(vault_bridge_auth::v2_proof(
+            "the-real-token",
+            "cafebabe"
+        )))
     );
-    // ...and to the token, which is the whole point: an impostor that never
-    // read the info file cannot produce it.
-    assert_ne!(
-        handshake_proof("the-real-token", "cafebabe"),
-        handshake_proof("a-guessed-token", "cafebabe"),
-    );
+    assert!(session.is_authed());
 
-    // A wrong token is still refused outright, and learns nothing.
-    let mut other_authed = false;
-    assert!(matches!(
-        hello(Some("cafebabe"), "wrong-token", &mut other_authed),
-        Response::Error { message } if message == "unauthorized"
-    ));
-    assert!(!other_authed);
+    let mut session = Session::New;
+    assert_eq!(hello("wrong-token", &mut session), unauthorized());
+    assert!(!session.is_authed());
 }
 
 #[test]
 fn bridge_created_items_receive_real_timestamps() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
 
     let created = handle_request(
         Request::CreateLogin {
@@ -1898,7 +2013,7 @@ fn bridge_created_items_receive_real_timestamps() {
 fn multiple_passkey_accounts_require_choice_and_respect_allow_credentials() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
     let mut ids = Vec::new();
     for (name, handle) in [("first@example.test", 1), ("wanted@example.test", 2)] {
         let response = handle_request(
@@ -1988,7 +2103,7 @@ fn multiple_passkey_accounts_require_choice_and_respect_allow_credentials() {
 fn passkey_create_with_excluded_credential_is_refused_without_prompt() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
 
     // Register one passkey normally.
     let resp = handle_request(
@@ -2044,7 +2159,7 @@ fn passkey_create_with_excluded_credential_is_refused_without_prompt() {
 fn passkey_create_for_a_known_account_is_refused_without_an_exclude_list() {
     let dir = TempDir::new().unwrap();
     let state = unlocked_state(&dir);
-    let mut authed = true;
+    let mut authed = Session::Authed;
 
     let create = |exclude: Vec<Vec<u8>>| Request::PasskeyCreate {
         origin: "https://login.microsoft.com".into(),
