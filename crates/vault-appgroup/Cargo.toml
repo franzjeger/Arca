@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 # Isolated so the desktop app crate can keep #![forbid(unsafe_code)]: the one
 # Objective-C FFI call lives here, behind a safe `container_path` function.

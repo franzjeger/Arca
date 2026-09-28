@@ -8,3 +8,21 @@ updates:
       github-actions:
         patterns: ["*"]
     open-pull-requests-limit: 3
+  # Security fixes arrive as their own pull requests whatever the grouping;
+  # routine minor and patch bumps come as one per ecosystem each week.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      rust:
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+    groups:
+      desktop-ui:
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5

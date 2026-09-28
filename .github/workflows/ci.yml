@@ -434,6 +434,11 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Run cargo-audit
         run: cargo audit
+      # Licenses, where code may come from, and duplicate crates: deny.toml.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Run cargo-deny
+        run: cargo deny check licenses bans sources
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
