@@ -678,19 +678,37 @@ pub fn unlock(
     state: St<'_>,
     master_password: String,
 ) -> Result<(), CmdError> {
-    do_unlock(state.inner(), &master_password)?;
+    let touch_id = do_unlock(state.inner(), &master_password)?;
     crate::session::unlocked(&app);
+    if touch_id {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::rotation::finish(&app, true).await;
+        });
+    }
     Ok(())
 }
 
-fn do_unlock(state: &Mutex<AppState>, master_password: &str) -> Result<(), CmdError> {
+/// Returns whether Touch ID has to be brought back after the password was
+/// one set on another device (see `rotation::finish`).
+fn do_unlock(state: &Mutex<AppState>, master_password: &str) -> Result<bool, CmdError> {
     let mut st = guard(state)?;
     st.unlock_generation = st.unlock_generation.wrapping_add(1);
     // Load the locked vault from disk if it isn't in memory yet.
     if st.vault.is_none() && st.store.exists() {
         st.vault = Some(st.store.load()?);
     }
-    st.vault_mut()?.unlock(master_password)?;
+    match st.vault_mut()?.unlock(master_password) {
+        Ok(()) => {}
+        // Perhaps the password was changed on another device: sync keeps the
+        // copy sealed under the new one, and that copy opens this vault too.
+        Err(vault_core::Error::Decryption) => {
+            let copy = crate::sync::rotated_copy().ok_or(vault_core::Error::Decryption)?;
+            drop(st);
+            return crate::rotation::adopt(state, &copy, master_password);
+        }
+        Err(e) => return Err(e.into()),
+    }
 
     // macOS enrollment/repair is explicitly authenticated in Settings. Never
     // recreate a plain login-keychain key, even if the protected marker was lost.
@@ -718,7 +736,7 @@ fn do_unlock(state: &Mutex<AppState>, master_password: &str) -> Result<(), CmdEr
     crate::keyfile_unlock::heal(&mut st);
 
     st.touch();
-    Ok(())
+    Ok(false)
 }
 
 /// Run the blocking biometric prompt on a WORKER thread, with the app handle
@@ -1214,37 +1232,72 @@ pub async fn sync_bootstrap(
     Ok(())
 }
 
-/// Re-key the vault under a new master password. Requires an unlocked vault and
-/// a fresh biometric re-auth (Touch ID / Windows Hello; no-op where absent) so a
-/// walk-up attacker at an unlocked machine can't silently rotate the password
-/// and lock the owner out. Quick-unlock stays valid: the device-wrapped copy of
-/// the vault key is untouched by rotation.
+/// Change the master password, which gives the vault a new key. Requires an
+/// unlocked vault and a fresh biometric re-auth (Touch ID / Windows Hello;
+/// no-op where absent) so a walk-up attacker at an unlocked machine can't
+/// silently rotate the password and lock the owner out. Quick unlock and the
+/// USB key wrapped the old key and are brought back (see `rotation`); other
+/// devices ask for the new password on their next sync.
 #[tauri::command]
 pub async fn change_master_password(
     app: tauri::AppHandle,
     state: St<'_>,
     new_password: String,
     current_password: Option<String>,
-) -> Result<(), CmdError> {
+) -> Result<crate::rotation::Rekeyed, CmdError> {
     if new_password.chars().count() < 8 {
         return Err(CmdError::new(
             "weak_password",
             "Use at least 8 characters for the master password.",
         ));
     }
+    // A change made on another device comes first. Another one made from the
+    // old key would carry neither device's new key, so neither could take
+    // the other's on.
+    if crate::sync::rotated_copy().is_some() {
+        return Err(vault_core::Error::KeyRotated.into());
+    }
     // Re-auth BEFORE taking the state lock (the prompt blocks on the user).
     let authorization =
         crate::reauth::authorize(&app, "change your master password", current_password).await?;
 
-    let mut st = write_guard(state.inner())?;
-    authorization.validate(&st)?;
-    {
+    let touch_id = {
+        let mut st = write_guard(state.inner())?;
+        authorization.validate(&st)?;
         let vault = st.vault.as_mut().ok_or_else(CmdError::no_vault)?;
+        let had_quick_unlock = vault.has_device_unlock();
         vault.change_master_password(&new_password)?;
-    }
-    persist(&mut st)?;
-    st.touch();
-    Ok(())
+        let touch_id = crate::rotation::restore_silently(&mut st, had_quick_unlock);
+        persist(&mut st)?;
+        st.touch();
+        touch_id
+    };
+    Ok(crate::rotation::finish(&app, touch_id).await)
+}
+
+/// The answer to sync's "the master password was changed on another device":
+/// take the change on with the new password. Opens a locked vault too.
+#[tauri::command]
+pub async fn sync_adopt_password(
+    app: tauri::AppHandle,
+    password: String,
+) -> Result<crate::rotation::Rekeyed, CmdError> {
+    let password = zeroize::Zeroizing::new(password);
+    let copy = crate::sync::rotated_copy().ok_or_else(|| {
+        CmdError::new(
+            "no_password_change",
+            "This vault already has the newest master password.",
+        )
+    })?;
+    let worker = app.clone();
+    let touch_id = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker.state::<Mutex<AppState>>();
+        crate::rotation::adopt(state.inner(), &copy, &password)
+    })
+    .await
+    .map_err(|_| CmdError::new("internal", "The password task failed."))??;
+    crate::session::unlocked(&app);
+    Ok(crate::rotation::finish(&app, touch_id).await)
 }
 
 #[tauri::command]

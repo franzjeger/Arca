@@ -1,18 +1,19 @@
-import { act, render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { api, type BackupStatus } from "../lib/api";
+import { api, type BackupStatus, type SyncStatus } from "../lib/api";
 import { VaultStatusBar } from "./VaultStatusBar";
+const sync = vi.hoisted(() => ({ status: null as SyncStatus | null }));
 vi.mock("../hooks/useSyncStatus", () => ({
-  useSyncStatus: () => ({ status: null, error: null }), syncLabel: () => "Sync off",
+  useSyncStatus: () => ({ status: sync.status, error: null }), syncLabel: () => "Sync off",
 }));
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, api: { ...actual.api, backupStatus: vi.fn() } };
+  return { ...actual, api: { ...actual.api, backupStatus: vi.fn(), syncAdoptPassword: vi.fn() } };
 });
 const now = 2_000_000_000;
 const healthy: BackupStatus = { directory: "/backups", lastSuccessUnix: now, lastError: null, lastFile: null };
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now * 1000); });
-afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); sync.status = null; });
 async function show(status: BackupStatus) {
   vi.mocked(api.backupStatus).mockResolvedValue(status);
   const onOpenSettings = vi.fn();
@@ -60,4 +61,30 @@ it("applies configuration immediately and ignores an older in-flight status repl
   expect(screen.queryByText(/Automatic backups are off/)).not.toBeInTheDocument();
   act(() => { publishBackupStatus({ ...healthy, directory: null }); });
   expect(screen.getByText(/Automatic backups are off/)).toBeInTheDocument();
+});
+
+it("asks for a master password changed on another device, once, and keeps a way back", async () => {
+  vi.useRealTimers();
+  vi.mocked(api.backupStatus).mockResolvedValue(healthy);
+  sync.status = { pending: true, syncing: false, connected: true, account: null, lastSyncUnix: null, lastError: "changed elsewhere", needsPassword: true };
+  const onToast = vi.fn();
+  await act(async () => { render(<VaultStatusBar onOpenSettings={vi.fn()} onToast={onToast} />); });
+  expect(screen.getByRole("dialog", { name: "Master password changed" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Retry sync" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Enter new password" }));
+
+  vi.mocked(api.syncAdoptPassword).mockRejectedValueOnce({ code: "invalid_credentials", message: "Incorrect password" });
+  fireEvent.change(screen.getByPlaceholderText("New master password"), { target: { value: "old" } });
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  expect(await screen.findByText("That is not the new master password.")).toBeInTheDocument();
+
+  vi.mocked(api.syncAdoptPassword).mockResolvedValueOnce({ quickUnlockLost: false });
+  fireEvent.change(screen.getByPlaceholderText("New master password"), { target: { value: "new" } });
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await waitFor(() => expect(onToast).toHaveBeenCalledWith("This device now uses the new master password."));
+  expect(api.syncAdoptPassword).toHaveBeenLastCalledWith("new");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });

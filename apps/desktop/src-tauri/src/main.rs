@@ -15,6 +15,7 @@ mod keyfile_unlock;
 mod protected_unlock;
 mod reauth;
 mod related_origins;
+mod rotation;
 mod session;
 mod state;
 mod sync;
@@ -301,6 +302,7 @@ fn main() {
             keyfile_unlock::keyfile_configure,
             keyfile_unlock::keyfile_unlock,
             commands::change_master_password,
+            commands::sync_adopt_password,
             commands::sync_connect,
             commands::sync_disconnect,
             commands::sync_status,

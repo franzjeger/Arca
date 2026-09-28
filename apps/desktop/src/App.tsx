@@ -606,7 +606,7 @@ export default function App() {
         )}
       </div>
 
-      <VaultStatusBar onOpenSettings={() => setSettingsOpen(true)} conflictCount={items.filter(isSyncConflict).length} onReviewConflicts={() => setConflictsOpen(true)} />
+      <VaultStatusBar onOpenSettings={() => setSettingsOpen(true)} conflictCount={items.filter(isSyncConflict).length} onReviewConflicts={() => setConflictsOpen(true)} onToast={setToast} />
       <AppDialogs
         items={items}
         status={status}

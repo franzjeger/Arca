@@ -225,6 +225,18 @@ impl From<vault_core::Error> for CmdError {
                 "unsupported_version",
                 "This vault was written by a newer version of Arca. Update the app.",
             ),
+            E::KeyRotated => CmdError::new(
+                "password_changed",
+                "The master password was changed on another device. Enter the new one.",
+            ),
+            E::StaleKey => CmdError::new(
+                "stale_copy",
+                "That copy of the vault is from before a master password change.",
+            ),
+            E::DifferentVault => CmdError::new(
+                "different_vault",
+                "That password opens a different vault, not a newer copy of this one.",
+            ),
             E::InvalidTotpSecret => CmdError::new(
                 "invalid_totp",
                 "The stored TOTP secret is not valid Base32.",

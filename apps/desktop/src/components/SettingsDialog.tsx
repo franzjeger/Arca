@@ -151,7 +151,11 @@ export function SettingsDialog({
       setNewPw("");
       setConfirmPw("");
       setPwOpen(false);
-      onToast("Master password changed");
+      if (confirmed.value.quickUnlockLost) setQuickUnlock(false);
+      onStatusChanged();
+      onToast(confirmed.value.quickUnlockLost
+        ? "Master password changed. Quick unlock is off; turn it back on below."
+        : "Master password changed. Your other devices will ask for it once.");
     } catch (e) {
       onToast(toastError(errorMessage(e)));
     } finally {

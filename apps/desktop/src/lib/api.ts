@@ -64,6 +64,14 @@ export interface SyncStatus {
   account: string | null;
   lastSyncUnix: number | null;
   lastError: string | null;
+  /** The master password was changed on another device; sync waits for it. */
+  needsPassword?: boolean;
+}
+
+/** What a master password change left behind. */
+export interface Rekeyed {
+  /** Quick unlock was on and is off now: macOS's Touch ID prompt was declined. */
+  quickUnlockLost: boolean;
 }
 
 export interface AppInfo {
@@ -385,7 +393,10 @@ export const api = {
     invoke<KeyFileStatus>("keyfile_configure", { lockOnRemoval }),
   keyfileUnlock: () => invoke<void>("keyfile_unlock"),
   changeMasterPassword: (newPassword: string, currentPassword?: string) =>
-    invoke<void>("change_master_password", { newPassword, currentPassword }),
+    invoke<Rekeyed>("change_master_password", { newPassword, currentPassword }),
+  /** Take on a master password change made on another device. Opens a locked vault too. */
+  syncAdoptPassword: (password: string) =>
+    invoke<Rekeyed>("sync_adopt_password", { password }),
   syncConnect: () => invoke<string>("sync_connect"),
   syncDisconnect: () => invoke<void>("sync_disconnect"),
   syncStatus: () => invoke<SyncStatus>("sync_status"),

@@ -72,10 +72,14 @@ impl LocalVault for AppStateVault {
             .lock()
             .map_err(|_| LocalError::Save("app state poisoned".into()))?;
         let AppState { store, vault, .. } = &mut *guard;
-        let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
-            // Locked: merging needs the key. Not an error — the engine defers.
+        let Some(vault) = vault.as_mut() else {
             return Err(LocalError::Locked);
         };
+        if !vault.is_unlocked() {
+            // Merging needs the key, so the engine defers — unless the password
+            // changed elsewhere, which the lock screen needs to know.
+            return Err(vault_sync::locked(vault, remotes));
+        }
         merge_and_save(vault, store, remotes)?;
         vault
             .to_bytes()
@@ -157,6 +161,19 @@ pub fn mark_dirty() {
     }
 }
 
+/// The copy sealed by a master password change made on another device, while
+/// sync waits for its password (see `rotation::adopt`).
+pub fn rotated_copy() -> Option<Vec<u8>> {
+    SYNC.get()?.engine.rotated_copy()
+}
+
+/// The vault took that change on: stop asking, and push it.
+pub fn rotation_adopted() {
+    if let Some(sync) = SYNC.get() {
+        sync.engine.rotation_adopted();
+    }
+}
+
 /// Sync status as the webview sees it.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +184,8 @@ pub struct SyncStatusDto {
     pub account: Option<String>,
     pub last_sync_unix: Option<u64>,
     pub last_error: Option<String>,
+    /// The master password was changed on another device; see [`rotated_copy`].
+    pub needs_password: bool,
 }
 
 impl From<&SyncStatus> for SyncStatusDto {
@@ -178,6 +197,7 @@ impl From<&SyncStatus> for SyncStatusDto {
             account: s.account.clone(),
             last_sync_unix: s.last_sync_unix,
             last_error: s.last_error.clone(),
+            needs_password: s.needs_password,
         }
     }
 }
@@ -192,12 +212,14 @@ pub fn sync_now(app: &AppHandle) -> Result<bool, String> {
     sync(app).engine.sync_now()
 }
 
-/// Background loop: a cycle every [`SYNC_INTERVAL`]. Errors land in the status
-/// (shown in Settings), never fatal.
+/// Background loop: a cycle at launch and every [`SYNC_INTERVAL`] after.
+/// Errors land in the status (shown in Settings), never fatal. The first one
+/// runs at once, locked or not: a password changed on another device should
+/// be on the lock screen before the user types the old one.
 pub fn start_loop(app: AppHandle) {
     std::thread::spawn(move || loop {
-        std::thread::sleep(SYNC_INTERVAL);
         let _ = sync_now(&app);
+        std::thread::sleep(SYNC_INTERVAL);
     });
 }
 
@@ -282,17 +304,28 @@ pub fn bootstrap(app: &AppHandle, master_password: &str) -> Result<(), String> {
     // Network and key derivation happen BEFORE the state lock: nothing below
     // may stall the UI's other commands behind a download or an Argon2id run.
     let files = sync.drive.list().map_err(|e| e.to_string())?;
-    // Oldest first (the `list` contract): after a historical create race the
-    // oldest file is the lineage every other device converged on.
-    let Some(primary) = files.first() else {
+    if files.is_empty() {
         return Err("No vault was found in this Google account.".into());
-    };
-    let bytes = sync
-        .drive
-        .download(&primary.id)
-        .map_err(|e| e.to_string())?;
-    let mut vault = vault_core::Vault::from_bytes(&bytes)
-        .map_err(|_| "The synced file could not be read as a vault.".to_string())?;
+    }
+    // The copy from the latest master password change, whose password is the
+    // one the user knows. Otherwise the oldest (the `list` order): after a
+    // historical create race, that is the lineage every device converged on.
+    let mut newest: Option<vault_core::Vault> = None;
+    for file in &files {
+        let bytes = sync.drive.download(&file.id).map_err(|e| e.to_string())?;
+        let Ok(copy) = vault_core::Vault::from_bytes(&bytes) else {
+            continue;
+        };
+        let newer = match &newest {
+            Some(kept) => copy.header().key_epoch > kept.header().key_epoch,
+            None => true,
+        };
+        if newer {
+            newest = Some(copy);
+        }
+    }
+    let mut vault =
+        newest.ok_or_else(|| "The synced file could not be read as a vault.".to_string())?;
     vault.unlock(master_password).map_err(|e| match e {
         // In this flow a decryption failure has exactly one human meaning.
         vault_core::Error::Decryption => "Wrong master password for the synced vault.".to_string(),
