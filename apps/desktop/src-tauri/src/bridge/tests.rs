@@ -4,7 +4,12 @@
 use super::*;
 use crate::clipboard::ClipboardManager;
 use crate::commands::{do_upsert_item, LoginInput};
+use crate::state::AppState;
+use std::time::Instant;
 use tempfile::TempDir;
+use uuid::Uuid;
+use vault_bridge::proto::Request;
+use vault_core::VaultItem;
 use vault_core::{KdfAlgorithm, KdfParams, Vault};
 use vault_store::VaultStore;
 
