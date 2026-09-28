@@ -16,6 +16,11 @@ struct VaultListView: View {
     @State private var editing: VaultItemMeta?
     @State private var creating: VaultCreateKind?
     @State private var generatingPassword = false
+    /// Asking for a master password changed on another device: once when sync
+    /// finds the change, then from the banner after "Not now".
+    @State private var askingNewPassword = false
+    @State private var newPassword = ""
+    @State private var newPasswordError: String?
 
     var body: some View {
         @Bindable var store = store
@@ -178,6 +183,20 @@ struct VaultListView: View {
             // No `onUse`: opened on its own there is no field to fill, so
             // Copy is the only thing that would make sense.
             .sheet(isPresented: $generatingPassword) { PasswordGeneratorView() }
+            .onChange(of: store.needsNewPassword, initial: true) { _, needed in
+                askingNewPassword = needed
+            }
+            .alert("Master password changed", isPresented: $askingNewPassword) {
+                SecureField("New master password", text: $newPassword)
+                Button("Continue") { Task { await adoptNewPassword() } }
+                Button("Not now", role: .cancel) {
+                    newPassword = ""
+                    newPasswordError = nil
+                }
+            } message: {
+                Text(newPasswordError
+                    ?? "It was changed on another device. Enter the new one to keep this iPhone in sync.")
+            }
             // Only after an unlock has actually asked the store — `nil` means
             // we don't know yet, and guessing would nag people who are set up.
             .safeAreaInset(edge: .bottom) {
@@ -188,6 +207,12 @@ struct VaultListView: View {
                         Banner(text: "Syncing with Google Drive…", bad: false)
                     }
                     if let failure = store.failure { Banner(text: failure, bad: true) }
+                    if store.needsNewPassword, !askingNewPassword {
+                        Button { askingNewPassword = true } label: {
+                            Banner(text: "Master password changed on another device. Tap to enter it.", bad: true)
+                        }
+                        .buttonStyle(.plain)
+                    }
                     if store.autoFillEnabled == false { AutoFillHint() }
                     // The toggle also lives in the Options menu, but that menu
                     // is a "..." in the top-LEFT corner above a full-screen
@@ -199,6 +224,15 @@ struct VaultListView: View {
                 }
             }
         }
+    }
+
+    /// The alert closes on its own when a button is pressed, so a wrong
+    /// password reopens it with the reason.
+    private func adoptNewPassword() async {
+        let password = newPassword
+        newPassword = ""
+        newPasswordError = await store.adoptNewPassword(password)
+        if newPasswordError != nil { askingNewPassword = true }
     }
 
     private func row(_ item: VaultItemMeta) -> some View {

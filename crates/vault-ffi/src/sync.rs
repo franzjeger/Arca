@@ -42,7 +42,10 @@ use vault_sync::oauth::{OAuthClient, Pkce};
 use vault_sync::{LocalError, LocalVault, RemoteStore, SilentObserver, SyncEngine};
 use zeroize::Zeroizing;
 
-use crate::{cstr, emit, VaultHandle, ERR_NULL_ARG, ERR_OP_FAILED, ERR_PANIC, ERR_UTF8, OK};
+use crate::{
+    cstr, emit, err_code, VaultHandle, ERR_NOT_FOUND, ERR_NULL_ARG, ERR_OP_FAILED, ERR_PANIC,
+    ERR_UTF8, OK,
+};
 
 /// The cycle ran but did not finish. The reason is in the status JSON's
 /// `lastError`; it is the same sentence the desktop shows in Settings.
@@ -103,8 +106,9 @@ impl LocalVault for SharedVault {
             .lock()
             .map_err(|_| LocalError::Save("vault state poisoned".into()))?;
         if !vault.is_unlocked() {
-            // Not an error: the engine defers and keeps the pending changes.
-            return Err(LocalError::Locked);
+            // Not an error: the engine defers and keeps the pending changes,
+            // unless the password changed elsewhere.
+            return Err(vault_sync::locked(&vault, remotes));
         }
         vault_sync::merge_remotes(&mut vault, remotes)?;
         let bytes = vault
@@ -166,6 +170,9 @@ struct StatusJson {
     /// Whether *this* call merged remote changes. Always false for
     /// [`vault_ffi_sync_status`], which only reports.
     merged: bool,
+    /// The master password was changed on another device; sync waits for it
+    /// (see [`vault_ffi_sync_adopt_password`]).
+    needs_password: bool,
 }
 
 fn status_json(handle: &SyncHandle, merged: bool) -> Vec<u8> {
@@ -176,6 +183,7 @@ fn status_json(handle: &SyncHandle, merged: bool) -> Vec<u8> {
         last_sync_unix: status.last_sync_unix,
         last_error: status.last_error,
         merged,
+        needs_password: status.needs_password,
     };
     // A status object of four scalars and two strings cannot fail to serialize;
     // an empty object still parses on the far side if it somehow did.
@@ -405,6 +413,55 @@ pub unsafe extern "C" fn vault_ffi_sync_now(
         emit(json, out_status_json, out_status_json_len);
     }
     code
+}
+
+/// Take on a master password change made on another device (ABI v18): the
+/// answer to a status with `needsPassword`, where `password` is the new one.
+///
+/// The shared vault switches to the changed key and merges the copy sync
+/// found. Persist it as after any other change: `vault_ffi_merge_and_serialize`
+/// under the vault lock. Quick unlock wrapped the old key and is gone, so a
+/// client that had it re-enables it with `vault_ffi_enable_device_unlock`.
+///
+/// Returns `OK`; `ERR_DECRYPT` when the password does not open the changed
+/// copy; `ERR_DIFFERENT_VAULT` when it opens one that is not this vault's (a
+/// different vault, or one forged by someone who knew an old password); and
+/// `ERR_NOT_FOUND` when sync is not waiting for a password.
+///
+/// # Safety
+/// `handle` must be valid; `password` a NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_sync_adopt_password(
+    handle: *mut SyncHandle,
+    password: *const c_char,
+) -> i32 {
+    if handle.is_null() || password.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let Some(password) = cstr(password) else {
+        return ERR_UTF8;
+    };
+    let handle = &*handle;
+    let Some(copy) = handle.engine.rotated_copy() else {
+        return ERR_NOT_FOUND;
+    };
+    let adopted = catch_unwind(AssertUnwindSafe(|| {
+        // Not recovered from on purpose, as in `merge_and_serialize` above.
+        let mut vault = handle.local.vault.lock().map_err(|_| ERR_OP_FAILED)?;
+        vault.adopt_rotation(&copy, password).map_err(|e| match e {
+            // Caught up another way since the copy was kept.
+            vault_core::Error::StaleKey => ERR_NOT_FOUND,
+            e => err_code(&e),
+        })
+    }));
+    match adopted {
+        Ok(Ok(())) => {
+            handle.engine.rotation_adopted();
+            OK
+        }
+        Ok(Err(code)) => code,
+        Err(_) => ERR_PANIC,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +757,69 @@ mod tests {
         ));
         assert_eq!(titles(&arc), vec!["mine"], "a refusal must change nothing");
         assert!(local.pending.lock().unwrap().is_none());
+    }
+
+    /// A password changed on another device stops the cycle with that device's
+    /// copy, open or locked, so the caller can ask for the new password; the
+    /// copy it replaced merges as nothing rather than failing.
+    #[test]
+    fn a_password_change_elsewhere_is_reported_with_its_copy() {
+        let base = vault_with("mine", 1);
+        let mut laptop = Vault::from_bytes(&base.to_bytes().unwrap()).unwrap();
+        laptop.unlock("pw").unwrap();
+        laptop.change_master_password("new").unwrap();
+        let rotated = laptop.to_bytes().unwrap();
+        let before = base.to_bytes().unwrap();
+
+        let (arc, local) = shared(base);
+        assert_eq!(
+            local.merge_and_serialize(std::slice::from_ref(&rotated)),
+            Err(LocalError::KeyRotated(rotated.clone()))
+        );
+        arc.lock().unwrap().lock().unwrap();
+        assert_eq!(
+            local.merge_and_serialize(std::slice::from_ref(&rotated)),
+            Err(LocalError::KeyRotated(rotated.clone()))
+        );
+
+        arc.lock().unwrap().adopt_rotation(&rotated, "new").unwrap();
+        assert!(local.merge_and_serialize(&[before]).is_ok());
+        assert_eq!(titles(&arc), vec!["mine"]);
+    }
+
+    #[test]
+    fn adopting_needs_a_waiting_change_and_real_arguments() {
+        let bytes = vault_with("mine", 1).to_bytes().unwrap();
+        let pw = CString::new("pw").unwrap();
+        let mut handle: *mut VaultHandle = std::ptr::null_mut();
+        let opened = unsafe {
+            crate::vault_ffi_vault_open_password(
+                bytes.as_ptr(),
+                bytes.len(),
+                pw.as_ptr(),
+                &mut handle,
+            )
+        };
+        assert_eq!(opened, OK);
+        let mut sync: *mut SyncHandle = std::ptr::null_mut();
+        assert_eq!(unsafe { vault_ffi_sync_new(handle, &mut sync) }, OK);
+
+        assert_eq!(
+            unsafe { vault_ffi_sync_adopt_password(std::ptr::null_mut(), pw.as_ptr()) },
+            ERR_NULL_ARG
+        );
+        assert_eq!(
+            unsafe { vault_ffi_sync_adopt_password(sync, std::ptr::null()) },
+            ERR_NULL_ARG
+        );
+        assert_eq!(
+            unsafe { vault_ffi_sync_adopt_password(sync, pw.as_ptr()) },
+            ERR_NOT_FOUND
+        );
+        unsafe {
+            vault_ffi_sync_free(sync);
+            crate::vault_ffi_vault_free(handle);
+        }
     }
 
     #[test]

@@ -80,11 +80,13 @@ enum VaultShared {
     /// the existing secret, "" clears it — because the detail surface never
     /// hands the secret out, so a client editing a login could not round-trip
     /// it and every phone edit destroyed the code; v17 did the same for notes,
-    /// which the phone's login editor never shows.
+    /// which the phone's login editor never shows; v18 gave every master
+    /// password change a new vault key, with `vault_ffi_sync_adopt_password`
+    /// for taking on one made on another device.
     /// Bump this in the SAME commit that bumps `ABI_VERSION`: nothing compiles
     /// against it, so a stale value is only ever caught at runtime, by this
     /// guard, on a device.
-    static let requiredAbiVersion: Int32 = 17
+    static let requiredAbiVersion: Int32 = 18
 
     // MARK: Password generation
 
@@ -363,6 +365,11 @@ enum VaultFFICode {
     static let panicked: Int32 = -6
     static let decryptionFailed: Int32 = -7
     static let badKeyLength: Int32 = -8
+    /// The file was sealed after a master password change this handle has
+    /// not taken on (ABI v18).
+    static let passwordChanged: Int32 = -10
+    /// The password opens a file that is not this vault's (ABI v18).
+    static let differentVault: Int32 = -11
 }
 
 /// Everything that can go wrong reaching or opening the shared vault.
@@ -407,6 +414,10 @@ extension VaultError: LocalizedError {
             return "That key doesn't open this vault. If you changed your master password, unlock Arca once on this device."
         case .ffi(let code, _) where code == VaultFFICode.notFound:
             return "That login is no longer in your vault."
+        case .ffi(let code, _) where code == VaultFFICode.passwordChanged:
+            return "Your master password was changed on another device. Open Arca and enter the new one."
+        case .ffi(let code, _) where code == VaultFFICode.differentVault:
+            return "That password opens a different vault, not this one."
         case .ffi, .malformedIdentities:
             return "Couldn't read your vault."
         case .abiMismatch:

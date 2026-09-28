@@ -175,7 +175,20 @@ final class VaultStore {
         // Argon2id with the vault header's parameters — hundreds of
         // milliseconds, off the main actor inside VaultSession.
         await open(fallback: "Couldn't unlock the vault.") {
-            try await VaultSession.openWithMasterPassword(password)
+            do {
+                return try await VaultSession.openWithMasterPassword(password)
+            } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
+                // This phone learns of a password changed elsewhere from sync,
+                // which needs the vault open: the old password (or Face ID)
+                // once, then Arca asks for the new one.
+                throw WrongPassword()
+            }
+        }
+    }
+
+    private struct WrongPassword: LocalizedError {
+        var errorDescription: String? {
+            "Wrong master password. Changed it on another device? Unlock with the old one once, and Arca asks for the new one."
         }
     }
 
@@ -501,6 +514,34 @@ final class VaultStore {
     /// Whether a Google credential is stored on this device (no keychain read).
     var syncConnected: Bool { SyncCredentialStore.exists }
 
+    /// Sync found the master password changed on another device, and pushes
+    /// nothing until this phone has it (see `adoptNewPassword`).
+    var needsNewPassword: Bool { syncStatus?.needsPassword == true }
+
+    /// Take on a master password change made on another device. Returns nil
+    /// once done, or a message for the prompt to show.
+    func adoptNewPassword(_ password: String) async -> String? {
+        guard let sync, let session else { return "The vault is locked." }
+        let hadQuickUnlock = quickUnlockEnabled
+        do {
+            try await sync.adoptPassword(password)
+        } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
+            return "That is not the new master password."
+        } catch {
+            log.error("adopt password failed: \(vaultLogMessage(for: error), privacy: .public)")
+            return Self.message(error, fallback: "Couldn't use the new master password.")
+        }
+        guard self.session === session else { return nil }
+        // Quick unlock wrapped the old vault key. A new device key wraps the
+        // new one; minting it needs no Face ID.
+        quickUnlockEnabled = false
+        if hadQuickUnlock { await enableQuickUnlock() }
+        failure = nil
+        await reload(session)
+        await runSync()
+        return nil
+    }
+
     /// Build the engine for a freshly opened vault and, if this device is
     /// already signed in, reconnect and pull.
     private func startSync(_ session: VaultSession) async {
@@ -541,7 +582,8 @@ final class VaultStore {
             // the list on screen is now behind what the engine already holds.
             if status.merged { await reload(session) }
             guard self.session === session else { return }
-            if let message = status.lastError { failure = message }
+            // A changed password is asked for, not reported as a failure.
+            if let message = status.lastError, status.needsPassword != true { failure = message }
         } catch {
             guard self.session === session else { return }
             log.error("sync failed: \(vaultLogMessage(for: error), privacy: .public)")

@@ -124,28 +124,9 @@ final class VaultSync: @unchecked Sendable {
             // anything another process committed to the shared file in between
             // — an AutoFill passkey registration, most concretely — is absent
             // from them. Writing them verbatim erased it, permanently, because
-            // the extension process was long gone. Instead: take the vault
-            // lock, fold whatever is on disk NOW into the handle, and serialize
-            // that. Merge and write become one step no other process can split.
+            // the extension process was long gone. See `writeBack`.
             if vaultLength > 0, vault != nil {
-                try VaultShared.withVaultLock {
-                    let disk = (try? VaultShared.loadVault()) ?? Data()
-                    var merged: UnsafeMutablePointer<UInt8>?
-                    var mergedLength = 0
-                    let mergeCode = disk.withUnsafeBytes { buf in
-                        vault_ffi_merge_and_serialize(
-                            self.session.rawHandle,
-                            buf.bindMemory(to: UInt8.self).baseAddress,
-                            buf.count,
-                            &merged,
-                            &mergedLength)
-                    }
-                    guard mergeCode == VaultFFICode.ok, let merged, mergedLength > 0 else {
-                        throw SyncError.ffi(code: mergeCode, operation: "merge_and_serialize")
-                    }
-                    defer { vault_ffi_free(merged, mergedLength) }
-                    try VaultShared.writeVault(Data(bytes: merged, count: mergedLength))
-                }
+                try self.writeBack()
             }
             guard let json else {
                 throw SyncError.ffi(code: code, operation: "sync_now")
@@ -153,6 +134,47 @@ final class VaultSync: @unchecked Sendable {
             // A failed cycle still reports why, so the status is worth decoding
             // even when the call failed.
             return try Self.decode(json, jsonLength)
+        }
+    }
+
+    /// Take on a master password change made on another device: the answer to
+    /// a status with `needsPassword`. The shared vault switches to the new key
+    /// and is written back. Quick unlock wrapped the old key and is gone; the
+    /// caller turns it on again if it was on.
+    ///
+    /// Throws `VaultError.ffi` with `decryptionFailed` for a password that is
+    /// not the new one, and `differentVault` for one that opens another vault.
+    func adoptPassword(_ password: String) async throws {
+        try await VaultSession.runSync {
+            let code = password.withCString { vault_ffi_sync_adopt_password(self.handle, $0) }
+            guard code == VaultFFICode.ok else {
+                throw VaultError.ffi(code: code, operation: "sync_adopt_password")
+            }
+            try self.writeBack()
+        }
+    }
+
+    /// Write the shared vault to the file: under the vault lock, fold whatever
+    /// is on disk NOW into the handle and serialize that, so merge and write
+    /// are one step no other process can split.
+    private func writeBack() throws {
+        try VaultShared.withVaultLock {
+            let disk = (try? VaultShared.loadVault()) ?? Data()
+            var merged: UnsafeMutablePointer<UInt8>?
+            var mergedLength = 0
+            let mergeCode = disk.withUnsafeBytes { buf in
+                vault_ffi_merge_and_serialize(
+                    self.session.rawHandle,
+                    buf.bindMemory(to: UInt8.self).baseAddress,
+                    buf.count,
+                    &merged,
+                    &mergedLength)
+            }
+            guard mergeCode == VaultFFICode.ok, let merged, mergedLength > 0 else {
+                throw SyncError.ffi(code: mergeCode, operation: "merge_and_serialize")
+            }
+            defer { vault_ffi_free(merged, mergedLength) }
+            try VaultShared.writeVault(Data(bytes: merged, count: mergedLength))
         }
     }
 

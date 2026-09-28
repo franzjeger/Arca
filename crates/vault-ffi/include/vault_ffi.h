@@ -1,6 +1,6 @@
 /* vault-ffi — C ABI over vault-core for native platform integrations.
  *
- * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 17). All
+ * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 18). All
  * out-buffers are heap-allocated by the library and must be released with
  * vault_ffi_free(ptr, len), which also zeroes them.
  *
@@ -21,6 +21,9 @@
  *   -7  decryption failed (wrong key / not a device-unlock vault / tampered)
  *   -8  device key was not 32 bytes
  *   -9  a sync cycle failed; the reason is in the status JSON's lastError
+ *  -10  the master password was changed on another device: the file is sealed
+ *       with a key only the new password opens (vault_ffi_sync_adopt_password)
+ *  -11  the password opens a file that is not this vault's
  */
 #ifndef VAULT_FFI_H
 #define VAULT_FFI_H
@@ -283,8 +286,10 @@ void vault_ffi_sync_mark_dirty(SyncHandle *handle);
 
 /* Status as UTF-8 JSON, no network:
  *   {"connected":bool,"account":string|null,"lastSyncUnix":number|null,
- *    "lastError":string|null,"merged":false}
- * merged is always false here; only vault_ffi_sync_now can merge. */
+ *    "lastError":string|null,"merged":false,"needsPassword":bool}
+ * merged is always false here; only vault_ffi_sync_now can merge.
+ * needsPassword (v18): the master password was changed on another device, and
+ * sync pushes nothing until vault_ffi_sync_adopt_password is given it. */
 int32_t vault_ffi_sync_status(SyncHandle *handle, uint8_t **out_json,
                               size_t *out_json_len);
 
@@ -302,6 +307,15 @@ int32_t vault_ffi_sync_now(SyncHandle *handle, uint8_t **out_vault_bytes,
                            size_t *out_vault_bytes_len,
                            uint8_t **out_status_json,
                            size_t *out_status_json_len);
+
+/* Take on a master password change made on another device (ABI v18): the
+ * answer to needsPassword, with the new password. The shared vault switches to
+ * the new key and merges the copy sync found; persist it like any change, with
+ * vault_ffi_merge_and_serialize under the vault lock. Quick unlock wrapped the
+ * old key and is gone: re-enable it if it was on. Returns 0; -7 when the
+ * password does not open the changed copy; -11 when it opens one that is not
+ * this vault's; -5 when sync is not waiting for a password. */
+int32_t vault_ffi_sync_adopt_password(SyncHandle *handle, const char *password);
 
 /* Begin a sign-in: returns the authorization URL to open, and a handle holding
  * the PKCE verifier. redirect_uri is whatever the platform can catch (a custom
@@ -358,7 +372,11 @@ int32_t vault_ffi_passkey_create(const char *rp_id, bool user_verified,
  * file) into the in-memory handle before a write, so the app and the AutoFill
  * extension — separate processes over one file — stop clobbering each other's
  * committed writes. Same union/newest-wins merge as sync. ERR_DECRYPT if the
- * bytes are a different vault; OK no-op for null/empty. */
+ * bytes are a different vault; OK no-op for null/empty. From v18, -10 if the
+ * file was written after a master password change this handle has not taken
+ * on (reopen with the new password), and OK without merging for one written
+ * before a change: nothing in it is trusted, and nothing is lost. The same
+ * holds for vault_ffi_merge_and_serialize. */
 int32_t vault_ffi_merge_remote(VaultHandle *handle, const uint8_t *remote_bytes,
                                size_t remote_len);
 

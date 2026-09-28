@@ -88,7 +88,14 @@ pub mod sync;
 /// keeps the item's notes. Before, it erased them (Wi-Fi refused NULL), and
 /// iOS, which never shows a login's notes, wiped them on every edit. Adds
 /// `vault_ffi_vault_check`, so an import can refuse a file that is not a vault.
-pub const ABI_VERSION: i32 = 17;
+///
+/// v18: a master password change gives the vault a new key. The sync status
+/// gains `needsPassword`, `vault_ffi_sync_adopt_password` takes a change made
+/// on another device on, and two codes are new: `ERR_PASSWORD_CHANGED` for a
+/// file sealed after a change this vault has not taken on, and
+/// `ERR_DIFFERENT_VAULT` for a password that opens a file that is not this
+/// vault's. A merge skips a copy sealed before a change instead of failing.
+pub const ABI_VERSION: i32 = 18;
 
 // Return codes.
 pub(crate) const OK: i32 = 0;
@@ -96,21 +103,35 @@ pub(crate) const ERR_NULL_ARG: i32 = -1;
 pub(crate) const ERR_UTF8: i32 = -2;
 pub(crate) const ERR_OP_FAILED: i32 = -3;
 const ERR_LOCKED: i32 = -4;
-const ERR_NOT_FOUND: i32 = -5;
+pub(crate) const ERR_NOT_FOUND: i32 = -5;
 pub(crate) const ERR_PANIC: i32 = -6;
 const ERR_DECRYPT: i32 = -7;
 const ERR_BAD_KEY_LEN: i32 = -8;
 // -9 (ERR_SYNC_FAILED) is defined by the sync surface.
+const ERR_PASSWORD_CHANGED: i32 = -10;
+const ERR_DIFFERENT_VAULT: i32 = -11;
 
 /// Map a core error to a stable return code (never leaks detail).
-fn err_code(e: &Error) -> i32 {
+pub(crate) fn err_code(e: &Error) -> i32 {
     match e {
         Error::Locked => ERR_LOCKED,
         Error::NotFound => ERR_NOT_FOUND,
         Error::Decryption => ERR_DECRYPT,
         // An id of another kind is, to a caller editing one kind, not found.
         Error::WrongKind => ERR_NOT_FOUND,
+        Error::KeyRotated => ERR_PASSWORD_CHANGED,
+        Error::DifferentVault => ERR_DIFFERENT_VAULT,
         _ => ERR_OP_FAILED,
+    }
+}
+
+/// Merge another copy of this vault, where one sealed before a master password
+/// change counts as merged: nothing in it can be trusted, and whoever wrote it
+/// re-sends its edits once it has the new password (`Vault::merge_remote`).
+fn merge_copy(vault: &mut Vault, bytes: &[u8]) -> vault_core::Result<()> {
+    match vault.merge_remote(bytes) {
+        Err(Error::StaleKey) => Ok(()),
+        merged => merged,
     }
 }
 
@@ -380,7 +401,7 @@ pub unsafe extern "C" fn vault_ffi_merge_remote(
     if !vault.is_unlocked() {
         return ERR_LOCKED;
     }
-    match guard_result(|| vault.merge_remote(remote)) {
+    match guard_result(|| merge_copy(&mut vault, remote)) {
         Ok(()) => OK,
         Err(code) => code,
     }
@@ -429,7 +450,7 @@ pub unsafe extern "C" fn vault_ffi_merge_and_serialize(
     // persist a vault that never saw what is on disk.
     if !remote_bytes.is_null() && remote_len > 0 {
         let remote = std::slice::from_raw_parts(remote_bytes, remote_len);
-        if let Err(code) = guard_result(|| vault.merge_remote(remote)) {
+        if let Err(code) = guard_result(|| merge_copy(&mut vault, remote)) {
             return code;
         }
     }
@@ -2285,8 +2306,8 @@ mod tests {
     // Pinned deliberately: clients gate features on this number, so a bump has
     // to be a conscious edit here, not a side effect.
     #[test]
-    fn abi_version_is_17() {
-        assert_eq!(vault_ffi_abi_version(), 17);
+    fn abi_version_is_18() {
+        assert_eq!(vault_ffi_abi_version(), 18);
     }
 
     // ---- every-kind surface (ABI v7) -------------------------------------
@@ -4199,6 +4220,47 @@ mod tests {
         sec1.extend_from_slice(&x);
         sec1.extend_from_slice(&y);
         p256::ecdsa::VerifyingKey::from_sec1_bytes(&sec1).expect("P-256 key")
+    }
+
+    /// The shared file after the master password changed: a process that has
+    /// not taken the change on is told so, and a copy from before the change,
+    /// written by such a process, merges as nothing instead of failing.
+    #[test]
+    fn a_merge_reports_a_password_change_and_skips_what_it_replaced() {
+        let mut params = vault_core::KdfParams::new_default().unwrap();
+        params.m_cost_kib = 256;
+        params.t_cost = 1;
+        let mut vault = Vault::create("old", params).unwrap();
+        let before = vault.to_bytes().unwrap();
+        vault.change_master_password("new").unwrap();
+        let after = vault.to_bytes().unwrap();
+
+        let open = |bytes: &[u8], password: &str| {
+            let password = CString::new(password).unwrap();
+            let mut handle: *mut VaultHandle = ptr::null_mut();
+            let code = unsafe {
+                vault_ffi_vault_open_password(
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    password.as_ptr(),
+                    &mut handle,
+                )
+            };
+            assert_eq!(code, OK);
+            handle
+        };
+        let merge = |handle, bytes: &[u8]| unsafe {
+            vault_ffi_merge_remote(handle, bytes.as_ptr(), bytes.len())
+        };
+
+        let stale = open(&before, "old");
+        assert_eq!(merge(stale, &after), ERR_PASSWORD_CHANGED);
+        let current = open(&after, "new");
+        assert_eq!(merge(current, &before), OK);
+        unsafe {
+            vault_ffi_vault_free(stale);
+            vault_ffi_vault_free(current);
+        }
     }
 
     /// Tiny verifier so the test asserts real cryptographic validity of the

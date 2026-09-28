@@ -27,6 +27,15 @@ final class VaultBridgeTests: XCTestCase {
         XCTAssertEqual(status.lastSyncUnix, 123456)
         XCTAssertEqual(status.lastError, "upload failed")
         XCTAssertFalse(status.merged)
+        XCTAssertNil(status.needsPassword)
+    }
+
+    func testSyncStatusCarriesAPasswordChangedElsewhere() throws {
+        let json = Data("""
+            {"connected":true,"account":null,"lastSyncUnix":null,            "lastError":"changed elsewhere","merged":false,"needsPassword":true}
+            """.utf8)
+        let status = try JSONDecoder().decode(SyncStatus.self, from: json)
+        XCTAssertEqual(status.needsPassword, true)
     }
 
     #if os(macOS)
