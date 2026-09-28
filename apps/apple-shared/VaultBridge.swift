@@ -102,6 +102,16 @@ enum VaultShared {
         var isUsable: Bool { length > 0 && (lowercase || uppercase || digits || symbols) }
     }
 
+    /// Whether `bytes` is a vault this build can open. Needs no key: it lets an
+    /// import refuse a mis-picked file before it replaces the vault.
+    static func isOpenableVault(_ bytes: Data) -> Bool {
+        guard (try? requireMatchingAbi()) != nil else { return false }
+        let code = bytes.withUnsafeBytes { buffer in
+            vault_ffi_vault_check(buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count)
+        }
+        return code == VaultFFICode.ok
+    }
+
     /// Generate a password satisfying a site's Password Rules string.
     ///
     /// Empty or unparseable rules give a strong default. The library never

@@ -84,6 +84,14 @@ final class VaultBridgeTests: XCTestCase {
         XCTAssertEqual(vault_ffi_has_device_unlock(nil), VaultFFICode.nullArgument)
     }
 
+    /// An import checks the picked file through the library before it may
+    /// replace the only vault on the phone; anything else is refused.
+    func testImportRefusesAFileThatIsNotAVault() {
+        XCTAssertFalse(VaultShared.isOpenableVault(Data()))
+        XCTAssertFalse(VaultShared.isOpenableVault(Data("not a vault".utf8)))
+        XCTAssertFalse(VaultShared.isOpenableVault(Data("SYBRVLT9 from a newer Arca".utf8)))
+    }
+
     /// Freeing null is documented as a no-op. If that stopped being true the
     /// `defer { vault_ffi_free(...) }` in every read path would be a crash.
     func testFreeingNullIsSafe() {

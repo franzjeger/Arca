@@ -61,6 +61,12 @@ void vault_ffi_free(uint8_t *ptr, size_t len);
  * promptly. */
 typedef struct VaultHandle VaultHandle;
 
+/* ADDED IN ABI v17. Whether the bytes are a vault this build can open: a
+ * known container that parses, no newer than this library. Needs no key, so a
+ * client can refuse a mis-picked file before it replaces a vault. OK, or the
+ * error opening it would give. */
+int32_t vault_ffi_vault_check(const uint8_t *vault_bytes, size_t vault_len);
+
 /* Open + unlock a vault from its raw file bytes with a 32-byte device key.
  * On OK, *out_handle is a handle to release with vault_ffi_vault_free. */
 int32_t vault_ffi_vault_open(const uint8_t *vault_bytes, size_t vault_len,

@@ -58,7 +58,19 @@ struct ImportVaultButton: View {
             // UTI, and a stricter filter would just hide the file the user came
             // to pick. The FFI is what actually decides whether it is a vault.
             .fileImporter(isPresented: $picking, allowedContentTypes: [.data]) { result in
-                store.importVault(result)
+                store.pickedVault(result)
+            }
+            .confirmationDialog(
+                "Replace the vault on this iPhone?",
+                isPresented: Binding(
+                    get: { store.pendingImport != nil },
+                    set: { if !$0 { store.cancelImport() } }),
+                titleVisibility: .visible
+            ) {
+                Button("Replace", role: .destructive) { store.confirmImport() }
+                Button("Cancel", role: .cancel) { store.cancelImport() }
+            } message: {
+                Text("Anything that exists only on this iPhone, such as a passkey created here and not yet synced, will no longer be in your vault.")
             }
     }
 }

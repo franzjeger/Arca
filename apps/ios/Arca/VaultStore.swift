@@ -589,15 +589,43 @@ final class VaultStore {
         syncStatus = nil
     }
 
-    /// Import a vault picked from Files. Takes the picker's `Result` whole so
-    /// every way this can fail — picker included — lands in `failure`.
-    ///
-    /// Locks first: the handle open right now belongs to the file being replaced.
-    func importVault(_ picked: Result<URL, Error>) {
+    /// A checked vault from Files that would replace the one on this phone,
+    /// waiting for the user to confirm.
+    private(set) var pendingImport: Data?
+
+    /// A vault picked from Files. Takes the picker's `Result` whole so every way
+    /// this can fail — picker included — lands in `failure`. Nothing is
+    /// replaced until the file is known to be a vault and, if one is already
+    /// here, the user has confirmed.
+    func pickedVault(_ picked: Result<URL, Error>) {
         do {
-            let url = try picked.get()
+            let bytes = try VaultFile.read(from: picked.get())
+            if VaultFile.exists {
+                pendingImport = bytes
+            } else {
+                installVault(bytes)
+            }
+        } catch {
+            log.error("import failed: \(vaultLogMessage(for: error), privacy: .public)")
+            failure = Self.message(error, fallback: "Couldn't import that file.")
+        }
+    }
+
+    func confirmImport() {
+        guard let bytes = pendingImport else { return }
+        pendingImport = nil
+        installVault(bytes)
+    }
+
+    func cancelImport() {
+        pendingImport = nil
+    }
+
+    /// Locks first: the handle open right now belongs to the file being replaced.
+    private func installVault(_ bytes: Data) {
+        do {
             lock()
-            try VaultFile.replace(with: url)
+            try VaultFile.install(bytes)
             // The stored device key was minted for the file just replaced, so it
             // opens nothing now. Left behind, the next launch would offer Face ID
             // and then fail.

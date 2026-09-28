@@ -1,10 +1,10 @@
 // The encrypted vault inside the shared App Group container.
 //
-// There is no sync client on iOS — that is the big missing piece in docs/IOS.md
-// — so the file gets onto the phone by hand: the user picks it in Files and the
-// app copies it in. Deliberately a copy rather than a bookmark, because the
-// AutoFill extension is a separate process and can only read what lives in the
-// group container.
+// Sync keeps a phone up to date but cannot deliver the first copy, so the file
+// gets onto the phone by hand: the user picks it in Files and the app copies it
+// in. Deliberately a copy rather than a bookmark, because the AutoFill
+// extension is a separate process and can only read what lives in the group
+// container.
 
 import Foundation
 
@@ -14,6 +14,7 @@ enum VaultFile {
         case noContainer
         case notReadable
         case empty
+        case notAVault
 
         var errorDescription: String? {
             switch self {
@@ -23,6 +24,8 @@ enum VaultFile {
                 return "Couldn't read that file. Try picking it again."
             case .empty:
                 return "That file is empty, so it isn't a vault."
+            case .notAVault:
+                return "That file isn't a vault this version of Arca can open."
             }
         }
     }
@@ -35,25 +38,33 @@ enum VaultFile {
         return (try? url.checkResourceIsReachable()) == true
     }
 
-    /// Copy a vault picked from Files into the shared container, replacing any
-    /// vault already there.
-    static func replace(with source: URL) throws {
-        guard let destination = url else { throw ImportError.noContainer }
-
+    /// Read a vault picked from Files and check that it is one, before anything
+    /// is replaced.
+    static func read(from source: URL) throws -> Data {
         // A URL from the document picker is security-scoped: access has to be
         // opened explicitly and closed again, including on the throwing paths.
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
 
         guard let bytes = try? Data(contentsOf: source) else { throw ImportError.notReadable }
-        // Not a real format check — only the FFI can tell a vault from noise, and
-        // it will. This just turns the most common mis-pick into a clear message
-        // instead of "that key doesn't open this vault".
         guard !bytes.isEmpty else { throw ImportError.empty }
+        guard VaultShared.isOpenableVault(bytes) else { throw ImportError.notAVault }
+        return bytes
+    }
 
-        // .completeFileProtection makes the file unreadable while the device is
-        // locked. It is ciphertext already; this is the second lock on the door.
-        // AutoFill only ever runs on an unlocked device, so nothing is lost.
-        try bytes.write(to: destination, options: [.atomic, .completeFileProtection])
+    /// Install checked vault bytes in the shared container, under the vault
+    /// lock like every other writer. The file it replaces is kept beside it as
+    /// `<vault>.replaced`: it may hold the only copy of something not yet
+    /// synced, such as a passkey created on this phone.
+    static func install(_ bytes: Data) throws {
+        guard let destination = url else { throw ImportError.noContainer }
+        try VaultShared.withVaultLock {
+            if let current = try? Data(contentsOf: destination), !current.isEmpty {
+                try current.write(
+                    to: destination.appendingPathExtension("replaced"),
+                    options: [.atomic, .completeFileProtection])
+            }
+            try VaultShared.writeVault(bytes)
+        }
     }
 }

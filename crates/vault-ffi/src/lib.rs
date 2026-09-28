@@ -83,7 +83,8 @@ pub mod sync;
 ///
 /// v17: NULL `notes` in `vault_ffi_upsert_login` and `vault_ffi_upsert_wifi`
 /// keeps the item's notes. Before, it erased them (Wi-Fi refused NULL), and
-/// iOS, which never shows a login's notes, wiped them on every edit.
+/// iOS, which never shows a login's notes, wiped them on every edit. Adds
+/// `vault_ffi_vault_check`, so an import can refuse a file that is not a vault.
 pub const ABI_VERSION: i32 = 17;
 
 // Return codes.
@@ -781,6 +782,25 @@ fn password_for(vault: &Vault, id_str: &str) -> vault_core::Result<Vec<u8>> {
     match &vault.get_item(id)?.data {
         VaultItem::Login { password, .. } => Ok(password.as_bytes().to_vec()),
         _ => Err(Error::NotFound),
+    }
+}
+
+/// Whether `vault_bytes` is a vault this build can open: a container it knows,
+/// that parses, from a version no newer than its own. Needs no key and reads
+/// nothing secret, so a client can refuse a mis-picked file before it replaces
+/// the only copy of a vault (ABI v17). `OK`, or the error opening would give.
+///
+/// # Safety
+/// `vault_bytes` must point to a readable buffer of `vault_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_vault_check(vault_bytes: *const u8, vault_len: usize) -> i32 {
+    if vault_bytes.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let bytes = std::slice::from_raw_parts(vault_bytes, vault_len);
+    match guard_result(|| Vault::from_bytes(bytes).map(drop)) {
+        Ok(()) => OK,
+        Err(code) => code,
     }
 }
 
@@ -2810,6 +2830,29 @@ mod tests {
         };
         assert_eq!(rc, ERR_OP_FAILED);
         unsafe { vault_ffi_vault_free(handle) };
+    }
+
+    #[test]
+    fn check_accepts_a_vault_and_refuses_anything_else() {
+        let bytes = password_only_vault();
+        assert_eq!(
+            unsafe { vault_ffi_vault_check(bytes.as_ptr(), bytes.len()) },
+            OK
+        );
+        for junk in [
+            b"".as_slice(),
+            b"not a vault",
+            b"SYBRVLT9-from-a-newer-arca",
+        ] {
+            assert_ne!(
+                unsafe { vault_ffi_vault_check(junk.as_ptr(), junk.len()) },
+                OK
+            );
+        }
+        assert_eq!(
+            unsafe { vault_ffi_vault_check(ptr::null(), 0) },
+            ERR_NULL_ARG
+        );
     }
 
     /// iOS never shows a login's notes, so every phone edit sends none.

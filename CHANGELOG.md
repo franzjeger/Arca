@@ -43,6 +43,11 @@
   a real click dismisses the prompt. After a navigation, the landing page no
   longer receives the submitted password: the worker keeps it and sends it
   when that page saves.
+- iOS: "Import a different vault" on the lock screen replaced the phone's
+  vault with any non-empty file, without asking. It now refuses a file that is
+  not a vault this version can open, asks before replacing a vault, keeps the
+  replaced file beside the new one, and writes under the vault lock like every
+  other writer.
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native
