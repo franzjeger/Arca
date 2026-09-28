@@ -534,6 +534,79 @@ async function providerAvailable() {
     (result.response.app_connected || result.response.app_launchable));
 }
 
+// ── Who is asking ────────────────────────────────────────────────────────
+//
+// A content script runs in the page's renderer, so a compromised renderer can
+// send anything one can. Which page a message speaks for comes from the
+// browser (`sender`), never from the message: `msg.url`, `msg.origin` and
+// `msg.host` are only honoured when they name the page that sent them.
+// Content scripts run in top-level frames only (`all_frames: false`).
+
+/** The origin of the top-level page that sent a message, or null. */
+function pageOrigin(sender) {
+  if (!sender?.tab || sender.frameId !== 0) return null;
+  try {
+    const origin = sender.origin ?? new URL(sender.url).origin;
+    return origin && origin !== "null" ? origin : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/** Whether `url` (or an origin) belongs to the page that sent the message. */
+function fromPage(sender, url) {
+  const origin = pageOrigin(sender);
+  return origin !== null && originOf(url) === origin;
+}
+
+/** Whether `host` is the hostname of the page that sent the message. */
+function fromHost(sender, host) {
+  const origin = pageOrigin(sender);
+  return origin !== null && new URL(origin).hostname === host;
+}
+
+/** Whether the message came from the extension's own popup, not a page. */
+function fromPopup(sender) {
+  const popup = api.runtime.getURL?.("popup.html");
+  return !sender?.tab && !!popup && sender?.url === popup;
+}
+
+/** Same host, ignoring a leading `www.`: the rule `content.js` offers under. */
+function sameHost(a, b) {
+  const host = (url) => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, "");
+    } catch (_e) {
+      return "";
+    }
+  };
+  return !!host(a) && host(a) === host(b);
+}
+
+const refused = (sendResponse) => {
+  sendResponse({ ok: false, error: "origin_mismatch" });
+  return false;
+};
+
+/** The login a save message may speak for: the one read from the sending page
+    itself, or the pending one this page claimed after a navigation. The
+    pending password never travels to the landing page; it stays here. */
+async function saveCandidate(msg, sender, tabId) {
+  if (!msg.pending) return fromPage(sender, msg.url) ? msg : null;
+  const entry = await readPending(tabId);
+  const fresh = entry && Date.now() - entry.ts < PENDING_TTL_MS;
+  const claimant = pageOrigin(sender);
+  return fresh && claimant && entry.claimedBy === claimant ? entry.candidate : null;
+}
+
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg.cmd !== "string") return false;
 
@@ -541,23 +614,11 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   switch (msg.cmd) {
     case "capturePending": {
-      if (tabId == null) {
-        sendResponse({ ok: true });
-        return true;
-      }
-      // A re-stash sends back the age it already had. Without that, a login
-      // that redirects three times would refresh the TTL at every hop and the
-      // plaintext password would outlive its 90 seconds indefinitely.
-      const now = Date.now();
-      const ts =
-        typeof msg.ts === "number" && msg.ts > 0 && msg.ts <= now
-          ? msg.ts
-          : now;
-      if (now - ts >= PENDING_TTL_MS) {
-        void dropPending(tabId);
-        sendResponse({ ok: true });
-        return true;
-      }
+      // Read from this page's own form, so it must name this page. The
+      // origin is kept with it: only a page on the same host may later be
+      // told about it, and the password itself never leaves this worker again.
+      if (tabId == null || !fromPage(sender, msg.url)) return refused(sendResponse);
+      const ts = Date.now();
       putPending(tabId, {
         candidate: {
           url: msg.url,
@@ -572,6 +633,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           multiPassword: !!msg.multiPassword,
         },
         ts,
+        origin: pageOrigin(sender),
       }).then(() => sendResponse({ ok: true }));
       // Actively wipe the stored plaintext password after the TTL, so an
       // abandoned SPA login doesn't retain it indefinitely. The timer dies
@@ -582,28 +644,52 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const e = await readPending(tabId);
           if (e && Date.now() - e.ts >= PENDING_TTL_MS) await dropPending(tabId);
         },
-        Math.max(0, PENDING_TTL_MS - (now - ts)) + 500,
+        PENDING_TTL_MS + 500,
       );
       if (typeof timer?.unref === "function") timer.unref();
       return true;
     }
 
-    case "consumePending":
+    // After a navigation the landing page asks what was submitted. It learns
+    // enough to decide whether to offer — never the password — and only if
+    // it is on the host that captured it (or the value is one Arca generated,
+    // which sign-up flows land on another host). Peeking does not consume: a
+    // page that cannot offer yet leaves it for the next one, with its age.
+    case "peekPending":
+    case "claimPending":
       readPending(tabId).then(async (entry) => {
-        await dropPending(tabId);
         const fresh = entry && Date.now() - entry.ts < PENDING_TTL_MS;
-        // The age travels with the candidate: the content script re-stashes it
-        // when the landing page cannot offer it yet, and the TTL has to keep
-        // counting from the original submit.
-        sendResponse({
-          ok: true,
-          candidate: fresh ? { ...entry.candidate, ts: entry.ts } : null,
-        });
+        if (entry && !fresh) await dropPending(tabId);
+        const origin = pageOrigin(sender);
+        const releasable =
+          fresh &&
+          origin &&
+          !entry.claimedBy &&
+          (entry.candidate.generated || sameHost(entry.origin, origin));
+        if (!releasable) {
+          sendResponse({ ok: msg.cmd === "peekPending", candidate: null });
+          return;
+        }
+        if (msg.cmd === "claimPending") {
+          // Offered here, so no later page offers it again; the saves this
+          // page sends may now refer to it.
+          await putPending(tabId, { ...entry, claimedBy: origin });
+          sendResponse({ ok: true });
+          return;
+        }
+        const { password: _password, ...visible } = entry.candidate;
+        sendResponse({ ok: true, candidate: { ...visible, ts: entry.ts } });
       });
       return true;
 
     case "clearPending":
-      dropPending(tabId).then(() => sendResponse({ ok: true }));
+      readPending(tabId).then(async (entry) => {
+        const origin = pageOrigin(sender);
+        if (entry && origin && (entry.origin === origin || entry.claimedBy === origin)) {
+          await dropPending(tabId);
+        }
+        sendResponse({ ok: true });
+      });
       return true;
 
     case "gesture":
@@ -613,6 +699,10 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "passkeyProviderAvailable":
       // No credential ids or account metadata cross into the page. A probe
       // neither consumes a gesture nor asks for registration/verification.
+      if (!fromHost(sender, msg.host)) {
+        sendResponse({ available: false });
+        return false;
+      }
       policyFor(msg.host).then(async (policy) => {
         if (policy === "never") return { available: false };
         return { available: await providerAvailable() };
@@ -622,6 +712,10 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "passkeyAvailable":
       // A read-only fallback probe. It never spends a gesture or signs a
       // challenge, and must not hold up sites where Arca has no matching key.
+      if (!fromHost(sender, msg.host) || !fromPage(sender, msg.url)) {
+        sendResponse({ available: false });
+        return false;
+      }
       policyFor(msg.host).then(async (policy) => {
         if (policy === "never") return { available: false };
         const result = await sendNative({ type: "list_matching_logins", url: msg.url });
@@ -636,8 +730,11 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "passkeyGate":
       // `msg.host` comes from the isolated content script's own `location`,
-      // which the page cannot spoof — the same rule the ceremony's origin
-      // already follows.
+      // which the page cannot spoof, and is checked against the sender's.
+      if (!fromHost(sender, msg.host)) {
+        sendResponse({ ok: true, allow: false, reason: "origin_mismatch" });
+        return false;
+      }
       policyFor(msg.host).then(async (policy) => {
         const version = api.runtime.getManifest().version;
         const reply = (allow, reason) =>
@@ -731,6 +828,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true; // async response
 
     case "listLogins":
+      if (!fromPage(sender, msg.url)) return refused(sendResponse);
       sendNative({ type: "list_matching_logins", url: msg.url }).then(
         sendResponse,
       );
@@ -738,11 +836,14 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "fill":
       // Returns { ok, response: { type: "credentials", username, password } }
-      // only if the desktop app authorized it (unlocked + origin match).
+      // only if the desktop app authorized it (unlocked + origin match), and
+      // only for the page that asked.
+      if (!fromPage(sender, msg.url)) return refused(sendResponse);
       sendNative({ type: "fill", id: msg.id, url: msg.url }).then(sendResponse);
       return true;
 
     case "passkeyCreate":
+      if (!fromPage(sender, msg.origin)) return refused(sendResponse);
       sendNative({
         type: "passkey_create",
         origin: msg.origin,
@@ -754,6 +855,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "passkeyGet":
+      if (!fromPage(sender, msg.origin)) return refused(sendResponse);
       sendNative({
         type: "passkey_get",
         origin: msg.origin,
@@ -765,12 +867,16 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "saveProbe":
-      sendNative({
-        type: "save_probe",
-        url: msg.url,
-        username: msg.username,
-        password: msg.password,
-      }).then(sendResponse);
+    case "saveLogin":
+      saveCandidate(msg, sender, tabId).then((login) => {
+        if (!login) return refused(sendResponse);
+        return sendNative({
+          type: msg.cmd === "saveProbe" ? "save_probe" : "save_login",
+          url: login.url,
+          username: login.username,
+          password: login.password,
+        }).then(sendResponse);
+      });
       return true;
 
     case "requestUnlock":
@@ -794,6 +900,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // restore — bookmarks live in the browser — so it does not happen while
     // nobody is looking.
     case "mirrorSetting":
+      if (!fromPopup(sender)) return refused(sendResponse);
       (async () => {
         if (typeof msg.allowed === "boolean") {
           await api.storage.local.set({ [MIRROR_ALLOWED_KEY]: msg.allowed });
@@ -807,6 +914,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "bookmarksToArca":
+      if (!fromPopup(sender)) return refused(sendResponse);
       readAll(api)
         .then((items) =>
           sendNative({
@@ -830,6 +938,9 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "bookmarksFromArca":
+      // `deletions` and `confirmed` may remove bookmarks, so they are only
+      // taken from the popup, where a person chose them.
+      if (!fromPopup(sender)) return refused(sendResponse);
       sendNative({ type: "list_bookmarks" })
         .then(async (r) => {
           if (!r.ok || !r.response || r.response.type !== "bookmarks") {
@@ -838,8 +949,6 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               error: (r.response && r.response.message) || r.error || "unavailable",
             };
           }
-          // `deletions` and `confirmed` come from the popup, so removing
-          // anything is always something a person chose twice.
           const res = await apply(api, r.response.items, {
             deletions: !!msg.deletions,
             confirmed: !!msg.confirmed,
@@ -848,15 +957,6 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         })
         .then(sendResponse)
         .catch((e) => sendResponse({ ok: false, error: String(e) }));
-      return true;
-
-    case "saveLogin":
-      sendNative({
-        type: "save_login",
-        url: msg.url,
-        username: msg.username,
-        password: msg.password,
-      }).then(sendResponse);
       return true;
 
     default:

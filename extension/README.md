@@ -25,7 +25,7 @@ chromium/            MV3 extension source (shared by Chrome/Brave/Edge + Firefox
   manifest.firefox.json  Firefox manifest (background.scripts + gecko id)
   background.js          relays messages to the native host
   content.js             form detection + autofill picker
-  content.css            injected UI styles
+  picker-styles.js       styles for the picker and save prompt (shadow roots)
   popup.html / popup.js  connection-status popup
   icons/
 native-host/         Rust native-messaging host (see ../../crates + workspace)

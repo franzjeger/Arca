@@ -309,25 +309,8 @@
     closePanel(false);
     if (!anchor.isConnected || !isShown(anchor)) return;
     suggestionAnchor = anchor;
-    panelHost = document.createElement("div");
-    panelHost.className = "sybr-panel";
-    for (const [property, value] of Object.entries({
-      all: "initial", position: "fixed", margin: "0", padding: "0", border: "0",
-      background: "transparent", overflow: "visible", inset: "auto",
-      "z-index": "2147483647", "box-sizing": "border-box",
-    })) panelHost.style.setProperty(property, value, "important");
-    const root = panelHost.attachShadow({ mode: shadowMode });
-    if (typeof CSSStyleSheet === "function" && "adoptedStyleSheets" in root) {
-      if (!pickerSheet) {
-        pickerSheet = new CSSStyleSheet();
-        pickerSheet.replaceSync(globalThis.__arcaPickerStyles);
-      }
-      root.adoptedStyleSheets = [pickerSheet];
-    } else {
-      const style = document.createElement("style");
-      style.textContent = globalThis.__arcaPickerStyles;
-      root.appendChild(style);
-    }
+    let root;
+    ({ host: panelHost, root } = overlayHost("sybr-panel", { inset: "auto" }));
     panel = document.createElement("div");
     panel.className = "sybr-panel-content";
     const header = document.createElement("div");
@@ -354,6 +337,32 @@
       panelObserver.observe(panel);
       panelObserver.observe(anchor);
     }
+  }
+
+  /** A host for Arca's own UI in the page: a closed shadow root with the
+      picker's styles, which the page can neither read nor restyle. Anything
+      naming an account goes inside one; in page DOM the page could read it. */
+  function overlayHost(className, placement) {
+    const host = document.createElement("div");
+    host.className = className;
+    for (const [property, value] of Object.entries({
+      all: "initial", position: "fixed", margin: "0", padding: "0", border: "0",
+      background: "transparent", overflow: "visible", "z-index": "2147483647",
+      "box-sizing": "border-box", ...placement,
+    })) host.style.setProperty(property, value, "important");
+    const root = host.attachShadow({ mode: shadowMode });
+    if (typeof CSSStyleSheet === "function" && "adoptedStyleSheets" in root) {
+      if (!pickerSheet) {
+        pickerSheet = new CSSStyleSheet();
+        pickerSheet.replaceSync(globalThis.__arcaPickerStyles);
+      }
+      root.adoptedStyleSheets = [pickerSheet];
+    } else {
+      const style = document.createElement("style");
+      style.textContent = globalThis.__arcaPickerStyles;
+      root.appendChild(style);
+    }
+    return { host, root };
   }
 
   function mountOverlay(host) {
@@ -1480,8 +1489,12 @@
         : verdict === "update"
           ? "Update"
           : "Save";
-    saveBar = document.createElement("div");
-    saveBar.className = "sybr-savebar";
+    const { host: barHost, root } = overlayHost("sybr-savebar", {
+      inset: "auto 20px 20px auto",
+    });
+    saveBar = barHost;
+    const bar = document.createElement("div");
+    bar.className = "sybr-savebar-content";
     const text = document.createElement("span");
     text.className = "sybr-savebar-text";
     text.textContent = describe(action, storedUsername || candidate.username);
@@ -1578,9 +1591,14 @@
         if (saveBar) yes.disabled = false;
       }
     });
-    no.addEventListener("click", done);
-    saveBar.append(text, yes, no);
-    document.body.appendChild(saveBar);
+    // Declining throws away the only record of a password that may already
+    // be live on the account, so only the user may do it.
+    no.addEventListener("click", (e) => {
+      if (e.isTrusted) done();
+    });
+    bar.append(text, yes, no);
+    root.appendChild(bar);
+    mountOverlay(saveBar);
   }
 
   /// Bring Arca forward for unlock and wait until it reports unlocked.
@@ -1605,7 +1623,7 @@
   }
 
   async function offerSave(candidate) {
-    if (!candidate || !candidate.password) return;
+    if (!candidate || !(candidate.password || candidate.pending)) return;
     let probe;
     try {
       probe = await api.runtime.sendMessage({ cmd: "saveProbe", ...candidate });
@@ -1702,10 +1720,19 @@
     settleTimer = setTimeout(tick, 1500);
   }
 
+  // Only what the user did captures a login. A page can fill hidden fields
+  // and call `click()` or `requestSubmit()`; before these checks, that was
+  // enough to ask Arca what it had stored for this site. `requestSubmit()`
+  // fires a trusted submit event, so a submit also needs the user's recent
+  // activation of the page.
+  const byUser = (e) =>
+    e.isTrusted && navigator.userActivation?.isActive !== false;
+
   // Trigger 1: a real form submission.
   document.addEventListener(
     "submit",
     (e) => {
+      if (!byUser(e)) return;
       const form = e.target;
       if (!(form instanceof HTMLFormElement)) return;
       stashAndMaybeOffer(captureCandidate(form) ?? generatedCandidate());
@@ -1718,7 +1745,7 @@
   document.addEventListener(
     "keydown",
     (e) => {
-      if (e.key !== "Enter") return;
+      if (!e.isTrusted || e.key !== "Enter") return;
       // composedPath, not e.target: from inside shadow DOM the event arrives
       // retargeted to the host element and the real input never matched.
       const el = eventTarget(e);
@@ -1740,6 +1767,7 @@
   document.addEventListener(
     "click",
     (e) => {
+      if (!e.isTrusted) return;
       const target = eventTarget(e);
       const button =
         target instanceof Element
@@ -1757,57 +1785,40 @@
 
   // After a navigation: if a login was just submitted and we now appear signed
   // in (same site, no password field), offer to save the stashed candidate.
+  // The worker keeps it, password included; this page learns only enough to
+  // decide, and claims it before offering so no later page offers it again.
   (async () => {
     let pending;
     try {
-      pending = await api.runtime.sendMessage({ cmd: "consumePending" });
+      pending = await api.runtime.sendMessage({ cmd: "peekPending" });
     } catch (_e) {
       return;
     }
     const cand = pending && pending.ok ? pending.candidate : null;
-    if (!cand) return;
-    // Reading the candidate consumes it. Every gate below can decline to offer
-    // on THIS document — a login that lands on an interstitial and redirects
-    // again, most of all — and the password used to be destroyed by the first
-    // look at it, so the prompt never came on the page where it belonged. Put
-    // it back (with its original age, so the TTL still expires on time) unless
-    // it has actually been offered.
-    let offered = false;
-    const offer = (candidate) => {
-      offered = true;
-      void offerSave(candidate);
-    };
-    try {
-      // A generated password skips both gates: sign-up and reset forms land on
-      // a LOGIN page (which has a password field), frequently on another host
-      // (connect.visma.com fronting the app it signs you into). The bar names
-      // the site it saves for, and the value is the live password either way.
-      if (cand.generated) {
-        offer(cand);
-        return;
-      }
-      // A password-change form may redirect to a sign-in form on the SAME
-      // site. Seeing another password field there does not mean the change
-      // failed; the navigation itself is the success signal. Unlike a
-      // generated password we do not cross hosts for a manually captured
-      // value. The one landing page that DOES mean failure is the change form
-      // itself, re-rendered by the server with an error ("current password
-      // incorrect"): two or more password boxes again. Offering there would
-      // overwrite the good stored password with a value the site just
-      // rejected.
-      if (cand.multiPassword && sameSite(cand.url, location.href)) {
-        if (!changeFormStillUp()) offer(cand);
-        return;
-      }
-      if (sameSite(cand.url, location.href) && !visiblePasswordField()) {
-        offer(cand);
-      }
-    } finally {
-      if (!offered) {
-        api.runtime
-          .sendMessage({ cmd: "capturePending", ...cand })
-          .catch(() => {});
-      }
-    }
+    if (!cand || !shouldOfferAfterNavigation(cand)) return;
+    const claim = await api.runtime
+      .sendMessage({ cmd: "claimPending" })
+      .catch(() => null);
+    if (claim && claim.ok) void offerSave({ ...cand, pending: true });
   })();
+
+  /** Whether this landing page is where a submitted login should be offered.
+      Declining leaves it pending for the next page, with its original age. */
+  function shouldOfferAfterNavigation(cand) {
+    // A generated password skips both gates: sign-up and reset forms land on
+    // a LOGIN page (which has a password field), frequently on another host
+    // (connect.visma.com fronting the app it signs you into). The bar names
+    // the site it saves for, and the value is the live password either way.
+    if (cand.generated) return true;
+    if (!sameSite(cand.url, location.href)) return false;
+    // A password-change form may redirect to a sign-in form on the SAME
+    // site. Seeing another password field there does not mean the change
+    // failed; the navigation itself is the success signal. The one landing
+    // page that DOES mean failure is the change form itself, re-rendered by
+    // the server with an error ("current password incorrect"): two or more
+    // password boxes again. Offering there would overwrite the good stored
+    // password with a value the site just rejected.
+    if (cand.multiPassword) return !changeFormStillUp();
+    return !visiblePasswordField();
+  }
 })();

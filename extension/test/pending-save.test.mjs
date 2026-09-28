@@ -8,6 +8,10 @@
 // cannot be shown yet. Both used to end with the password quietly gone, and
 // neither is reachable from the browser E2E, which replaces this file with a
 // stub. So it runs here, against the real module.
+//
+// It is also where the ledger's trust rules live: the browser's `sender`, not
+// the message, says which page is asking, and the password a login page
+// submitted never travels to the page that lands after it.
 import assert from "node:assert/strict";
 
 let checks = 0;
@@ -20,6 +24,7 @@ const check = (condition, message) => {
 // A fake `chrome` with only what the worker touches. Everything else is
 // reached through optional chaining, so it stays absent and unused.
 const session = new Map();
+const native = [];
 let listener = null;
 globalThis.chrome = {
   runtime: {
@@ -29,6 +34,11 @@ globalThis.chrome = {
       },
     },
     getManifest: () => ({ version: "test" }),
+    getURL: (path) => `chrome-extension://arca/${path}`,
+    sendNativeMessage: (_host, message, callback) => {
+      native.push(message);
+      callback({ ok: true, response: { type: "save_decision", action: "new" } });
+    },
   },
   storage: {
     local: {
@@ -53,10 +63,17 @@ await import("../chromium/background.js");
 assert.ok(listener, "background.js registered no message listener");
 
 const TAB = 7;
-const send = (msg, tabId = TAB) =>
+/** A message from the top-level page at `origin`, as the browser reports it. */
+const from = (origin, tabId = TAB) => ({
+  tab: { id: tabId },
+  frameId: 0,
+  origin,
+  url: `${origin}/somewhere`,
+});
+const send = (msg, sender = from("https://example.test")) =>
   new Promise((resolve) => {
-    const kept = listener(msg, { tab: { id: tabId } }, resolve);
-    assert.equal(kept, true, `${msg.cmd} must keep the response channel open`);
+    const kept = listener(msg, sender, resolve);
+    if (kept !== true) resolve(undefined);
   });
 
 const candidate = {
@@ -72,39 +89,80 @@ check(
   session.get(KEY)?.candidate.password === "s3cret",
   "a captured candidate is mirrored into storage.session, not just a Map",
 );
-
-const first = await send({ cmd: "consumePending" });
 check(
-  first.candidate?.password === "s3cret" && !session.has(KEY),
-  "consuming returns the candidate and clears the stored copy",
-);
-check(
-  typeof first.candidate.ts === "number",
-  "the candidate carries the age it was captured at",
+  session.get(KEY)?.origin === "https://example.test",
+  "it remembers the page that captured it",
 );
 
-// The landing page could not offer it (an interstitial that redirects again),
-// so the content script puts it back. The age has to come back with it, or a
-// redirect chain would refresh the TTL at every hop and the plaintext password
-// would outlive its 90 seconds forever.
-await send({ ...candidate, ts: first.candidate.ts });
+const landing = await send({ cmd: "peekPending" }, from("https://www.example.test"));
 check(
-  session.get(KEY)?.ts === first.candidate.ts,
-  "a re-stashed candidate keeps its original timestamp",
+  landing.candidate?.username === "alice" && typeof landing.candidate.ts === "number",
+  "the landing page on the same host learns who and when",
 );
-const second = await send({ cmd: "consumePending" });
 check(
-  second.candidate?.password === "s3cret",
-  "a re-stashed candidate is still offered on the next page",
+  landing.candidate && !("password" in landing.candidate),
+  "but never the password, which stays in the worker",
+);
+check(session.has(KEY), "peeking does not consume: a page that cannot offer leaves it");
+
+const elsewhere = await send({ cmd: "peekPending" }, from("https://evil.test"));
+check(elsewhere.candidate === null, "a page on another host is not told about it");
+
+const refusedClaim = await send({ cmd: "claimPending" }, from("https://evil.test"));
+check(!refusedClaim.ok, "and cannot claim it");
+
+const claim = await send({ cmd: "claimPending" }, from("https://example.test"));
+check(claim.ok, "the page that offers it claims it");
+const again = await send({ cmd: "peekPending" }, from("https://example.test"));
+check(again.candidate === null, "so no later page offers it a second time");
+
+native.length = 0;
+await send(
+  { cmd: "saveLogin", pending: true, url: "https://example.test/login" },
+  from("https://example.test"),
+);
+check(
+  native[0]?.type === "save_login" && native[0].password === "s3cret",
+  "a save of the claimed candidate sends the password the worker kept",
 );
 
-// Same re-stash, but the value is now older than the TTL: it must not come
-// back to life.
-await send({ ...candidate, ts: Date.now() - 91000 });
-const expired = await send({ cmd: "consumePending" });
+native.length = 0;
+const stolen = await send(
+  { cmd: "saveProbe", pending: true, url: "https://example.test/login" },
+  from("https://evil.test"),
+);
 check(
-  expired.candidate === null && !session.has(KEY),
-  "a re-stash past the TTL is dropped instead of being revived",
+  stolen?.ok === false && native.length === 0,
+  "another page cannot probe or save the claimed candidate",
+);
+
+await send({ cmd: "clearPending" }, from("https://evil.test"));
+check(session.has(KEY), "nor clear it");
+await send({ cmd: "clearPending" }, from("https://example.test"));
+check(!session.has(KEY), "its own page can");
+
+// A capture must come from the page whose form it read.
+await send(candidate, from("https://evil.test"));
+check(!session.has(KEY), "a capture naming another page is refused");
+
+// A generated password is offered where sign-up lands, often another host.
+await send({ ...candidate, generated: true });
+const generated = await send({ cmd: "peekPending" }, from("https://app.other.test"));
+check(
+  generated.candidate?.generated === true,
+  "a generated password may be offered on the host a sign-up lands on",
+);
+
+// Past the TTL it is gone, however it is asked for.
+session.set("pendingSave:55", {
+  candidate: { url: "https://example.test/login", username: "old", password: "pw0" },
+  ts: Date.now() - 91000,
+  origin: "https://example.test",
+});
+const expired = await send({ cmd: "peekPending" }, from("https://example.test", 55));
+check(
+  expired.candidate === null && !session.has("pendingSave:55"),
+  "a candidate past the TTL is dropped instead of being revived",
 );
 
 // The eviction case. A previous worker generation captured this; the Map in
@@ -112,19 +170,16 @@ check(
 session.set(`pendingSave:99`, {
   candidate: { url: "https://slow.test/", username: "bob", password: "pw2" },
   ts: Date.now(),
+  origin: "https://slow.test",
 });
-const evicted = await send({ cmd: "consumePending" }, 99);
+const evicted = await send({ cmd: "peekPending" }, from("https://slow.test", 99));
 check(
-  evicted.candidate?.password === "pw2",
+  evicted.candidate?.username === "bob",
   "a candidate stored before the worker was evicted is still found",
-);
-check(
-  !session.has("pendingSave:99"),
-  "and consuming it clears the stored copy too",
 );
 
 // A tab with nothing pending must not invent one.
-const none = await send({ cmd: "consumePending" }, 1234);
+const none = await send({ cmd: "peekPending" }, from("https://example.test", 1234));
 check(none.candidate === null, "an unknown tab has no pending candidate");
 
 console.log(`pending-save ledger: ${checks} checks passed`);

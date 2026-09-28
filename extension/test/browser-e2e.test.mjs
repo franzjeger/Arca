@@ -50,7 +50,13 @@ if (!browser || !hasWebSocketClient) {
 const fixture = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Arca E2E</title>
 <script>
-window.query = (selector) => document.querySelector('.sybr-panel')?.shadowRoot?.querySelector(selector.replace(/^\.sybr-panel /, '')) || document.querySelector(selector);
+window.query = (selector) => {
+  for (const host of document.querySelectorAll('.sybr-panel, .sybr-savebar')) {
+    const hit = host.shadowRoot?.querySelector(selector.replace(/^\.sybr-(panel|savebar) /, ''));
+    if (hit) return hit;
+  }
+  return document.querySelector(selector);
+};
 </script>
 <style>
   body { margin: 0; min-height: 1200px; font: 16px sans-serif; }
@@ -225,7 +231,7 @@ fs.writeFileSync(
       reply({ ok: true, response: valid
         ? { type: "saved" }
         : { type: "error", message: "wrong candidate" } });
-    } else if (message.cmd === "consumePending") {
+    } else if (message.cmd === "peekPending") {
       reply({ ok: true, candidate: null });
     } else if (message.cmd === "getShadowRootMode") {
       reply({ mode: "open" });
@@ -474,7 +480,7 @@ try {
   })()`);
   await trustedClick("#update-password");
   await waitFor(
-    'query(".sybr-savebar")?.textContent.includes("Update the password for admin")',
+    'query(".sybr-savebar-text")?.textContent.includes("Update the password for admin")',
     "Portainer password-change save prompt",
   );
   await trustedClick(".sybr-savebar-yes");

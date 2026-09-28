@@ -181,6 +181,8 @@ const swCtx = vm.createContext({
   queueMicrotask,
   Date: fakeDate(),
   Map,
+  // A service worker has it; the sender checks parse origins with it.
+  URL,
 });
 swCtx.globalThis = swCtx;
 // background.js is an ES module (it imports the bookmark reconciler), and
@@ -195,10 +197,11 @@ vm.runInContext(
   swCtx,
 );
 
-/** Deliver a message to the worker the way chrome.runtime.sendMessage does. */
-function toWorker(msg, tabId) {
+/** Deliver a message to the worker the way chrome.runtime.sendMessage does:
+    the browser, not the message, says which top-level page sent it. */
+function toWorker(msg, tabId, origin) {
   return new Promise((resolve) => {
-    const sender = { tab: { id: tabId } };
+    const sender = { tab: { id: tabId }, frameId: 0, origin, url: `${origin}/` };
     for (const fn of swListeners) {
       let replied = false;
       const sendResponse = (r) => {
@@ -246,7 +249,7 @@ function makeDocument({ host, tabId, nativeGetError = null }) {
   // against a relay that believes it has been reloaded.
   const relayRuntime = {
     id: "arca-test-extension",
-    sendMessage: (m) => toWorker(m, tabId),
+    sendMessage: (m) => toWorker(m, tabId, loc.origin),
     getManifest: () => ({ version: relayVersion }),
   };
   const relayCtx = vm.createContext({

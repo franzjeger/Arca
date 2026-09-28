@@ -91,7 +91,7 @@ check(
 // offer on "form gone" and "same site" threw the value away in exactly the case
 // it was added for.
 check(
-  /if \(cand\.generated\) \{[\s\S]{0,120}offer\(cand\)/.test(source),
+  /if \(cand\.generated\) return true;/.test(source),
   "a generated password must skip the post-navigation same-site/form gates",
 );
 check(
@@ -109,6 +109,19 @@ check(
 check(
   /button\.closest\("\.sybr-panel, \.sybr-savebar"\)/.test(source),
   "Arca's own panel and save-bar buttons must not count as page submits",
+);
+// A page can fill hidden fields and call click() or requestSubmit(); that was
+// enough to ask Arca what it had stored for the site, and the answer was
+// written into page DOM.
+check(
+  /"submit",\s*\(e\) => \{\s*if \(!byUser\(e\)\) return;/.test(source) &&
+    /if \(!e\.isTrusted \|\| e\.key !== "Enter"\) return;/.test(source) &&
+    /"click",\s*\(e\) => \{\s*if \(!e\.isTrusted\) return;/.test(source),
+  "only the user's own submit, Enter or click captures a login",
+);
+check(
+  /overlayHost\("sybr-savebar"/.test(source) && !/document\.body\.appendChild\(saveBar\)/.test(source),
+  "the save prompt, which names the account, lives in a closed shadow root",
 );
 // A successful probe is not a successful write: the vault can lock between the
 // prompt appearing and the user clicking it. The save bar must inspect the
@@ -139,25 +152,20 @@ check(
 // or more password boxes; the submitted value was rejected and must not be
 // offered as the account's new password.
 check(
-  /cand\.multiPassword && sameSite\(cand\.url, location\.href\)[\s\S]{0,80}if \(!changeFormStillUp\(\)\) offer\(cand\)/.test(
+  /if \(!sameSite\(cand\.url, location\.href\)\) return false;[\s\S]{0,700}if \(cand\.multiPassword\) return !changeFormStillUp\(\);/.test(
     source,
   ),
   "a re-rendered change form after navigation must not prompt to save",
 );
-// Reading the pending candidate consumes it, and every gate below can decline
-// to offer on THIS document — an interstitial that redirects again, most of
-// all. The password used to be destroyed by the first look at it.
+// Every gate can decline to offer on THIS document — an interstitial that
+// redirects again, most of all — so the landing page peeks, and claims the
+// candidate only when it offers. The password stays in the worker; the
+// ledger's own rules are driven for real in pending-save.test.mjs.
 check(
-  /finally \{[\s\S]{0,120}if \(!offered\)[\s\S]{0,200}cmd: "capturePending"/.test(
+  /cmd: "peekPending"[\s\S]{0,400}cmd: "claimPending"[\s\S]{0,120}pending: true/.test(
     source,
   ),
-  "a candidate no gate could offer must be put back, not dropped",
-);
-check(
-  /typeof msg\.ts === "number"[\s\S]{0,160}now - ts >= PENDING_TTL_MS/.test(
-    backgroundSource,
-  ),
-  "a re-stashed candidate keeps its original age so the TTL still expires",
+  "the landing page peeks, then claims before offering, without the password",
 );
 // MV3 evicts an idle service worker after ~30s. A sign-in that waits on a push
 // approval before navigating is idle by that measure, and the Map died with

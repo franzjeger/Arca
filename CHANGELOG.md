@@ -33,6 +33,16 @@
   the vault whenever a USB key was inserted.
 - Settings described "Confirm before autofill" as off by default. It is on,
   deliberately (THREAT_MODEL T11), and now says so.
+- Security (browser extension): which page is asking now comes from the
+  browser, not from the message. A content script, which a compromised
+  renderer controls, could name any site in a login lookup, fill, passkey
+  request or save; each is now answered only for the top-level page that sent
+  it, and the popup's bookmark commands only for the popup. The save prompt,
+  which names the stored account, moved out of page DOM into a closed shadow
+  root. Only the user's own submit, Enter or click captures a login, and only
+  a real click dismisses the prompt. After a navigation, the landing page no
+  longer receives the submitted password: the worker keeps it and sends it
+  when that page saves.
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native
