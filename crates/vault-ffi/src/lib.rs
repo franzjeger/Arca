@@ -49,7 +49,10 @@ use std::slice;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
-use vault_core::{host_of, Error, ItemKind, SymmetricKey, Vault, VaultItem, KEY_LEN};
+use vault_core::{
+    host_of, Change, Error, ItemKind, LoginEdit, NoteEdit, SymmetricKey, Vault, VaultItem,
+    WifiEdit, KEY_LEN,
+};
 
 pub mod sync;
 
@@ -105,6 +108,8 @@ fn err_code(e: &Error) -> i32 {
         Error::Locked => ERR_LOCKED,
         Error::NotFound => ERR_NOT_FOUND,
         Error::Decryption => ERR_DECRYPT,
+        // An id of another kind is, to a caller editing one kind, not found.
+        Error::WrongKind => ERR_NOT_FOUND,
         _ => ERR_OP_FAILED,
     }
 }
@@ -1679,47 +1684,21 @@ pub unsafe extern "C" fn vault_ffi_upsert_login(
     else {
         return ERR_UTF8;
     };
-    let (Ok(totp), Ok(notes)) = (optional(totp_secret), optional(notes)) else {
+    let (Ok(totp_secret), Ok(notes)) = (optional(totp_secret), optional(notes)) else {
         return ERR_UTF8;
     };
-    // otpauth:// URIs are normalized to their Base32 secret. Reject a bad URI
-    // HERE, where the caller can show the QR scan failed — storing it raw
-    // would surface later as a code that derives garbage.
-    let totp = match totp.map(str::trim) {
-        Some(uri) if uri.to_ascii_lowercase().starts_with("otpauth://") => {
-            match vault_core::parse_otpauth_uri(uri) {
-                Ok(parsed) => Some(parsed.secret),
-                Err(_) => return ERR_OP_FAILED,
-            }
-        }
-        other => other.map(str::to_string),
+    let edit = LoginEdit {
+        title: title.into(),
+        username: username.into(),
+        url: url.into(),
+        password: Change::Set(password.into()),
+        totp_secret,
+        notes,
     };
-    let build = |previous: Option<&VaultItem>| {
-        let (old_totp, old_notes) = match previous {
-            Some(VaultItem::Login {
-                totp_secret, notes, ..
-            }) => (totp_secret.clone(), notes.clone()),
-            _ => (None, String::new()),
-        };
-        VaultItem::Login {
-            title: title.to_string(),
-            username: username.to_string(),
-            password: password.to_string(),
-            url: url.to_string(),
-            totp_secret: match totp {
-                None => old_totp,
-                Some(secret) if secret.is_empty() => None,
-                Some(secret) => Some(secret),
-            },
-            notes: notes.map_or(old_notes, str::to_string),
-        }
-    };
-    upsert_of_kind(
+    upsert(
         handle,
         id,
-        ItemKind::Login,
-        build,
-        now_unix_millis,
+        |vault, id| vault.save_login(id, edit, now_unix_millis),
         out_vault_bytes,
         out_vault_bytes_len,
         out_id,
@@ -1727,33 +1706,29 @@ pub unsafe extern "C" fn vault_ffi_upsert_login(
     )
 }
 
-/// An optional field of an edit: NULL means the edit did not touch it, so the
-/// item keeps its value; "" clears it. Clients never receive some secrets
-/// (TOTP) and do not show others (a login's notes on iOS), so "send back what
-/// you got" is impossible and "absent means erase" destroyed them on every
-/// edit — TOTP codes until ABI v11, notes until v17. `Err` is invalid UTF-8.
-unsafe fn optional<'a>(s: *const c_char) -> Result<Option<&'a str>, ()> {
+/// An optional field of an edit: NULL leaves it as it is, anything else sets
+/// it ("" clears). Clients never receive some secrets (TOTP) and do not show
+/// others (a login's notes on iOS), so "send back what you got" is impossible
+/// and "absent means erase" destroyed them on every edit — TOTP codes until
+/// ABI v11, notes until v17. `Err` is invalid UTF-8.
+unsafe fn optional(s: *const c_char) -> Result<Change<String>, ()> {
     if s.is_null() {
-        return Ok(None);
+        return Ok(Change::Keep);
     }
-    cstr(s).map(Some).ok_or(())
+    cstr(s).map(|value| Change::Set(value.into())).ok_or(())
 }
 
-/// The one write path for every upsert.
+/// The one write path for every upsert: create on a null id, edit in place on
+/// a valid one, and hand the caller the new vault bytes to persist. What an
+/// edit means is `vault_core::edit`'s business; this is the C plumbing.
 ///
-/// Create on a null id, edit in place on a valid one — refusing an id whose
-/// item is missing, deleted, or of another kind — and hand the caller the new
-/// vault bytes to persist. `build` receives the item being edited, so fields
-/// the edit left out keep their value. On a serialization failure the handle
-/// is rolled back to the last persisted item so it never holds a change the
-/// caller could not write.
-#[allow(clippy::too_many_arguments)] // the C out-param convention, like its callers
-unsafe fn upsert_of_kind(
+/// The edit is made on a copy and the handle takes the copy only once its
+/// bytes exist, so a failure leaves the handle exactly as persisted — no undo
+/// to run, and no half-applied edit in its password history.
+unsafe fn upsert(
     handle: *mut VaultHandle,
     id: *const c_char,
-    kind: ItemKind,
-    build: impl FnOnce(Option<&VaultItem>) -> VaultItem,
-    now_unix_millis: i64,
+    save: impl FnOnce(&mut Vault, Option<uuid::Uuid>) -> vault_core::Result<uuid::Uuid>,
     out_vault_bytes: *mut *mut u8,
     out_vault_bytes_len: *mut usize,
     out_id: *mut *mut u8,
@@ -1791,44 +1766,18 @@ unsafe fn upsert_of_kind(
     if !vault.is_unlocked() {
         return ERR_LOCKED;
     }
-
-    let previous = existing_id.and_then(|u| vault.get_item(u).ok());
-    if existing_id.is_some()
-        && !matches!(previous.as_ref().map(|i| i.data.kind()), Some(k) if k == kind)
-    {
-        return ERR_NOT_FOUND;
-    }
-
-    let result = guard_result(|| {
-        let data = build(previous.as_ref().map(|item| &item.data));
-        let item = match previous.as_ref() {
-            Some(old) => {
-                let mut it = old.clone();
-                it.data = data;
-                it.modified_at = now_unix_millis;
-                it
-            }
-            None => vault_core::Item::new(data, now_unix_millis),
-        };
-        let new_id = item.id;
-        vault.upsert_item(item)?;
-        let bytes = reserialize_verified(&vault, None)?;
-        Ok((new_id, bytes))
-    });
-    match result {
+    let mut next = vault.clone();
+    match guard_result(|| {
+        let new_id = save(&mut next, existing_id)?;
+        Ok((new_id, reserialize_verified(&next, None)?))
+    }) {
         Ok((new_id, bytes)) => {
+            *vault = next;
             emit(bytes, out_vault_bytes, out_vault_bytes_len);
             emit(new_id.to_string().into_bytes(), out_id, out_id_len);
             OK
         }
-        Err(code) => {
-            // A failed create is dropped by the next reload; an edit can be
-            // restored exactly.
-            if let Some(old) = previous {
-                let _ = vault.upsert_item(old);
-            }
-            code
-        }
+        Err(code) => code,
     }
 }
 
@@ -1836,7 +1785,7 @@ unsafe fn upsert_of_kind(
 ///
 /// `security` is the join-QR token: "WPA", "WEP" or "nopass"; empty means WPA.
 /// `notes` may be NULL to keep the entry's notes (ABI v17). Same create/edit
-/// and rollback contract as `vault_ffi_upsert_login`.
+/// contract as `vault_ffi_upsert_login`.
 ///
 /// # Safety
 /// `handle` valid; string arguments NUL-terminated or null where documented;
@@ -1867,24 +1816,18 @@ pub unsafe extern "C" fn vault_ffi_upsert_wifi(
     ) else {
         return ERR_UTF8;
     };
-    let build = |previous: Option<&VaultItem>| VaultItem::Wifi {
-        title: title.to_string(),
-        ssid: ssid.to_string(),
-        password: password.to_string(),
-        security: security.to_string(),
+    let edit = WifiEdit {
+        title: title.into(),
+        ssid: ssid.into(),
+        password: Change::Set(password.into()),
+        security: security.into(),
         hidden: hidden != 0,
-        notes: match (notes, previous) {
-            (Some(notes), _) => notes.to_string(),
-            (None, Some(VaultItem::Wifi { notes, .. })) => notes.clone(),
-            (None, _) => String::new(),
-        },
+        notes,
     };
-    upsert_of_kind(
+    upsert(
         handle,
         id,
-        ItemKind::Wifi,
-        build,
-        now_unix_millis,
+        |vault, id| vault.save_wifi(id, edit, now_unix_millis),
         out_vault_bytes,
         out_vault_bytes_len,
         out_id,
@@ -1912,16 +1855,14 @@ pub unsafe extern "C" fn vault_ffi_upsert_secure_note(
     let (Some(title), Some(body)) = (cstr(title), cstr(body)) else {
         return ERR_UTF8;
     };
-    let build = |_: Option<&VaultItem>| VaultItem::SecureNote {
-        title: title.to_string(),
-        body: body.to_string(),
+    let edit = NoteEdit {
+        title: title.into(),
+        body: body.into(),
     };
-    upsert_of_kind(
+    upsert(
         handle,
         id,
-        ItemKind::SecureNote,
-        build,
-        now_unix_millis,
+        |vault, id| vault.save_note(id, edit, now_unix_millis),
         out_vault_bytes,
         out_vault_bytes_len,
         out_id,

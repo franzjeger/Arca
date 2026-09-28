@@ -50,6 +50,10 @@ pub enum Error {
     #[error("item not found")]
     NotFound,
 
+    /// An edit named an item of another kind; an edit never changes one.
+    #[error("item is of another kind")]
+    WrongKind,
+
     /// The operating system RNG failed to produce randomness.
     #[error("secure random generation failed")]
     Random,

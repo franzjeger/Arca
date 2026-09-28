@@ -216,6 +216,10 @@ impl From<vault_core::Error> for CmdError {
                 "Incorrect password, or the vault data is corrupt.",
             ),
             E::NotFound => CmdError::new("not_found", "Item not found."),
+            E::WrongKind => CmdError::new(
+                "item_kind_mismatch",
+                "This editor cannot change the item's type.",
+            ),
             E::Format => CmdError::new("format", "Unrecognized or unsupported vault format."),
             E::UnsupportedVersion => CmdError::new(
                 "unsupported_version",

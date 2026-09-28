@@ -23,7 +23,7 @@ use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use vault_core::{
-    estimate_strength, generate_password, Item, ItemKind, KdfParams, PasswordOptions,
+    estimate_strength, generate_password, Change, Item, ItemKind, KdfParams, PasswordOptions,
     PasswordStrength, SecurityIssue, Vault, VaultItem,
 };
 
@@ -335,24 +335,8 @@ pub(crate) fn persist(st: &mut WriteGuard<'_>) -> Result<(), CmdError> {
     Ok(())
 }
 
-/// Accept either a raw Base32 secret or a full `otpauth://` URI for the TOTP
-/// field, normalizing to the stored Base32 secret. Empty input -> `None`.
-fn normalize_totp_secret(raw: Option<String>) -> Result<Option<String>, CmdError> {
-    match raw {
-        Some(s) if !s.trim().is_empty() => {
-            let s = s.trim();
-            if s.to_ascii_lowercase().starts_with("otpauth://") {
-                Ok(Some(vault_core::parse_otpauth_uri(s)?.secret))
-            } else {
-                Ok(Some(s.to_string()))
-            }
-        }
-        _ => Ok(None),
-    }
-}
-
 /// A login parsed from one CSV row. `totp` is raw (Base32 or `otpauth://`),
-/// normalized later via [`normalize_totp_secret`].
+/// normalized later via `vault_core::edit::normalize_totp`.
 struct ParsedLogin {
     title: String,
     username: String,
@@ -1739,12 +1723,7 @@ fn do_import_logins(state: &Mutex<AppState>, path: &str) -> Result<ImportSummary
     for p in parsed {
         // A bad/unsupported TOTP value shouldn't drop the whole login: keep the
         // credentials and just omit the code.
-        let totp_secret = normalize_totp_secret(if p.totp.is_empty() {
-            None
-        } else {
-            Some(p.totp)
-        })
-        .unwrap_or(None);
+        let totp_secret = vault_core::edit::normalize_totp(&p.totp).unwrap_or(None);
 
         let host = crate::bridge::host_of(&p.url);
         let key = (host.clone(), p.username.to_lowercase());
@@ -1951,34 +1930,17 @@ pub(crate) fn do_upsert_item(
 ) -> Result<String, CmdError> {
     let mut st = write_guard(state)?;
     st.touch();
-    let now = now_millis();
-    let data = VaultItem::Login {
+    let id = input.id.as_deref().map(parse_id).transpose()?;
+    // The editor shows every field, so each one is set as shown.
+    let edit = vault_core::LoginEdit {
         title: input.title,
         username: input.username,
-        password: input.password,
         url: input.url,
-        totp_secret: normalize_totp_secret(input.totp_secret)?,
-        notes: input.notes,
+        password: Change::Set(input.password),
+        totp_secret: input.totp_secret.map_or(Change::Clear, Change::Set),
+        notes: Change::Set(input.notes),
     };
-
-    let id = match input.id {
-        Some(id_str) => {
-            let uuid = parse_id(&id_str)?;
-            // Preserve the original creation time on edit.
-            let mut existing = st.vault()?.get_item(uuid)?;
-            require_kind(&existing, ItemKind::Login)?;
-            existing.data = data;
-            existing.modified_at = now;
-            st.vault_mut()?.upsert_item(existing)?;
-            uuid
-        }
-        None => {
-            let item = Item::new(data, now);
-            let new_id = item.id;
-            st.vault_mut()?.upsert_item(item)?;
-            new_id
-        }
-    };
+    let id = st.vault_mut()?.save_login(id, edit, now_millis())?;
     persist(&mut st)?;
     Ok(id.to_string())
 }
@@ -2001,38 +1963,16 @@ pub struct WifiInput {
 pub fn upsert_wifi(state: St<'_>, input: WifiInput) -> Result<String, CmdError> {
     let mut st = write_guard(state.inner())?;
     st.touch();
-    let now = now_millis();
-    // Title defaults to the SSID when left blank.
-    let title = if input.title.trim().is_empty() {
-        input.ssid.clone()
-    } else {
-        input.title
-    };
-    let data = VaultItem::Wifi {
-        title,
+    let id = input.id.as_deref().map(parse_id).transpose()?;
+    let edit = vault_core::WifiEdit {
+        title: input.title,
         ssid: input.ssid,
-        password: input.password,
+        password: Change::Set(input.password),
         security: input.security,
         hidden: input.hidden,
-        notes: input.notes,
+        notes: Change::Set(input.notes),
     };
-    let id = match input.id {
-        Some(id_str) => {
-            let uuid = parse_id(&id_str)?;
-            let mut existing = st.vault()?.get_item(uuid)?;
-            require_kind(&existing, ItemKind::Wifi)?;
-            existing.data = data;
-            existing.modified_at = now;
-            st.vault_mut()?.upsert_item(existing)?;
-            uuid
-        }
-        None => {
-            let item = Item::new(data, now);
-            let new_id = item.id;
-            st.vault_mut()?.upsert_item(item)?;
-            new_id
-        }
-    };
+    let id = st.vault_mut()?.save_wifi(id, edit, now_millis())?;
     persist(&mut st)?;
     Ok(id.to_string())
 }
@@ -2216,33 +2156,12 @@ fn do_move_bookmarks(
 pub fn upsert_secure_note(state: St<'_>, input: SecureNoteInput) -> Result<String, CmdError> {
     let mut st = write_guard(state.inner())?;
     st.touch();
-    let now = now_millis();
-    let title = if input.title.trim().is_empty() {
-        "Untitled note".to_string()
-    } else {
-        input.title
-    };
-    let data = VaultItem::SecureNote {
-        title,
+    let id = input.id.as_deref().map(parse_id).transpose()?;
+    let edit = vault_core::NoteEdit {
+        title: input.title,
         body: input.body,
     };
-    let id = match input.id {
-        Some(id_str) => {
-            let uuid = parse_id(&id_str)?;
-            let mut existing = st.vault()?.get_item(uuid)?;
-            require_kind(&existing, ItemKind::SecureNote)?;
-            existing.data = data;
-            existing.modified_at = now;
-            st.vault_mut()?.upsert_item(existing)?;
-            uuid
-        }
-        None => {
-            let item = Item::new(data, now);
-            let new_id = item.id;
-            st.vault_mut()?.upsert_item(item)?;
-            new_id
-        }
-    };
+    let id = st.vault_mut()?.save_note(id, edit, now_millis())?;
     persist(&mut st)?;
     Ok(id.to_string())
 }
