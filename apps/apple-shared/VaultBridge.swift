@@ -79,11 +79,12 @@ enum VaultShared {
     /// writable; v11 changed upsert's TOTP semantics — null keeps
     /// the existing secret, "" clears it — because the detail surface never
     /// hands the secret out, so a client editing a login could not round-trip
-    /// it and every phone edit destroyed the code.
+    /// it and every phone edit destroyed the code; v17 did the same for notes,
+    /// which the phone's login editor never shows.
     /// Bump this in the SAME commit that bumps `ABI_VERSION`: nothing compiles
     /// against it, so a stale value is only ever caught at runtime, by this
     /// guard, on a device.
-    static let requiredAbiVersion: Int32 = 16
+    static let requiredAbiVersion: Int32 = 17
 
     // MARK: Password generation
 
@@ -1067,21 +1068,13 @@ final class VaultSession: @unchecked Sendable {
         }
     }
 
-    /// Insert or update a login, persisting the vault file.
-    ///
-    /// Pass `id` to edit an existing login, or nil to create one. The Rust side
-    /// returns the whole new vault file; writing it is ours to do, and it lands
-    /// atomically with file protection like every other write here.
-    ///
-    /// Returns the item's id, which is the caller's handle to it afterwards
-    /// (the same id on an edit, a fresh one on a create).
-    @discardableResult
     /// `withCString` for an optional: nil crosses as a NULL pointer.
     ///
     /// This distinction is load-bearing since ABI v11 — for the TOTP field,
-    /// NULL means "keep the existing secret" and "" means "clear it". Folding
-    /// nil to "" here is how the keep-on-null fix shipped in Rust while every
-    /// phone edit went on clearing codes through this very file.
+    /// NULL means "keep the existing secret" and "" means "clear it", and since
+    /// v17 the same holds for notes. Folding nil to "" here is how the
+    /// keep-on-null fix shipped in Rust while every phone edit went on clearing
+    /// codes through this very file.
     private static func withOptionalCString<R>(
         _ string: String?, _ body: (UnsafePointer<CChar>?) throws -> R
     ) rethrows -> R {
@@ -1091,6 +1084,15 @@ final class VaultSession: @unchecked Sendable {
         return try body(nil)
     }
 
+    /// Insert or update a login, persisting the vault file.
+    ///
+    /// Pass `id` to edit an existing login, or nil to create one. The Rust side
+    /// returns the whole new vault file; writing it is ours to do, and it lands
+    /// atomically with file protection like every other write here.
+    ///
+    /// Returns the item's id, which is the caller's handle to it afterwards
+    /// (the same id on an edit, a fresh one on a create).
+    @discardableResult
     func upsertLogin(
         id: String? = nil,
         title: String,
@@ -1098,7 +1100,7 @@ final class VaultSession: @unchecked Sendable {
         password: String,
         url: String,
         totpSecret: String? = nil,
-        notes: String = ""
+        notes: String? = nil
     ) async throws -> String {
         try await Self.run {
             let lock = try VaultShared.acquireVaultLock()
@@ -1114,16 +1116,17 @@ final class VaultSession: @unchecked Sendable {
 
             // withCString nests rather than composes; the pointers are only
             // valid inside their closures, so the call happens innermost.
-            // nil id -> NULL (create); nil totp -> NULL (KEEP the existing
-            // secret, per v11). `?? ""` here would turn every phone edit into
-            // an explicit clear — which is exactly what it used to do.
+            // nil id -> NULL (create); nil totp or notes -> NULL (KEEP what
+            // the item has, per v11 and v17). `?? ""` here would turn every
+            // phone edit into an explicit clear — which is exactly what it
+            // used to do.
             let code: Int32 = Self.withOptionalCString(id) { idPtr in
                 title.withCString { titlePtr in
                     username.withCString { userPtr in
                         password.withCString { passPtr in
                             url.withCString { urlPtr in
                                 Self.withOptionalCString(totpSecret) { totpPtr in
-                                    notes.withCString { notesPtr in
+                                    Self.withOptionalCString(notes) { notesPtr in
                                         vault_ffi_upsert_login(
                                             self.handle, idPtr, titlePtr, userPtr,
                                             passPtr, urlPtr, totpPtr, notesPtr, now,
@@ -1151,6 +1154,7 @@ final class VaultSession: @unchecked Sendable {
 
     /// Create or edit a Wi-Fi entry. Same persistence contract as
     /// `upsertLogin`: the file is written before the id is reported.
+    @discardableResult
     func upsertWifi(
         id: String? = nil,
         title: String,
@@ -1158,7 +1162,7 @@ final class VaultSession: @unchecked Sendable {
         password: String,
         security: String,
         hidden: Bool,
-        notes: String = ""
+        notes: String? = nil
     ) async throws -> String {
         try await Self.run {
             let lock = try VaultShared.acquireVaultLock()
@@ -1174,7 +1178,7 @@ final class VaultSession: @unchecked Sendable {
                     ssid.withCString { ssidPtr in
                         password.withCString { passPtr in
                             security.withCString { secPtr in
-                                notes.withCString { notesPtr in
+                                Self.withOptionalCString(notes) { notesPtr in
                                     vault_ffi_upsert_wifi(
                                         self.handle, idPtr, titlePtr, ssidPtr,
                                         passPtr, secPtr, hidden ? 1 : 0, notesPtr,
@@ -1198,6 +1202,7 @@ final class VaultSession: @unchecked Sendable {
     }
 
     /// Create or edit a secure note. Same persistence contract as `upsertLogin`.
+    @discardableResult
     func upsertNote(
         id: String? = nil,
         title: String,

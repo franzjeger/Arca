@@ -1,8 +1,8 @@
 # Arca for iOS
 
 SwiftUI app and AutoFill Credential Provider over the shared Rust vault core.
-The project has run on an iPhone since 2026-07-28. Current source is **0.5.0**,
-with **C ABI v16**; that is separate from the version installed on a device.
+The project has run on an iPhone since 2026-07-28. Current source is **0.6.2**,
+with **C ABI v17**; that is separate from the version installed on a device.
 
 ## Implemented
 

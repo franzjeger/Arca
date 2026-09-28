@@ -18,6 +18,10 @@
   that unwinds on panic. Under the release profile's `abort`, every
   `catch_unwind` guard in vault-ffi was dead code and a panic killed the app
   or AutoFill extension; vault-ffi now refuses to compile that way.
+- iOS: editing a login or Wi-Fi network no longer erases its notes. The
+  phone's editors never show notes, so every save sent none and the FFI
+  stored that as empty; sync then carried the loss to every device. An edit
+  that leaves notes out now keeps them (C ABI v17, as v11 did for TOTP codes).
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native

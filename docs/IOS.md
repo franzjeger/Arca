@@ -1,8 +1,8 @@
 # iOS implementation and release status
 
 The current feature/build reference is [apps/ios/README.md](../apps/ios/README.md).
-The app has run on a physical iPhone since 2026-07-28. Source version 0.5.0 uses
-C ABI v16 and the same authenticated V5 vault format as desktop.
+The app has run on a physical iPhone since 2026-07-28. Source version 0.6.2 uses
+C ABI v17 and the same authenticated V6 vault format as desktop.
 
 ## First setup
 

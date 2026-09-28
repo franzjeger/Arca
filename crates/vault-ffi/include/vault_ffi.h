@@ -1,6 +1,6 @@
 /* vault-ffi — C ABI over vault-core for native platform integrations.
  *
- * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 16). All
+ * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 17). All
  * out-buffers are heap-allocated by the library and must be released with
  * vault_ffi_free(ptr, len), which also zeroes them.
  *
@@ -423,8 +423,9 @@ int32_t vault_ffi_passkey_assert(const uint8_t *private_key,
  *
  * id            NULL or "" creates a new item; otherwise the UUID to overwrite
  *               (ERR_NOT_FOUND if it is unknown or is not a login).
- * totp_secret   NULL or "" stores no secret (never Some("")).
- * notes         NULL is treated as "".
+ * totp_secret   NULL keeps the existing secret, "" clears it (see above).
+ * notes         NULL keeps the existing notes, "" clears them (ABI v17;
+ *               before, NULL erased them on every edit).
  * out_id        The item's UUID as ASCII text, for a create or an edit.
  *
  * Both out-buffers must be released with vault_ffi_free(). */
@@ -442,7 +443,8 @@ int32_t vault_ffi_upsert_login(VaultHandle *handle, const char *id,
  * Create (id NULL/"") or edit in place (id set; wrong/missing kind -> -5) a
  * Wi-Fi entry or secure note, with the same returned-bytes persistence
  * contract as vault_ffi_upsert_login. `security` is the join-QR token: "WPA",
- * "WEP" or "nopass"; empty means WPA. `hidden` is 0/1. */
+ * "WEP" or "nopass"; empty means WPA. `hidden` is 0/1. Wi-Fi `notes` NULL keeps
+ * the existing notes (ABI v17). */
 int32_t vault_ffi_upsert_wifi(VaultHandle *handle, const char *id,
                               const char *title, const char *ssid,
                               const char *password, const char *security,
