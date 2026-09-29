@@ -200,6 +200,30 @@ export interface SshPublicKey {
   comment: string;
 }
 
+/** A private-key file in ~/.ssh, crossed off by fingerprint (`ssh_import_scan`). */
+export interface FoundSshKey {
+  file: string;
+  /** On the wire (`ssh-ed25519`), or an old PEM file's type (`RSA`). */
+  keyType: string;
+  /** Empty for an old PEM file. */
+  fingerprint: string;
+  /** Empty for an encrypted key, which keeps it inside. */
+  comment: string;
+  encrypted: boolean;
+  status:
+    | { kind: "new" }
+    | { kind: "inVault"; title: string }
+    | { kind: "sameAs"; file: string }
+    | { kind: "unsupported" };
+}
+
+export interface SshImportResult {
+  /** The new items, in the order the files were picked. */
+  ids: string[];
+  /** Files not taken: `passphrase`, `unsupported`, `unreadable`, `in_vault`, `not_a_key_file`. */
+  failed: { file: string; reason: string }[];
+}
+
 export interface SshAgentInfo {
   socket: string;
   available: boolean;
@@ -449,6 +473,11 @@ export const api = {
     invoke<string>("generate_ssh_key", { comment }),
   sshPublicKey: (id: string) => invoke<SshPublicKey>("ssh_public_key", { id }),
   sshAgentInfo: () => invoke<SshAgentInfo>("ssh_agent_info"),
+  /** The private keys in ~/.ssh, crossed off against each other and the vault. */
+  sshImportScan: () => invoke<FoundSshKey[]>("ssh_import_scan"),
+  /** Take the picked files in ~/.ssh into the vault. */
+  sshImport: (picks: { file: string; passphrase?: string }[]) =>
+    invoke<SshImportResult>("ssh_import", { picks }),
   deleteItem: (id: string) => invoke<void>("delete_item", { id }),
   // Empty on macOS unless Arca has Full Disk Access — reading another app's
   // Application Support directory is refused there. Linux and Windows have no
