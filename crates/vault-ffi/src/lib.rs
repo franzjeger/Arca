@@ -48,7 +48,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use vault_core::dedupe::MergeChoice;
 use vault_core::{
     host_of, Change, Error, ItemKind, LoginEdit, NoteEdit, SymmetricKey, Vault, VaultItem,
     WifiEdit, KEY_LEN,
@@ -111,7 +112,12 @@ pub mod sync;
 /// `vault_ffi_vault_adopt` (take the change on from a kept copy, locked and
 /// offline) and `vault_ffi_vault_key_epoch` (to tell a kept copy the vault has
 /// since caught up with).
-pub const ABI_VERSION: i32 = 21;
+///
+/// v22: duplicate logins, reviewed before they are merged. Adds
+/// `vault_ffi_find_duplicates` (what a review shows, no secret) and
+/// `vault_ffi_merge_duplicates` (the groups chosen, only while every login
+/// shown is unchanged; [`ERR_CHANGED`] when one is not).
+pub const ABI_VERSION: i32 = 22;
 
 // Return codes.
 pub(crate) const OK: i32 = 0;
@@ -126,6 +132,8 @@ const ERR_BAD_KEY_LEN: i32 = -8;
 // -9 (ERR_SYNC_FAILED) is defined by the sync surface.
 const ERR_PASSWORD_CHANGED: i32 = -10;
 const ERR_DIFFERENT_VAULT: i32 = -11;
+/// Items a choice was made about changed after they were shown.
+const ERR_CHANGED: i32 = -12;
 
 /// Map a core error to a stable return code (never leaks detail).
 pub(crate) fn err_code(e: &Error) -> i32 {
@@ -137,6 +145,7 @@ pub(crate) fn err_code(e: &Error) -> i32 {
         Error::WrongKind => ERR_NOT_FOUND,
         Error::KeyRotated => ERR_PASSWORD_CHANGED,
         Error::DifferentVault => ERR_DIFFERENT_VAULT,
+        Error::Changed => ERR_CHANGED,
         _ => ERR_OP_FAILED,
     }
 }
@@ -2114,6 +2123,133 @@ pub unsafe extern "C" fn vault_ffi_delete_item(
     }
 }
 
+/// Duplicate logins, as a review shows them, as a JSON array of groups:
+/// `{"possible":bool,"keep":id,"logins":[{"id","revision","title","site",
+/// "username","modifiedAt","password","hasPassword","hasTotp","hasNotes"}]}`.
+/// No secret: `password` is a number that only says which logins in a group
+/// share one. Changes nothing.
+///
+/// Free the buffer with [`vault_ffi_free`].
+///
+/// # Safety
+/// `handle` must be valid; `out_json`/`out_json_len` writable pointers.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_find_duplicates(
+    handle: *mut VaultHandle,
+    out_json: *mut *mut u8,
+    out_json_len: *mut usize,
+) -> i32 {
+    if handle.is_null() || out_json.is_null() || out_json_len.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let vault = match lock_vault(&(*handle).vault) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match guard_result(|| {
+        serde_json::to_string(&vault.review_duplicate_logins()?).map_err(|_| Error::Serialization)
+    }) {
+        Ok(json) => {
+            emit(json.into_bytes(), out_json, out_json_len);
+            OK
+        }
+        Err(code) => code,
+    }
+}
+
+#[derive(Deserialize)]
+struct MergeRequest {
+    choices: Vec<MergeRequestChoice>,
+    shown: Vec<MergeRequestShown>,
+}
+
+#[derive(Deserialize)]
+struct MergeRequestChoice {
+    keep: uuid::Uuid,
+    ids: Vec<uuid::Uuid>,
+}
+
+#[derive(Deserialize)]
+struct MergeRequestShown {
+    id: uuid::Uuid,
+    revision: uuid::Uuid,
+}
+
+/// Merge the groups chosen in a review of duplicates, returning the new vault
+/// bytes and how many logins went to the Trash.
+///
+/// `request` is UTF-8 JSON: `{"choices":[{"keep":id,"ids":[id,...]}],
+/// "shown":[{"id":id,"revision":revision},...]}`, where `shown` is every login
+/// the review showed, as [`vault_ffi_find_duplicates`] gave them. If one of
+/// them changed since, nothing is merged and the result is [`ERR_CHANGED`]:
+/// show the review again.
+///
+/// The merge is made on a copy, which becomes the handle's vault only once its
+/// bytes are written and verified, so a failure leaves the handle as it was.
+///
+/// # Safety
+/// `handle` must be valid, `request` point to `request_len` readable bytes,
+/// and the out-pointers be writable.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_merge_duplicates(
+    handle: *mut VaultHandle,
+    request: *const u8,
+    request_len: usize,
+    now_unix_millis: i64,
+    out_merged: *mut usize,
+    out_vault_bytes: *mut *mut u8,
+    out_vault_bytes_len: *mut usize,
+) -> i32 {
+    if handle.is_null()
+        || request.is_null()
+        || out_merged.is_null()
+        || out_vault_bytes.is_null()
+        || out_vault_bytes_len.is_null()
+    {
+        return ERR_NULL_ARG;
+    }
+    *out_merged = 0;
+    *out_vault_bytes = std::ptr::null_mut();
+    *out_vault_bytes_len = 0;
+
+    let Ok(request) =
+        serde_json::from_slice::<MergeRequest>(slice::from_raw_parts(request, request_len))
+    else {
+        return ERR_OP_FAILED;
+    };
+    let choices: Vec<MergeChoice> = request
+        .choices
+        .into_iter()
+        .map(|choice| MergeChoice {
+            keep: choice.keep,
+            ids: choice.ids,
+        })
+        .collect();
+    let shown: Vec<(uuid::Uuid, uuid::Uuid)> = request
+        .shown
+        .iter()
+        .map(|login| (login.id, login.revision))
+        .collect();
+
+    let mut vault = match lock_vault(&(*handle).vault) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let mut merged_vault = vault.clone();
+    match guard_result(|| {
+        let merged = merged_vault.merge_logins(&choices, &shown, now_unix_millis)?;
+        Ok((merged, reserialize_verified(&merged_vault, None)?))
+    }) {
+        Ok((merged, bytes)) => {
+            *vault = merged_vault;
+            *out_merged = merged;
+            emit(bytes, out_vault_bytes, out_vault_bytes_len);
+            OK
+        }
+        Err(code) => code,
+    }
+}
+
 // A test reads as one scenario, top to bottom; splitting it hides the story.
 #[allow(clippy::too_many_lines)]
 #[cfg(test)]
@@ -2474,8 +2610,8 @@ mod tests {
     // Pinned deliberately: clients gate features on this number, so a bump has
     // to be a conscious edit here, not a side effect.
     #[test]
-    fn abi_version_is_21() {
-        assert_eq!(vault_ffi_abi_version(), 21);
+    fn abi_version_is_22() {
+        assert_eq!(vault_ffi_abi_version(), 22);
     }
 
     /// A phone that kept the copy sealed after a password change takes the
@@ -2567,6 +2703,172 @@ mod tests {
             unsafe { vault_ffi_vault_load(not_a_vault.as_ptr(), not_a_vault.len(), &mut handle) };
         assert_ne!(refused, OK);
         assert!(handle.is_null());
+    }
+
+    // ---- duplicates (ABI v22) ----------------------------------------------
+
+    /// Two logins for one account, and two different accounts that share only
+    /// a username and have no site.
+    fn duplicates_vault() -> (Vec<u8>, [u8; KEY_LEN]) {
+        use vault_core::{Item, KdfAlgorithm, KdfParams};
+        let params = KdfParams {
+            algorithm: KdfAlgorithm::Argon2id,
+            m_cost_kib: 256,
+            t_cost: 1,
+            p_cost: 1,
+            salt: vec![7u8; KdfParams::SALT_LEN],
+        };
+        let mut v = Vault::create("pw", params).unwrap();
+        let device = SymmetricKey::generate().unwrap();
+        v.enable_device_unlock(&device).unwrap();
+        for (title, username, url, password, modified) in [
+            (
+                "Site",
+                "me@example.test",
+                "https://example.test",
+                "older-pw",
+                10,
+            ),
+            (
+                "Site",
+                "me@example.test",
+                "https://example.test/login",
+                "newer-pw",
+                20,
+            ),
+            ("Router", "admin", "", "router-pw", 30),
+            ("NAS", "admin", "", "nas-pw", 40),
+        ] {
+            let data = VaultItem::Login {
+                title: title.into(),
+                username: username.into(),
+                password: password.into(),
+                url: url.into(),
+                totp_secret: None,
+                notes: String::new(),
+            };
+            v.upsert_item(Item::new(data, modified)).unwrap();
+        }
+        let mut key = [0u8; KEY_LEN];
+        key.copy_from_slice(device.as_bytes());
+        (v.to_bytes().unwrap(), key)
+    }
+
+    fn merge_call(handle: *mut VaultHandle, request: &str) -> (i32, usize, Vec<u8>) {
+        let (mut out, mut len, mut merged) = (ptr::null_mut(), 0usize, 0usize);
+        let code = unsafe {
+            vault_ffi_merge_duplicates(
+                handle,
+                request.as_ptr(),
+                request.len(),
+                100,
+                &mut merged,
+                &mut out,
+                &mut len,
+            )
+        };
+        let bytes = if out.is_null() {
+            Vec::new()
+        } else {
+            let bytes = unsafe { slice::from_raw_parts(out, len) }.to_vec();
+            unsafe { vault_ffi_free(out, len) };
+            bytes
+        };
+        (code, merged, bytes)
+    }
+
+    /// What the review showed, as a request that merges its one group.
+    fn merge_all(review: &serde_json::Value) -> serde_json::Value {
+        let group = &review[0];
+        let logins = group["logins"].as_array().unwrap();
+        serde_json::json!({
+            "choices": [{
+                "keep": group["keep"],
+                "ids": logins.iter().map(|l| l["id"].clone()).collect::<Vec<_>>(),
+            }],
+            "shown": logins
+                .iter()
+                .map(|l| serde_json::json!({ "id": l["id"], "revision": l["revision"] }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn duplicates_are_reviewed_then_merged_through_the_c_abi() {
+        let (bytes, key) = duplicates_vault();
+        let handle = open_handle(&bytes, &key);
+
+        let json = json_call(handle, vault_ffi_find_duplicates);
+        assert!(
+            !json.contains("-pw"),
+            "the review carries no password: {json}"
+        );
+        let review: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // One group: Router and NAS are two accounts, not one.
+        assert_eq!(review.as_array().unwrap().len(), 1);
+        assert_eq!(review[0]["possible"], false);
+        assert_eq!(review[0]["logins"][0]["title"], "Site");
+        assert_eq!(review[0]["logins"][0]["modifiedAt"], 20);
+
+        let (code, merged, out) = merge_call(handle, &merge_all(&review).to_string());
+        assert_eq!((code, merged), (OK, 1));
+        // The handle and the bytes it gave agree: nothing left to merge.
+        assert_eq!(json_call(handle, vault_ffi_find_duplicates), "[]");
+        let reopened = open_handle(&out, &key);
+        assert_eq!(json_call(reopened, vault_ffi_find_duplicates), "[]");
+        let kept: serde_json::Value =
+            serde_json::from_str(&json_call(reopened, vault_ffi_items)).unwrap();
+        assert_eq!(kept.as_array().unwrap().len(), 3);
+        unsafe {
+            vault_ffi_vault_free(reopened);
+            vault_ffi_vault_free(handle);
+        }
+    }
+
+    #[test]
+    fn a_merge_about_logins_that_changed_is_refused_and_changes_nothing() {
+        let (bytes, key) = duplicates_vault();
+        let handle = open_handle(&bytes, &key);
+        let review: serde_json::Value =
+            serde_json::from_str(&json_call(handle, vault_ffi_find_duplicates)).unwrap();
+
+        // A login shown with a revision it no longer has: synced in between.
+        let mut request = merge_all(&review);
+        request["shown"][0]["revision"] = serde_json::json!(uuid::Uuid::new_v4());
+        let (code, merged, out) = merge_call(handle, &request.to_string());
+        assert_eq!((code, merged, out.len()), (ERR_CHANGED, 0, 0));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json_call(
+                handle,
+                vault_ffi_find_duplicates
+            ))
+            .unwrap(),
+            review
+        );
+
+        // Not the shape asked for, and not JSON at all.
+        let (code, ..) = merge_call(handle, r#"{"choices":[]}"#);
+        assert_eq!(code, ERR_OP_FAILED);
+        let (code, ..) = merge_call(handle, "merge everything");
+        assert_eq!(code, ERR_OP_FAILED);
+        unsafe { vault_ffi_vault_free(handle) };
+
+        // A vault that is only loaded, not opened, shows nothing.
+        let mut locked: *mut VaultHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { vault_ffi_vault_load(bytes.as_ptr(), bytes.len(), &mut locked) },
+            OK
+        );
+        let (mut out, mut len) = (ptr::null_mut(), 0usize);
+        assert_eq!(
+            unsafe { vault_ffi_find_duplicates(locked, &mut out, &mut len) },
+            ERR_LOCKED
+        );
+        assert_eq!(
+            unsafe { vault_ffi_find_duplicates(ptr::null_mut(), &mut out, &mut len) },
+            ERR_NULL_ARG
+        );
+        unsafe { vault_ffi_vault_free(locked) };
     }
 
     // ---- every-kind surface (ABI v7) -------------------------------------
