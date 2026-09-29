@@ -74,7 +74,9 @@ ARCA_SIGNING_DIR="$D" python3 "$REPO/scripts/lib/asc_signing.py"
 
 step "Importing into a dedicated keychain"
 if [ ! -f "$D/keychain-password" ]; then
-  LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 > "$D/keychain-password"
+  # Not `tr </dev/urandom | head`: under pipefail the tr that head cuts off
+  # fails the pipeline, and set -e ended a first run here without a word.
+  openssl rand -hex 16 > "$D/keychain-password"
   chmod 600 "$D/keychain-password"
 fi
 PW="$(cat "$D/keychain-password")"
