@@ -77,7 +77,7 @@ data-encoding = "2.6"
 # Cross-platform mlock/VirtualLock so secret memory can't be paged to swap.
 region = "3"
 # WebAuthn passkeys: ES256 (P-256 ECDSA). RustCrypto, no custom EC math.
-p256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.14", features = ["ecdsa"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 # SSH agent keys: Ed25519 (dalek, audited). The OpenSSH wire encoding is
 # hand-rolled from length-prefixed strings and tested byte-exactly against the
