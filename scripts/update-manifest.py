@@ -19,10 +19,34 @@ Usage:
 """
 
 import argparse
+import base64
 import datetime
 import json
 import os
+from pathlib import Path
 import sys
+
+TAURI_CONF = Path(__file__).resolve().parent.parent / "apps/desktop/src-tauri/tauri.conf.json"
+
+
+def check_signature(signature, version):
+    """What `tauri signer sign` wrote: by the key installed copies trust, and
+    for this version. Get either wrong and every client refuses the update,
+    which nobody notices until somebody wonders why they never get one. The
+    updater itself checks the cryptography."""
+    try:
+        lines = base64.b64decode(signature, validate=True).decode().splitlines()
+        key_id = base64.b64decode(lines[1])[2:10]
+        trusted = lines[2].removeprefix("trusted comment: ")
+    except (ValueError, IndexError) as error:
+        raise ValueError(f"not a minisign signature ({error})") from error
+    pubkey = json.loads(TAURI_CONF.read_text())["plugins"]["updater"]["pubkey"]
+    trusted_key = base64.b64decode(base64.b64decode(pubkey).decode().splitlines()[1])[2:10]
+    if key_id != trusted_key:
+        raise ValueError("signed with a key installed copies do not trust")
+    fields = dict(field.split(":", 1) for field in trusted.split("\t") if ":" in field)
+    if fields.get("version") != version:
+        raise ValueError(f"signed for version {fields.get('version')}, not {version}")
 
 
 def main() -> int:
@@ -31,8 +55,8 @@ def main() -> int:
     p.add_argument("--version", required=True)
     p.add_argument("--url", required=True)
     p.add_argument("--signature-file", required=True)
-    # Several keys share one artifact where that is genuinely true — both Apple
-    # architectures run the same universal bundle.
+    # Several keys may share one artifact where that is genuinely true, as both
+    # Apple architectures would with a universal bundle.
     p.add_argument("--platform", action="append", required=True, dest="platforms")
     p.add_argument("--notes", default="See the release notes on GitHub.")
     args = p.parse_args()
@@ -41,6 +65,11 @@ def main() -> int:
         signature = f.read().strip()
     if not signature:
         print(f"ERROR: {args.signature_file} is empty; the build was not signed.", file=sys.stderr)
+        return 1
+    try:
+        check_signature(signature, args.version)
+    except ValueError as error:
+        print(f"ERROR: {args.signature_file}: {error}.", file=sys.stderr)
         return 1
 
     manifest = {}
