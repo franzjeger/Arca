@@ -31,7 +31,7 @@ export function SshImportPanel({
   onImported,
   onClose,
 }: {
-  onImported: (id: string) => void;
+  onImported: (ids: string[]) => void;
   onClose: () => void;
 }) {
   const [found, setFound] = useState<FoundSshKey[] | null>(null);
@@ -74,7 +74,7 @@ export function SshImportPanel({
       );
       setPassphrases({});
       if (result.failed.length === 0 && result.ids.length > 0) {
-        onImported(result.ids[0]);
+        onImported(result.ids);
         return;
       }
       setFailed(result.failed);

@@ -70,7 +70,7 @@ describe("SshImportPanel", () => {
       { file: "id_ed25519", passphrase: undefined },
       { file: "homelab", passphrase: "secret" },
     ]);
-    await waitFor(() => expect(onImported).toHaveBeenCalledWith("a"));
+    await waitFor(() => expect(onImported).toHaveBeenCalledWith(["a", "b"]));
   });
 
   it("stays open and says which files were not taken, and why", async () => {

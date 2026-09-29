@@ -18,6 +18,7 @@ import { GearIcon } from "./icons";
 import { ImportDialog } from "./ImportDialog";
 import { RestoreDialog } from "./RestoreDialog";
 import { DuplicatesDialog } from "./DuplicatesDialog";
+import { SshImportDialog } from "./SshKeyDialog";
 import { BackupRestoreDialog } from "./BackupRestoreDialog";
 import { toastError, type ToastMessage } from "../lib/toast";
 
@@ -58,6 +59,7 @@ export function SettingsDialog({
   const [importOpen, setImportOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  const [sshImportOpen, setSshImportOpen] = useState(false);
   const [backupRestoreOpen, setBackupRestoreOpen] = useState(false);
   // null = not checked yet / up to date; set once an update is actually offered.
   const [update, setUpdate] = useState<{ version: string } | null>(null);
@@ -542,6 +544,19 @@ export function SettingsDialog({
               </button>
             </Row>
             <Row
+              label="Import SSH keys"
+              hint="Ed25519 keys from ~/.ssh on this computer, with their passphrases. A key Arca already has is recognised by its fingerprint and not taken twice."
+            >
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setSshImportOpen(true)}
+                className="rounded-lg border border-hairline px-3 py-1.5 text-[13px] text-neutral-200 hover:bg-fill/5 disabled:opacity-50"
+              >
+                Import…
+              </button>
+            </Row>
+            <Row
               label="Export passwords"
               hint="Writes every login to a plaintext CSV (re-importable). Requires your master password or system verification. Keep the file safe and delete it once you're done — anyone who reads it sees all your passwords."
             >
@@ -659,6 +674,16 @@ export function SettingsDialog({
             </Row>
           </fieldset>
           </div>
+        )}
+        {sshImportOpen && (
+          <SshImportDialog
+            onClose={() => setSshImportOpen(false)}
+            onImported={(ids) => {
+              setSshImportOpen(false);
+              onToast(`Imported ${ids.length} SSH key${ids.length === 1 ? "" : "s"}`);
+              onStatusChanged();
+            }}
+          />
         )}
         {duplicatesOpen && (
           <DuplicatesDialog
