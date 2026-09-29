@@ -17,6 +17,7 @@ import {
 import { GearIcon } from "./icons";
 import { ImportDialog } from "./ImportDialog";
 import { RestoreDialog } from "./RestoreDialog";
+import { DuplicatesDialog } from "./DuplicatesDialog";
 import { BackupRestoreDialog } from "./BackupRestoreDialog";
 import { toastError, type ToastMessage } from "../lib/toast";
 
@@ -56,6 +57,7 @@ export function SettingsDialog({
   useEffect(() => { void api.appInfo().then(setInfo).catch(() => {}); }, []);
   const [importOpen, setImportOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [backupRestoreOpen, setBackupRestoreOpen] = useState(false);
   // null = not checked yet / up to date; set once an update is actually offered.
   const [update, setUpdate] = useState<{ version: string } | null>(null);
@@ -407,29 +409,15 @@ export function SettingsDialog({
             </Row>}
             <Row
               label="Find & merge duplicates"
-              hint="Combines logins that share the same site and username. The newest password wins, TOTP codes and notes are kept, and the extras go to the Trash (recoverable)."
+              hint="Shows logins saved more than once, and which one is kept, before anything is merged. The others go to the Trash, and their passwords stay in the kept login's history."
             >
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => {
-                  setBusy(true);
-                  api
-                    .mergeDuplicates()
-                    .then((n) => {
-                      onToast(
-                        n > 0
-                          ? `Merged ${n} duplicate${n === 1 ? "" : "s"} (moved to Trash)`
-                          : "No duplicates found",
-                      );
-                      if (n > 0) onStatusChanged();
-                    })
-                    .catch((e) => onToast(toastError(errorMessage(e))))
-                    .finally(() => setBusy(false));
-                }}
+                onClick={() => setDuplicatesOpen(true)}
                 className="rounded-lg border border-hairline px-3 py-1.5 text-[13px] text-neutral-200 hover:bg-fill/5 disabled:opacity-50"
               >
-                Merge…
+                Find…
               </button>
             </Row>
             <Row
@@ -671,6 +659,20 @@ export function SettingsDialog({
             </Row>
           </fieldset>
           </div>
+        )}
+        {duplicatesOpen && (
+          <DuplicatesDialog
+            onClose={() => setDuplicatesOpen(false)}
+            onMerged={(merged) => {
+              setDuplicatesOpen(false);
+              onToast(
+                merged > 0
+                  ? `Merged ${merged} duplicate${merged === 1 ? "" : "s"} (moved to Trash)`
+                  : "Nothing was merged",
+              );
+              if (merged > 0) onStatusChanged();
+            }}
+          />
         )}
         {restoreOpen && (
           <RestoreDialog

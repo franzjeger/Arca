@@ -58,7 +58,11 @@ try {
         copyPasswordHistory: async () => { window.historyCopied = true; },
         restorePasswordHistory: async () => { window.historyRestored = true; },
         listSnapshots: async () => [],
-        mergeDuplicates: async () => 0,
+        findDuplicates: async () => [{ possible: false, keep: 'dup-new', logins: [
+          { id: 'dup-new', revision: 'rev-new', title: 'Example account', site: 'example.test', username: 'test@example.test', modifiedAt: 2, password: 0, hasPassword: true, hasTotp: false, hasNotes: false },
+          { id: 'dup-old', revision: 'rev-old', title: 'Example account', site: 'example.test', username: 'test@example.test', modifiedAt: 1, password: 1, hasPassword: true, hasTotp: true, hasNotes: false },
+        ] }],
+        mergeDuplicates: async (choices, shown) => { window.mergedDuplicates = { choices, shown }; return 1; },
       };
     `,
   }));
@@ -72,10 +76,20 @@ try {
     await page.keyboard.press('Tab');
     assert(await settings.evaluate(el => el.contains(document.activeElement)), 'Tab escaped Settings');
   }
+  // Duplicates are shown, and which login is kept, before anything is merged.
+  await settings.getByRole('button', { name: 'Find…', exact: true }).click();
+  const duplicates = page.getByRole('dialog', { name: 'Duplicate logins' });
+  await duplicates.getByText('Different password').waitFor();
+  await duplicates.getByRole('button', { name: 'Merge 1 group', exact: true }).click();
+  await duplicates.waitFor({ state: 'detached' });
+  assert.deepEqual(await page.evaluate(() => window.mergedDuplicates), {
+    choices: [{ keep: 'dup-new', ids: ['dup-new', 'dup-old'] }],
+    shown: [{ id: 'dup-new', revision: 'rev-new' }, { id: 'dup-old', revision: 'rev-old' }],
+  });
   // A modal dialog is in the top layer, above every z-index: a result raised
   // from inside one must be drawn in front of it, or the button looks dead.
-  await settings.getByRole('button', { name: 'Merge…', exact: true }).click();
-  const merged = settings.getByRole('status').filter({ hasText: 'No duplicates found' });
+  // This one is raised as the review closes, so it must land in Settings.
+  const merged = settings.getByRole('status').filter({ hasText: 'Merged 1 duplicate (moved to Trash)' });
   await merged.waitFor();
   assert(await merged.evaluate(el => {
     el.style.pointerEvents = 'auto';

@@ -177,17 +177,6 @@ pub fn find_duplicate_logins(items: &[Item]) -> Vec<DuplicateGroup> {
         .collect()
 }
 
-/// Merge every group of the same account into the login it keeps by default,
-/// without review. Returns the number of items merged away (soft-deleted into
-/// the Trash).
-pub fn merge_duplicate_logins(items: &mut [Item], now_unix_millis: i64) -> usize {
-    find_duplicate_logins(items)
-        .into_iter()
-        .filter(|group| group.likeness == Likeness::Same)
-        .map(|group| merge_logins(items, &group.ids, group.keep, now_unix_millis))
-        .sum()
-}
-
 /// Merge the active logins among `ids` into `keep`: the others go to the
 /// Trash, and their passwords, TOTP and notes as the policy above says.
 /// Returns how many were merged away; none when `keep` is not an active login.
@@ -296,6 +285,16 @@ fn keep_passwords(winner: &mut Item, earlier: Vec<PasswordRevision>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Merge every group of the same account into the login it keeps by
+    /// default: the whole policy, without a review in between.
+    fn merge_duplicate_logins(items: &mut [Item], now_unix_millis: i64) -> usize {
+        find_duplicate_logins(items)
+            .into_iter()
+            .filter(|group| group.likeness == Likeness::Same)
+            .map(|group| merge_logins(items, &group.ids, group.keep, now_unix_millis))
+            .sum()
+    }
 
     fn login(user: &str, url: &str, pw: &str, modified: i64) -> Item {
         titled(url, user, url, pw, modified)

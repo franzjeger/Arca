@@ -10,6 +10,7 @@ mod bridge;
 mod clipboard;
 mod commands;
 mod conflicts;
+mod duplicates;
 mod keyfile_unlock;
 mod pending_change;
 #[cfg(target_os = "macos")]
@@ -342,7 +343,8 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::sync_acknowledge_rollback,
         commands::sync_now,
         commands::sync_bootstrap,
-        commands::merge_duplicates,
+        duplicates::find_duplicates,
+        duplicates::merge_duplicates,
         commands::list_snapshots,
         commands::restore_snapshot,
         commands::export_vault_backup,

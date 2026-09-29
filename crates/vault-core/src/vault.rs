@@ -931,17 +931,6 @@ impl Vault {
         ))
     }
 
-    /// Merge duplicate active logins (same host + username): the newest wins,
-    /// TOTP/notes are adopted, losers are soft-deleted. Returns how many items
-    /// were merged away. Requires the vault to be unlocked.
-    pub fn merge_duplicate_logins(&mut self, now_unix_millis: i64) -> Result<usize> {
-        let before = self.unlocked_items()?.clone();
-        let merged =
-            crate::dedupe::merge_duplicate_logins(self.unlocked_items_mut()?, now_unix_millis);
-        self.advance_changed(&before)?;
-        Ok(merged)
-    }
-
     /// Logins that look like one account, for someone to review before any
     /// are merged. See [`crate::dedupe::find_duplicate_logins`].
     pub fn find_duplicate_logins(&self) -> Result<Vec<crate::dedupe::DuplicateGroup>> {
