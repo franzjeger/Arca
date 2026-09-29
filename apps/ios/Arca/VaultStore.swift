@@ -200,7 +200,20 @@ final class VaultStore {
     /// Unlock with the stored device key, behind Face ID / Touch ID.
     func unlockWithDeviceKey() async {
         await open(fallback: "Couldn't unlock with Face ID.") {
-            try await VaultSession.openWithDeviceKey(reason: "unlock your Arca vault")
+            do {
+                return try await VaultSession.openWithDeviceKey(reason: "unlock your Arca vault")
+            } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
+                // The device key only opens a file the vault key has sealed.
+                // One from before authenticated containers (an older build's)
+                // needs the master password once, which also upgrades it.
+                throw NeedsMasterPassword()
+            }
+        }
+    }
+
+    private struct NeedsMasterPassword: LocalizedError {
+        var errorDescription: String? {
+            "Face ID can't open this vault until your master password has, once. Enter it above; Face ID works again after that."
         }
     }
 

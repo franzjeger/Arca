@@ -376,9 +376,10 @@ fn title_from(url: &str, username: &str) -> String {
     }
 }
 
-/// Parse a password-export CSV (Chrome/Brave/Edge, Apple Passwords, Firefox, and
-/// common generic layouts) by mapping header names case-insensitively. Returns
-/// the parsed logins plus the count of skipped (blank / credential-less) rows.
+/// Parse a password-export CSV (Chrome/Brave/Edge, Apple Passwords, Firefox,
+/// Bitwarden, and common generic layouts) by mapping header names
+/// case-insensitively. Returns the parsed logins plus the count of skipped
+/// (blank / credential-less) rows.
 fn parse_logins_csv(text: &str) -> (Vec<ParsedLogin>, usize) {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
@@ -400,7 +401,7 @@ fn parse_logins_csv(text: &str) -> (Vec<ParsedLogin>, usize) {
             }
             "password" | "pwd" | "login_password" => _ = map.password.get_or_insert(i),
             "notes" | "note" | "comment" | "comments" => _ = map.notes.get_or_insert(i),
-            "otpauth" | "otp" | "totp" | "otp_auth" | "totpauth" | "2fa" => {
+            "otpauth" | "otp" | "totp" | "otp_auth" | "totpauth" | "2fa" | "login_totp" => {
                 _ = map.totp.get_or_insert(i)
             }
             _ => {}

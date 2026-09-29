@@ -1,6 +1,6 @@
 # Coordinated release and validation
 
-Arca 0.6.2 uses authenticated `SYBRVLT5` containers and C ABI v16. Desktop,
+Arca 0.7.0 uses authenticated `SYBRVLT7` containers and C ABI v20. Desktop,
 Apple targets and the browser extension advertise the same application version;
 `scripts/check-versions.py` prevents accidental divergence. The desktop About
 row includes the Git build identifier to distinguish locally built binaries.
@@ -18,17 +18,18 @@ row includes the Git build identifier to distinguish locally built binaries.
    runner blocks release; local tests do not override the gate. The keychain
    step within the OS smoke job remains best-effort; physical-device
    acceptance below is still required.
-2. Build/sign the matching desktop and iOS artifacts. Check V1–V4 unlock/migration
-   and a V5 backup restore on copies of test vaults, including wrong-password and
-   modified-container rejection. Keep a pre-upgrade encrypted backup.
+2. Build/sign the matching desktop and iOS artifacts. Check V1–V6 unlock and
+   migration to V7, and restoring a backup made by 0.6.x, on copies of test
+   vaults, including wrong-password and modified-container rejection. Keep a
+   pre-upgrade encrypted backup.
 3. On a physical phone, execute the [iOS release checks](IOS.md#release-verification).
    On desktop, check keyboard-only dialogs, clipboard expiry, repeated launches,
    failed settings writes, missing backup drive and backup verification/restore.
 4. Test concurrent real Google Drive changes on desktop and phone, offline edits,
    retries, account disconnect/reconnect and restoring into a disconnected vault.
 5. Publish matching installers with the compatibility note. Update every device
-   before sharing a V5 file; older published clients may refuse to open it. A
-   local desktop install does not update a phone or constitute a public release.
+   before sharing a V7 file; 0.6.x and earlier refuse to open it. A local
+   desktop install does not update a phone or constitute a public release.
 
 CI produces build/test evidence, not a physical-device certification or an
 independent security audit. Record those results against the release commit;
@@ -47,6 +48,9 @@ results, and pass/fail evidence. Automated tests do not close these rows.
 | Lock on desktop | For login, note, Wi-Fi and bookmark editors, try manual, idle and blur locks with synthetic unsaved secrets. Editors close and do not reopen or restore drafts after either UI or external unlock. Save a generated password before switching apps. Verify copied Arca data clears on lock/expiry while a subsequent unrelated clipboard value survives. This does not prove heap erasure or removal from clipboard history. |
 | Backup/restore on disposable data | Create and verify an encrypted backup; change the test vault, disconnect sync, restore and compare items. Check wrong password and modified/truncated backup rejection leaves the current vault intact. Test a missing backup drive and recovery, and verify the pre-restore snapshot. |
 | Real Google Drive, desktop and physical iPhone | Make distinct edits offline on both devices, reconnect in both orders and verify convergence. Edit the same item concurrently; verify conflict visibility, resolution and retained alternatives. Interrupt a push, retry, restart and verify no lost edits. Test account disconnect/reconnect and refusal to restore while connected. |
+| Master password change across devices | Change it on one desktop. The other desktops and the iPhone ask for the new password once on their next sync; a locked desktop or iPhone opens with it directly. Touch ID or Windows Hello, Face ID and a plugged-in USB key come back without another setup; a USB key that was out asks for the password once. No device reports lost changes afterwards. |
+| iPhone updated from an older build | Install over the previous build with quick unlock on. The first unlock asks for the master password once if the vault predates authenticated containers, with no repeated Face ID prompt; after it has synced, Face ID opens the vault again. |
+| Synced devices | After every device has synced, desktop Settings and iOS Options → Synced devices list each one, with a recent time and this device marked. |
 | Autofill/platform release | On physical Linux, exercise in-page fill with the installed native host and extension in the browsers actually used, including wrong-origin and locked-vault refusal. On physical iOS, run the linked release checks for the matching sideloaded build. Test Windows install/update and autofill before claiming release readiness there. |
 
 Prioritize the current desktop and iPhone workflows, recovery and sync first,
