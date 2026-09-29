@@ -77,6 +77,14 @@ ASC_AUTH=(
   -authenticationKeyIssuerID "$ISSUER_ID"
 )
 
+# The Xcode project is generated from apps/ios/project.yml and is not checked
+# in, so the copy on disk is whatever the last build generated. Archiving that
+# ships its settings, not this commit's: a project generated the day before
+# still said 0.6.2 when the source said 0.7.0.
+step "Generating the Xcode project from apps/ios/project.yml"
+command -v xcodegen >/dev/null || die "xcodegen is required (brew install xcodegen)."
+(cd apps/ios && xcodegen generate >/dev/null) || die "xcodegen failed"
+
 step "Archiving"
 xcodebuild -project apps/ios/Arca.xcodeproj -scheme Arca -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
@@ -84,6 +92,15 @@ xcodebuild -project apps/ios/Arca.xcodeproj -scheme Arca -configuration Release 
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
   archive
 [ -d "$ARCHIVE" ] || die "no archive at $ARCHIVE"
+
+# The version the phone shows is the archive's. It must be the one every other
+# package says, which scripts/check-versions.py keeps in step.
+EXPECTED_VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+ARCHIVED_VERSION="$(/usr/libexec/PlistBuddy \
+  -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$ARCHIVE/Info.plist")"
+[ "$ARCHIVED_VERSION" = "$EXPECTED_VERSION" ] \
+  || die "the archive says $ARCHIVED_VERSION, the source says $EXPECTED_VERSION."
+echo "   version $ARCHIVED_VERSION ($BUILD_NUMBER)"
 
 # Export signs MANUALLY, against a certificate and profiles this machine owns.
 #
