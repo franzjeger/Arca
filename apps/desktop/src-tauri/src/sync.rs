@@ -21,7 +21,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use vault_sync::drive::{arca_credentials, sync_configured, DriveStore, RefreshTokenStore};
 use vault_sync::oauth::{OAuthClient, Pkce};
-use vault_sync::{LocalError, LocalVault, RemoteStore, SyncEngine, SyncObserver, SyncStatus};
+use vault_sync::{
+    LocalError, LocalVault, Push, RemoteStore, SyncEngine, SyncObserver, SyncStatus, ThisDevice,
+};
 use zeroize::Zeroizing;
 
 use crate::state::AppState;
@@ -61,10 +63,11 @@ impl RefreshTokenStore for KeychainTokens {
 /// The vault inside the app's shared state.
 struct AppStateVault {
     app: AppHandle,
+    device: ThisDevice,
 }
 
 impl LocalVault for AppStateVault {
-    fn merge_and_serialize(&self, remotes: &[Vec<u8>]) -> Result<Vec<u8>, LocalError> {
+    fn merge_and_serialize(&self, remotes: &[Vec<u8>], whole: bool) -> Result<Push, LocalError> {
         // Held across the merge and the save so no command can write the vault
         // underneath us. No network happens inside this lock.
         let state = self.app.state::<Mutex<AppState>>();
@@ -72,14 +75,19 @@ impl LocalVault for AppStateVault {
             .lock()
             .map_err(|_| LocalError::Save("app state poisoned".into()))?;
         let AppState { store, vault, .. } = &mut *guard;
-        let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
-            // Locked: merging needs the key. Not an error — the engine defers.
+        let Some(vault) = vault.as_mut() else {
             return Err(LocalError::Locked);
         };
-        merge_and_save(vault, store, remotes)?;
-        vault
+        if !vault.is_unlocked() {
+            // Merging needs the key, so the engine defers — unless the password
+            // changed elsewhere, which the lock screen needs to know.
+            return Err(vault_sync::locked(vault, remotes));
+        }
+        let behind = merge_and_save(vault, store, remotes, whole, &self.device)?;
+        let bytes = vault
             .to_bytes()
-            .map_err(|e| LocalError::Save(e.to_string()))
+            .map_err(|e| LocalError::Save(e.to_string()))?;
+        Ok(Push { bytes, behind })
     }
 }
 
@@ -87,17 +95,66 @@ fn merge_and_save(
     vault: &mut vault_core::Vault,
     store: &vault_store::VaultStore,
     remotes: &[Vec<u8>],
-) -> Result<(), LocalError> {
+    whole: bool,
+    device: &ThisDevice,
+) -> Result<Vec<vault_core::Device>, LocalError> {
     let before = vault.clone();
-    let result = vault_sync::merge_remotes(vault, remotes).and_then(|()| {
+    let result = vault_sync::prepare_push(vault, remotes, whole, Some(device)).and_then(|behind| {
         store
             .save_synced(vault)
-            .map_err(|e| LocalError::Save(e.to_string()))
+            .map_err(|e| LocalError::Save(e.to_string()))?;
+        Ok(behind)
     });
     if result.is_err() {
         *vault = before;
     }
-    result.map(|_| ())
+    result
+}
+
+/// This installation as it records itself in the copies it pushes: a random
+/// id kept in `device-id` next to the vault, which never syncs, and the name
+/// the user gave the computer.
+fn this_device(app: &AppHandle) -> ThisDevice {
+    let path = app
+        .state::<Mutex<AppState>>()
+        .lock()
+        .ok()
+        .map(|st| st.store.path().with_file_name("device-id"));
+    let stored = path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|id| uuid::Uuid::parse_str(id.trim()).ok());
+    let id = stored.unwrap_or_else(|| {
+        let id = uuid::Uuid::new_v4();
+        // Unsaved, this id lasts until Arca quits: the next launch counts as
+        // another device, which is untidy but loses nothing.
+        if let Some(path) = &path {
+            let _ = vault_store::write_atomic(path, id.to_string().as_bytes());
+        }
+        id
+    });
+    ThisDevice {
+        id,
+        name: computer_name(),
+    }
+}
+
+/// The computer's name as the user set it, or a plain description.
+fn computer_name() -> String {
+    #[cfg(target_os = "macos")]
+    let name = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok());
+    #[cfg(target_os = "windows")]
+    let name = std::env::var("COMPUTERNAME").ok();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let name = std::fs::read_to_string("/etc/hostname").ok();
+    name.map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "This computer".to_string())
 }
 
 /// Sync progress as webview events.
@@ -124,6 +181,8 @@ struct Sync {
     /// The same store the engine holds, kept concretely so sign-in can seed the
     /// access token and read the account label.
     drive: Arc<DriveStore>,
+    /// This computer, as the copies it pushes name it.
+    device: ThisDevice,
 }
 
 /// One vault, one sync loop, one process. A global because [`mark_dirty`] is
@@ -138,12 +197,20 @@ fn sync(app: &AppHandle) -> &'static Sync {
             arca_credentials(),
             Arc::new(KeychainTokens),
         ));
+        let device = this_device(app);
         let engine = Arc::new(SyncEngine::new(
             drive.clone(),
-            Arc::new(AppStateVault { app: app.clone() }),
+            Arc::new(AppStateVault {
+                app: app.clone(),
+                device: device.clone(),
+            }),
             Arc::new(TauriEvents { app: app.clone() }),
         ));
-        Sync { engine, drive }
+        Sync {
+            engine,
+            drive,
+            device,
+        }
     })
 }
 
@@ -157,6 +224,19 @@ pub fn mark_dirty() {
     }
 }
 
+/// The copy sealed by a master password change made on another device, while
+/// sync waits for its password (see `rotation::adopt`).
+pub fn rotated_copy() -> Option<Vec<u8>> {
+    SYNC.get()?.engine.rotated_copy()
+}
+
+/// The vault took that change on: stop asking, and push it.
+pub fn rotation_adopted() {
+    if let Some(sync) = SYNC.get() {
+        sync.engine.rotation_adopted();
+    }
+}
+
 /// Sync status as the webview sees it.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +247,10 @@ pub struct SyncStatusDto {
     pub account: Option<String>,
     pub last_sync_unix: Option<u64>,
     pub last_error: Option<String>,
+    /// The master password was changed on another device; see [`rotated_copy`].
+    pub needs_password: bool,
+    /// Devices whose latest changes Drive had lost, until the user has seen it.
+    pub rolled_back: Vec<String>,
 }
 
 impl From<&SyncStatus> for SyncStatusDto {
@@ -178,8 +262,47 @@ impl From<&SyncStatus> for SyncStatusDto {
             account: s.account.clone(),
             last_sync_unix: s.last_sync_unix,
             last_error: s.last_error.clone(),
+            needs_password: s.needs_password,
+            rolled_back: s.rolled_back.clone(),
         }
     }
+}
+
+/// A device that pushes this vault, as Settings lists it.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDto {
+    pub name: String,
+    /// When it last pushed, by its own clock (Unix ms).
+    pub last_upload: i64,
+    pub this_device: bool,
+}
+
+/// Every device that pushes this vault, this one first. Empty while locked.
+pub fn devices(app: &AppHandle) -> Vec<DeviceDto> {
+    let me = sync(app).device.id;
+    let state = app.state::<Mutex<AppState>>();
+    let Ok(st) = state.lock() else {
+        return Vec::new();
+    };
+    let Some(Ok(devices)) = st.vault.as_ref().map(vault_core::Vault::devices) else {
+        return Vec::new();
+    };
+    let mut list: Vec<DeviceDto> = devices
+        .iter()
+        .map(|d| DeviceDto {
+            name: d.name.clone(),
+            last_upload: d.last_upload,
+            this_device: d.id == me,
+        })
+        .collect();
+    list.sort_by_key(|d| (!d.this_device, -d.last_upload));
+    list
+}
+
+/// The user has seen that Drive went back in time.
+pub fn acknowledge_rollback(app: &AppHandle) {
+    sync(app).engine.acknowledge_rollback();
 }
 
 /// Status DTO for the UI.
@@ -192,12 +315,14 @@ pub fn sync_now(app: &AppHandle) -> Result<bool, String> {
     sync(app).engine.sync_now()
 }
 
-/// Background loop: a cycle every [`SYNC_INTERVAL`]. Errors land in the status
-/// (shown in Settings), never fatal.
+/// Background loop: a cycle at launch and every [`SYNC_INTERVAL`] after.
+/// Errors land in the status (shown in Settings), never fatal. The first one
+/// runs at once, locked or not: a password changed on another device should
+/// be on the lock screen before the user types the old one.
 pub fn start_loop(app: AppHandle) {
     std::thread::spawn(move || loop {
-        std::thread::sleep(SYNC_INTERVAL);
         let _ = sync_now(&app);
+        std::thread::sleep(SYNC_INTERVAL);
     });
 }
 
@@ -282,17 +407,28 @@ pub fn bootstrap(app: &AppHandle, master_password: &str) -> Result<(), String> {
     // Network and key derivation happen BEFORE the state lock: nothing below
     // may stall the UI's other commands behind a download or an Argon2id run.
     let files = sync.drive.list().map_err(|e| e.to_string())?;
-    // Oldest first (the `list` contract): after a historical create race the
-    // oldest file is the lineage every other device converged on.
-    let Some(primary) = files.first() else {
+    if files.is_empty() {
         return Err("No vault was found in this Google account.".into());
-    };
-    let bytes = sync
-        .drive
-        .download(&primary.id)
-        .map_err(|e| e.to_string())?;
-    let mut vault = vault_core::Vault::from_bytes(&bytes)
-        .map_err(|_| "The synced file could not be read as a vault.".to_string())?;
+    }
+    // The copy from the latest master password change, whose password is the
+    // one the user knows. Otherwise the oldest (the `list` order): after a
+    // historical create race, that is the lineage every device converged on.
+    let mut newest: Option<vault_core::Vault> = None;
+    for file in &files {
+        let bytes = sync.drive.download(&file.id).map_err(|e| e.to_string())?;
+        let Ok(copy) = vault_core::Vault::from_bytes(&bytes) else {
+            continue;
+        };
+        let newer = match &newest {
+            Some(kept) => copy.header().key_epoch > kept.header().key_epoch,
+            None => true,
+        };
+        if newer {
+            newest = Some(copy);
+        }
+    }
+    let mut vault =
+        newest.ok_or_else(|| "The synced file could not be read as a vault.".to_string())?;
     vault.unlock(master_password).map_err(|e| match e {
         // In this flow a decryption failure has exactly one human meaning.
         vault_core::Error::Decryption => "Wrong master password for the synced vault.".to_string(),
@@ -400,7 +536,16 @@ mod persistence_tests {
         );
         let id = item.id;
         remote.upsert_item(item).unwrap();
-        assert!(merge_and_save(&mut local, &store, &[remote.to_bytes().unwrap()]).is_err());
+        let device = ThisDevice {
+            id: uuid::Uuid::new_v4(),
+            name: "test".into(),
+        };
+        let remotes = [remote.to_bytes().unwrap()];
+        assert!(merge_and_save(&mut local, &store, &remotes, true, &device).is_err());
         assert!(local.get_item(id).is_err());
+        assert!(
+            local.devices().unwrap().is_empty(),
+            "the upload was not recorded"
+        );
     }
 }

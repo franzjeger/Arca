@@ -80,11 +80,16 @@ enum VaultShared {
     /// the existing secret, "" clears it — because the detail surface never
     /// hands the secret out, so a client editing a login could not round-trip
     /// it and every phone edit destroyed the code; v17 did the same for notes,
-    /// which the phone's login editor never shows.
+    /// which the phone's login editor never shows; v18 gave every master
+    /// password change a new vault key, with `vault_ffi_sync_adopt_password`
+    /// for taking on one made on another device; v19 added
+    /// `vault_ffi_vault_load`, so a locked phone can take that change on with
+    /// the new password alone; v20 made every copy say how often each device
+    /// has pushed it (`vault_ffi_sync_set_device`, `vault_ffi_devices`).
     /// Bump this in the SAME commit that bumps `ABI_VERSION`: nothing compiles
     /// against it, so a stale value is only ever caught at runtime, by this
     /// guard, on a device.
-    static let requiredAbiVersion: Int32 = 17
+    static let requiredAbiVersion: Int32 = 20
 
     // MARK: Password generation
 
@@ -363,6 +368,11 @@ enum VaultFFICode {
     static let panicked: Int32 = -6
     static let decryptionFailed: Int32 = -7
     static let badKeyLength: Int32 = -8
+    /// The file was sealed after a master password change this handle has
+    /// not taken on (ABI v18).
+    static let passwordChanged: Int32 = -10
+    /// The password opens a file that is not this vault's (ABI v18).
+    static let differentVault: Int32 = -11
 }
 
 /// Everything that can go wrong reaching or opening the shared vault.
@@ -407,6 +417,10 @@ extension VaultError: LocalizedError {
             return "That key doesn't open this vault. If you changed your master password, unlock Arca once on this device."
         case .ffi(let code, _) where code == VaultFFICode.notFound:
             return "That login is no longer in your vault."
+        case .ffi(let code, _) where code == VaultFFICode.passwordChanged:
+            return "Your master password was changed on another device. Open Arca and enter the new one."
+        case .ffi(let code, _) where code == VaultFFICode.differentVault:
+            return "That password opens a different vault, not this one."
         case .ffi, .malformedIdentities:
             return "Couldn't read your vault."
         case .abiMismatch:
@@ -598,6 +612,15 @@ struct VaultTotp: Decodable {
     let remaining: UInt64
 }
 
+/// A device that syncs this vault, as `vault_ffi_devices` lists it.
+struct VaultDevice: Decodable, Sendable, Identifiable, Equatable {
+    let id: String
+    let name: String
+    let uploads: UInt64
+    /// When it last pushed a copy, by its own clock (Unix ms).
+    let lastUpload: Int64
+}
+
 /// One login identity (metadata only) as produced by `vault_ffi_identities`.
 struct VaultIdentity: Decodable, Sendable, Identifiable {
     let id: String
@@ -694,6 +717,25 @@ final class VaultSession: @unchecked Sendable {
             }
             guard code == VaultFFICode.ok, let handle else {
                 throw VaultError.ffi(code: code, operation: "vault_open_password")
+            }
+            return VaultSession(handle: handle)
+        }
+    }
+
+    /// The shared vault, loaded but NOT open: nothing can be read through it
+    /// until a master password changed on another device opens it (see
+    /// `openWithChangedPassword`). Only for that.
+    static func loadLocked() async throws -> VaultSession {
+        try await Self.run {
+            try Self.checkAbi()
+            let vaultBytes = try VaultShared.loadVault()
+            var handle: OpaquePointer?
+            let code = vaultBytes.withUnsafeBytes { vault in
+                vault_ffi_vault_load(
+                    vault.bindMemory(to: UInt8.self).baseAddress, vault.count, &handle)
+            }
+            guard code == VaultFFICode.ok, let handle else {
+                throw VaultError.ffi(code: code, operation: "vault_load")
             }
             return VaultSession(handle: handle)
         }
@@ -1357,6 +1399,26 @@ final class VaultSession: @unchecked Sendable {
             }
             defer { vault_ffi_free(vault, vaultLength) }
             try VaultShared.writeVault(Data(bytes: vault, count: vaultLength))
+        }
+    }
+
+    /// Every device that syncs this vault, as far as this copy knows.
+    func devices() async throws -> [VaultDevice] {
+        try await Self.run {
+            var json: UnsafeMutablePointer<UInt8>?
+            var length = 0
+            let code = vault_ffi_devices(self.handle, &json, &length)
+            guard code == VaultFFICode.ok else {
+                throw VaultError.ffi(code: code, operation: "devices")
+            }
+            guard let json else { return [] }
+            defer { vault_ffi_free(json, length) }
+            do {
+                return try JSONDecoder()
+                    .decode([VaultDevice].self, from: Data(bytes: json, count: length))
+            } catch {
+                throw VaultError.malformedIdentities
+            }
         }
     }
 

@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 default-run = "vault-desktop"
 
 [build-dependencies]
@@ -25,7 +26,7 @@ tauri-plugin-dialog = "2"
 serde.workspace = true
 serde_json.workspace = true
 vault-core.workspace = true
-vault-bridge-auth.workspace = true
+vault-bridge.workspace = true
 vault-store.workspace = true
 # macOS App Group container resolution (Foundation containerURL), isolated so
 # this crate keeps #![forbid(unsafe_code)].
@@ -66,8 +67,8 @@ tauri-plugin-single-instance = "2"
 [dev-dependencies]
 tempfile = "3"
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 

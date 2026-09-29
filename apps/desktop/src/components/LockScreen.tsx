@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage, isApiError, type VaultStatus } from "../lib/api";
+import { useSyncStatus } from "../hooks/useSyncStatus";
 import { KeyIcon, LockIcon, TouchIdIcon } from "./icons";
 
 export function LockScreen({
@@ -13,6 +14,11 @@ export function LockScreen({
   onUnlocked: () => void;
 }) {
   const creating = !status.exists;
+  // Sync saw the master password change on another device. The new password
+  // opens this vault as it is (see `sync_adopt_password`), so say so before
+  // the old one is typed out of habit.
+  const { status: sync } = useSyncStatus();
+  const passwordChanged = !creating && !!sync?.needsPassword;
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
@@ -227,13 +233,15 @@ export function LockScreen({
                 : "Sign in with the Google account your vault syncs to, then unlock it with its master password."
               : creating
                 ? "Your master password encrypts everything locally. It is never stored or sent anywhere. If you forget it, the vault cannot be recovered."
-                : keyFile
-                  ? keyPresent
-                    ? `Your USB key (${keyFile.volumeLabel}) is plugged in.`
-                    : `Plug in your USB key (${keyFile.volumeLabel}), or enter your master password.`
-                  : canBiometric
-                    ? "Use quick unlock, or enter your master password."
-                    : "Enter your master password to continue."}
+                : passwordChanged
+                  ? "Your master password was changed on another device. Enter the new one."
+                  : keyFile
+                    ? keyPresent
+                      ? `Your USB key (${keyFile.volumeLabel}) is plugged in.`
+                      : `Plug in your USB key (${keyFile.volumeLabel}), or enter your master password.`
+                    : canBiometric
+                      ? "Use quick unlock, or enter your master password."
+                      : "Enter your master password to continue."}
           </p>
         </div>
 

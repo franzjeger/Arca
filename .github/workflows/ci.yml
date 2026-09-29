@@ -419,6 +419,41 @@ jobs:
           done
           echo "ok: .rpm carries the same payload"
 
+  # Everything in vault-core that parses input Arca does not control: a synced
+  # vault file, a URL or password rules from a web page, an otpauth URI from a
+  # QR code. A minute per target on each pull request; a crash fails the job
+  # and leaves its input as an artifact.
+  fuzz:
+    name: fuzz the parsers of untrusted input
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name != 'push'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo-fuzz needs the sanitizer flags only nightly accepts; `+nightly`
+      # overrides rust-toolchain.toml for these commands alone.
+      - name: Install nightly Rust and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --version 0.13.2 --locked
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: fuzz
+      - name: Run every target for a minute
+        working-directory: fuzz
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            cargo +nightly fuzz run "$target" -- -max_total_time=60
+          done
+      - name: Keep what crashed
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
@@ -434,6 +469,11 @@ jobs:
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Run cargo-audit
         run: cargo audit
+      # Licenses, where code may come from, and duplicate crates: deny.toml.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      - name: Run cargo-deny
+        run: cargo deny check licenses bans sources
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22

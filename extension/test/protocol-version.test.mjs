@@ -13,16 +13,16 @@ const constant = (source, name) => {
   return Number(match[1]);
 };
 
-const bridgeAuth = read("crates/vault-bridge-auth/src/lib.rs");
+const bridgeCrate = read("crates/vault-bridge/src/lib.rs");
 const appBridge = read("apps/desktop/src-tauri/src/bridge.rs");
 const cli = read("apps/cli/src/main.rs");
 const nativeHost = read("extension/native-host/src/main.rs");
 const background = read("extension/chromium/background.js");
 
-// The bridge protocol has one definition, in vault-bridge-auth, which the app
+// The bridge protocol has one definition, in vault-bridge, which the app
 // and both clients compile against; a local copy is what could drift.
 const bridgeProtocol = Number(
-  bridgeAuth.match(/pub const PROTOCOL: u32 = (\d+);/)?.[1],
+  bridgeCrate.match(/pub const PROTOCOL: u32 = (\d+);/)?.[1],
 );
 assert.ok(bridgeProtocol, "the bridge protocol is declared once");
 for (const [name, source, local] of [
@@ -31,7 +31,7 @@ for (const [name, source, local] of [
   ["native host", nativeHost, "BRIDGE_PROTOCOL"],
 ]) {
   assert.ok(
-    source.includes("vault_bridge_auth::PROTOCOL"),
+    source.includes("vault_bridge::PROTOCOL"),
     `${name} uses the shared bridge protocol`,
   );
   assert.ok(

@@ -64,6 +64,24 @@ export interface SyncStatus {
   account: string | null;
   lastSyncUnix: number | null;
   lastError: string | null;
+  /** The master password was changed on another device; sync waits for it. */
+  needsPassword?: boolean;
+  /** Devices whose latest changes Drive had lost (it went back in time), until acknowledged. */
+  rolledBack?: string[];
+}
+
+/** A device that pushes this vault. */
+export interface SyncDevice {
+  name: string;
+  /** When it last pushed, by its own clock (Unix ms). */
+  lastUpload: number;
+  thisDevice: boolean;
+}
+
+/** What a master password change left behind. */
+export interface Rekeyed {
+  /** Quick unlock was on and is off now: macOS's Touch ID prompt was declined. */
+  quickUnlockLost: boolean;
 }
 
 export interface AppInfo {
@@ -385,10 +403,15 @@ export const api = {
     invoke<KeyFileStatus>("keyfile_configure", { lockOnRemoval }),
   keyfileUnlock: () => invoke<void>("keyfile_unlock"),
   changeMasterPassword: (newPassword: string, currentPassword?: string) =>
-    invoke<void>("change_master_password", { newPassword, currentPassword }),
+    invoke<Rekeyed>("change_master_password", { newPassword, currentPassword }),
+  /** Take on a master password change made on another device. Opens a locked vault too. */
+  syncAdoptPassword: (password: string) =>
+    invoke<Rekeyed>("sync_adopt_password", { password }),
   syncConnect: () => invoke<string>("sync_connect"),
   syncDisconnect: () => invoke<void>("sync_disconnect"),
   syncStatus: () => invoke<SyncStatus>("sync_status"),
+  syncDevices: () => invoke<SyncDevice[]>("sync_devices"),
+  syncAcknowledgeRollback: () => invoke<void>("sync_acknowledge_rollback"),
   syncNow: () => invoke<boolean>("sync_now"),
   /** First-run restore: adopt the vault in the signed-in Google account. */
   syncBootstrap: (masterPassword: string) =>

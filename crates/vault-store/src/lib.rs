@@ -229,8 +229,9 @@ impl VaultStore {
     /// Sync-aware save: if the file on disk changed since we last read/wrote it
     /// (a synced peer rewrote it), merge those changes into `vault` first so the
     /// peer's edits aren't clobbered, then persist the merged result. Returns
-    /// `true` if a merge happened. A foreign/corrupt external file surfaces as
-    /// an error (the peer's file is *not* overwritten).
+    /// `true` if a merge happened. A file that is not a readable vault is
+    /// replaced; a foreign, tampered or newer one surfaces as an error and is
+    /// *not* overwritten.
     pub fn save_synced(&self, vault: &mut Vault) -> Result<bool> {
         // Covers the complete read → merge → snapshot → atomic rename window.
         // Locking only the final write still lets two processes both merge the
@@ -243,10 +244,13 @@ impl VaultStore {
                 match vault.merge_remote(&current) {
                     Ok(()) => merged = true,
                     // Unparseable bytes — a corrupt file, or a cloud daemon's
-                    // in-progress partial write. It isn't a real vault, so
-                    // replacing it with ours is safe and, crucially, doesn't
-                    // wedge every future save behind a transient bad file.
-                    Err(vault_core::Error::Format) | Err(vault_core::Error::Serialization) => {}
+                    // in-progress partial write. Nothing in it was
+                    // authenticated, so replacing it with ours loses nothing
+                    // and doesn't wedge every future save behind a bad file.
+                    // A copy sealed with a key a password change replaced is
+                    // replaced too: like a peer's from before the change, it
+                    // is never merged (see `Vault::merge_remote`).
+                    Err(vault_core::Error::Format | vault_core::Error::StaleKey) => {}
                     // A well-formed but un-reconcilable file (a *different*
                     // vault's key, or we're locked): refuse rather than
                     // destroy a vault we can't safely merge.
@@ -291,17 +295,28 @@ impl VaultStore {
         // Stage the entire batch so corrupt/foreign input cannot partially
         // alter the live session. merge_remote authenticates every snapshot.
         let mut candidate = vault.clone();
-        for path in &paths {
-            candidate.merge_remote(&read_vault_file(path)?)?;
+        let mut imported = Vec::with_capacity(paths.len());
+        for path in paths {
+            match candidate.merge_remote(&read_vault_file(&path)?) {
+                Ok(()) => imported.push(path),
+                // Saved by an AutoFill session that opened the vault before a
+                // master password change. Nothing sealed with a replaced key
+                // is merged; it stays where it is rather than block the rest.
+                Err(vault_core::Error::StaleKey) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if imported.is_empty() {
+            return Ok(0);
         }
         self.save_synced(&mut candidate)?;
         // save_synced's mirror is best effort; acknowledgment is not.
         write_atomic(mirror, &candidate.to_bytes()?)?;
         *vault = candidate;
-        for path in &paths {
+        for path in &imported {
             std::fs::remove_file(path)?;
         }
-        Ok(paths.len())
+        Ok(imported.len())
     }
 
     // ----- quick unlock ---------------------------------------------------
@@ -686,12 +701,23 @@ mod tests {
         store.save(&v).unwrap();
 
         // A corrupt / partial file (e.g. a cloud daemon mid-write) must NOT
-        // wedge saving — it's not a real vault, so we replace it.
-        std::fs::write(store.path(), b"not a vault at all").unwrap();
-        assert!(!store.save_synced(&mut v).unwrap());
-        let mut reloaded = store.load().unwrap();
-        reloaded.unlock("pw").unwrap();
-        assert_eq!(reloaded.list_items(true).unwrap().len(), 1);
+        // wedge saving — it's not a real vault, so we replace it. That holds
+        // for our own container cut short, too.
+        let ours = std::fs::read(store.path()).unwrap();
+        for torn in [b"not a vault at all".as_slice(), &ours[..ours.len() / 2]] {
+            std::fs::write(store.path(), torn).unwrap();
+            assert!(!store.save_synced(&mut v).unwrap());
+            let mut reloaded = store.load().unwrap();
+            reloaded.unlock("pw").unwrap();
+            assert_eq!(reloaded.list_items(true).unwrap().len(), 1);
+        }
+
+        // A vault from a newer Arca is left exactly as it is.
+        let mut newer = b"SYBRVLT9".to_vec();
+        newer.extend_from_slice(&[0u8; 64]);
+        std::fs::write(store.path(), &newer).unwrap();
+        assert!(store.save_synced(&mut v).is_err());
+        assert_eq!(std::fs::read(store.path()).unwrap(), newer);
 
         // But a well-formed DIFFERENT vault (foreign key) is refused, not
         // clobbered.
@@ -702,6 +728,29 @@ mod tests {
         };
         std::fs::write(store.path(), &foreign).unwrap();
         assert!(store.save_synced(&mut v).is_err());
+    }
+
+    /// Written by a process that had not seen the password change: replaced,
+    /// like any copy sealed with a key the change replaced, never merged.
+    #[test]
+    fn save_synced_replaces_a_copy_from_before_a_password_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VaultStore::new(dir.path().join("v.vault"), "s", "a");
+        let mut v = Vault::create("pw", cheap_params()).unwrap();
+        let stale = {
+            let mut other = Vault::from_bytes(&v.to_bytes().unwrap()).unwrap();
+            other.unlock("pw").unwrap();
+            other.upsert_item(Item::new(login(), 10)).unwrap();
+            other.to_bytes().unwrap()
+        };
+        v.change_master_password("new").unwrap();
+        store.save(&v).unwrap();
+
+        std::fs::write(store.path(), &stale).unwrap();
+        assert!(!store.save_synced(&mut v).unwrap());
+        let mut reloaded = store.load().unwrap();
+        reloaded.unlock("new").unwrap();
+        assert!(reloaded.list_items(true).unwrap().is_empty());
     }
 
     #[test]

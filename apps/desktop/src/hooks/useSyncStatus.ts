@@ -27,6 +27,7 @@ export function syncLabel(status: SyncStatus | null): string {
   if (!status) return "Checking sync…";
   if (!status.connected) return "Saved locally · Sync off";
   if (status.syncing) return "Saved locally · Syncing…";
+  if (status.needsPassword) return "Saved locally · Sync needs the new master password";
   if (status.lastError) return "Saved locally · Sync needs attention";
   if (status.pending) return "Saved locally · Waiting to sync";
   if (!status.lastSyncUnix) return "Saved locally · Waiting for first sync";

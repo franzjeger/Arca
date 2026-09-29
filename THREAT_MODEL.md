@@ -46,8 +46,9 @@ disk at rest, the browser/extension context.
   laptop drive) but not the running process or master password.
 - **A2 — Remote network attacker or cloud file holder.** Optional Drive sync,
   update checks, breach-prefix lookups and related-origin checks cross the
-  network boundary. TLS protects transport; V6 container authentication protects
-  vault contents. Replay of an older authentic vault remains a residual risk.
+  network boundary. TLS protects transport; container authentication protects
+  vault contents. Showing an older authentic vault is detected once a device
+  has seen a newer one (T2b).
 - **A3 — Same-user malware.** Code running with the user's privileges.
 - **A4 — Privileged/physical attacker.** Root, kernel, or live-memory access.
 - **A5 — Malicious web page.** Relevant to extension autofill.
@@ -59,7 +60,9 @@ disk at rest, the browser/extension context.
 | # | Threat | Adversary | Status | Mitigation / note |
 |---|--------|-----------|--------|-------------------|
 | T1 | Offline brute force of the vault file | A1 | **Mitigated** | Argon2id (m=64 MiB, t=3, p=4) + 256-bit keys. Strength ultimately bounded by master-password entropy. |
-| T2 | Tampering with vault bytes | A1/A3 | **Mitigated** | V6 whole-container HMAC plus per-item/key-wrap XChaCha20-Poly1305; authentication precedes unlock/merge. The master wrap names the authenticated container and device keys only open authenticated files, so relabelling a file as a legacy format does not open it. Residual: a vault not yet unlocked with its master password on a V6 build still has an unbound wrap, and an entire older file can be replayed (no freshness check). |
+| T2 | Tampering with vault bytes | A1/A3 | **Mitigated** | Whole-container HMAC plus per-item/key-wrap XChaCha20-Poly1305; authentication precedes unlock/merge. The master wrap names the authenticated container and device keys only open authenticated files, so relabelling a file as a legacy format does not open it. Residual: a vault not yet unlocked with its master password on a V6 or later build still has an unbound wrap, and an entire older file can be shown to a device that never saw a newer one (T2b). |
+| T2a | A leaked old master password plus an old copy of the file | A1/A2 | **Mitigated** | A password change replaces the vault key, so the old password opens nothing written since. Devices with the new key merge nothing sealed with the old one, and take a change on only from a copy that carries their current key, so a "change" forged with the old password is refused (`DifferentVault`). Residual: a device that has not synced since the change still trusts the old key until it does. |
+| T2b | Sync storage showing an older copy and hiding newer ones | A2 | **Partial (detected, repaired)** | Every copy records, sealed, how many copies each device has pushed. A device that pulls the whole remote and finds it accounts for fewer of another device's uploads than it has already seen names that device in the sync status until the user has seen it, and its next push restores the lost changes. Residual: uploads withheld from the other devices from the start look like a device that has not synced, which each app's device list shows as an old "last synced"; a device does not report its own lost uploads, which look like a failed upload; uploads sealed with a key a password change replaced are not judged, since the change leaves them out on purpose. |
 | T3 | Format/variant confusion to mis-decode data | A1 | **Mitigated** | Name-tagged CBOR item payloads + versioned header; id bound as AEAD AAD. |
 | T4 | Wrong-password oracle / timing side channel | A1/A6 | **Mitigated** | Poly1305 verification is constant-time; errors are indistinct ("wrong password or tampered"). |
 | T5 | Secrets written to swap/hibernation | A1/A4 | **Partial** | Symmetric **key material** (master + vault keys) is held in `mlock`/`VirtualLock`-locked memory (`vault-secmem`) so it can't page to swap/hibernation; locking is best-effort (may be refused by `RLIMIT_MEMLOCK`). Residual: item **plaintext** (passwords, revealed values) still transits non-locked heap / the webview (see T8). |
@@ -87,6 +90,8 @@ disk at rest, the browser/extension context.
 - vault-core crypto, model, TOTP, password gen, audit: unit-tested.
 - Cross-platform build + full test suite: CI on Linux, Windows, macOS.
 - Atomic persistence + AEAD tamper detection: tested.
+- Parsers of input Arca does not control — vault files, URLs, password rules,
+  otpauth URIs — are fuzzed (`fuzz/`) on every pull request.
 - Clipboard ownership (the X11 "serves after copy returns" path): executed in CI
   under Xvfb. The Wayland path is a required CI check under isolated headless
   `sway`; the final **interactive cross-application paste on a real Wayland

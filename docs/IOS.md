@@ -2,7 +2,7 @@
 
 The current feature/build reference is [apps/ios/README.md](../apps/ios/README.md).
 The app has run on a physical iPhone since 2026-07-28. Source version 0.6.2 uses
-C ABI v17 and the same authenticated V6 vault format as desktop.
+C ABI v20 and the same authenticated V7 vault format as desktop.
 
 ## First setup
 
@@ -31,6 +31,8 @@ For each candidate, verify on a device:
   restore it. Confirm account, site, notes and TOTP remain unchanged.
 - Exercise password AutoFill, passkey creation/assertion and device-key renewal.
 - Disconnect/reconnect Drive and test a real two-device concurrent edit.
+- After both devices have synced, Options → Synced devices lists this iPhone
+  and the computer, each with a recent time.
 
 Initial-device findings and their fixes are retained in Git history rather than
 presented as current missing features.

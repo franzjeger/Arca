@@ -1,129 +1,20 @@
+// A test reads as one scenario, top to bottom; splitting it hides the story.
+#![allow(clippy::too_many_lines)]
+
 use super::*;
 use crate::clipboard::ClipboardManager;
 use crate::commands::{do_upsert_item, LoginInput};
+use crate::state::AppState;
+use std::time::Instant;
 use tempfile::TempDir;
+use uuid::Uuid;
+use vault_bridge::proto::Request;
+use vault_core::VaultItem;
 use vault_core::{KdfAlgorithm, KdfParams, Vault};
 use vault_store::VaultStore;
 
-// Decode actual desktop output with the native host's production schema.
-// Maintaining two independent JSON fixtures missed real protocol drift.
-#[allow(dead_code)]
-#[path = "../../../../../extension/native-host/src/bridge_schema.rs"]
-mod native_host_schema;
-
-#[test]
-fn every_desktop_response_is_accepted_by_the_native_host() {
-    let responses = [
-        Response::Ok {
-            protocol: PROTOCOL_VERSION,
-            version: "test",
-            build: "test",
-            commit: "test",
-            pid: 1,
-            proof: Some("proof".into()),
-        },
-        Response::Challenge {
-            nonce: "0123456789abcdef0123456789abcdef".into(),
-            proof: "proof".into(),
-        },
-        Response::Logins {
-            items: vec![
-                LoginMatch {
-                    id: "login".into(),
-                    credential_id: vec![],
-                    title: "Example".into(),
-                    username: "alice".into(),
-                    kind: "password".into(),
-                },
-                LoginMatch {
-                    id: "passkey".into(),
-                    credential_id: vec![1, 2, 255],
-                    title: "Example".into(),
-                    username: "bob".into(),
-                    kind: "passkey".into(),
-                },
-            ],
-        },
-        Response::Credentials {
-            username: "alice".into(),
-            password: "synthetic".into(),
-        },
-        Response::PasskeyCredential {
-            credential_id: vec![1],
-            attestation_object: vec![2],
-        },
-        Response::PasskeyAssertion {
-            credential_id: vec![1],
-            authenticator_data: vec![2],
-            signature: vec![3],
-            user_handle: vec![4],
-        },
-        Response::SaveDecision {
-            action: "new".into(),
-            username: None,
-        },
-        Response::Saved,
-        Response::GeneratedPassword {
-            password: "synthetic".into(),
-        },
-        Response::CreatedLogin {
-            id: "login".into(),
-            title: "Example".into(),
-            password: None,
-        },
-        Response::Password {
-            password: "synthetic".into(),
-        },
-        Response::Deleted {
-            id: "login".into(),
-            title: "Example".into(),
-        },
-        Response::DeletedBookmarks { removed: 2 },
-        Response::ImportedBookmarks { added: 3 },
-        Response::Bookmarks {
-            items: vec![BookmarkWire {
-                title: "Example".into(),
-                url: "https://example.test".into(),
-                folder: "test".into(),
-            }],
-        },
-        Response::UnlockRequested,
-        Response::Error {
-            message: "locked".into(),
-        },
-    ];
-    for response in responses {
-        let wire = serde_json::to_value(response).unwrap();
-        let decoded: native_host_schema::BridgeResponse = serde_json::from_value(wire.clone())
-            .unwrap_or_else(|error| panic!("{}: {error}", wire["type"]));
-        assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
-    }
-}
-
-/// And the other way: the handshake messages the native host sends must parse
-/// as the app's own requests.
-#[test]
-fn the_native_host_handshake_is_accepted_by_the_app() {
-    for request in [
-        native_host_schema::BridgeRequest::Hello {
-            protocol: Some(PROTOCOL_VERSION),
-            nonce: vault_bridge_auth::nonce(),
-        },
-        native_host_schema::BridgeRequest::Auth {
-            proof: "proof".into(),
-        },
-    ] {
-        let wire = serde_json::to_string(&request).unwrap();
-        let parsed: Request = serde_json::from_str(&wire).unwrap();
-        assert!(matches!(
-            parsed,
-            Request::Hello { token: None, .. } | Request::Auth { .. }
-        ));
-    }
-}
-
-/// A consent closure that always approves (autofill confirmation off is the
-/// default, so this is only exercised when a test flips the setting on).
+/// A consent closure that always approves, for tests that are not about the
+/// in-app Allow/Deny.
 fn allow() -> impl FnMut(&ConsentContext) -> bool {
     |_| true
 }
@@ -982,9 +873,9 @@ fn requires_token_before_serving() {
         r,
         Response::Ok {
             protocol: PROTOCOL_VERSION,
-            version: APP_VERSION,
-            build: env!("ARCA_BUILD"),
-            commit: env!("ARCA_COMMIT"),
+            version: APP_VERSION.into(),
+            build: env!("ARCA_BUILD").into(),
+            commit: env!("ARCA_COMMIT").into(),
             pid: std::process::id(),
             proof: None,
         }
@@ -1021,9 +912,9 @@ fn the_handshake_negotiates_a_protocol_version() {
         hello(None, "secret", &mut authed),
         Response::Ok {
             protocol: PROTOCOL_VERSION,
-            version: APP_VERSION,
-            build: env!("ARCA_BUILD"),
-            commit: env!("ARCA_COMMIT"),
+            version: APP_VERSION.into(),
+            build: env!("ARCA_BUILD").into(),
+            commit: env!("ARCA_COMMIT").into(),
             pid: std::process::id(),
             proof: None,
         }
@@ -1036,9 +927,9 @@ fn the_handshake_negotiates_a_protocol_version() {
         hello(Some(PROTOCOL_VERSION), "secret", &mut authed),
         Response::Ok {
             protocol: PROTOCOL_VERSION,
-            version: APP_VERSION,
-            build: env!("ARCA_BUILD"),
-            commit: env!("ARCA_COMMIT"),
+            version: APP_VERSION.into(),
+            build: env!("ARCA_BUILD").into(),
+            commit: env!("ARCA_COMMIT").into(),
             pid: std::process::id(),
             proof: None,
         }
@@ -1814,7 +1705,7 @@ fn protocol_3_authenticates_both_sides_without_sending_the_token() {
         handle_request(req, &state, token, session, None, &mut allow())
     };
 
-    let client_nonce = vault_bridge_auth::nonce().unwrap();
+    let client_nonce = vault_bridge::auth::nonce().unwrap();
     let Response::Challenge { nonce, proof } = send(
         Request::Hello {
             token: None,
@@ -1825,9 +1716,9 @@ fn protocol_3_authenticates_both_sides_without_sending_the_token() {
     ) else {
         panic!("a tokenless hello must be answered with a challenge");
     };
-    assert!(vault_bridge_auth::same(
+    assert!(vault_bridge::auth::same(
         &proof,
-        &vault_bridge_auth::app_proof(token, &client_nonce, &nonce)
+        &vault_bridge::auth::app_proof(token, &client_nonce, &nonce)
     ));
     assert!(!session.is_authed());
 
@@ -1841,7 +1732,7 @@ fn protocol_3_authenticates_both_sides_without_sending_the_token() {
     };
     let ok = send(
         Request::Auth {
-            proof: vault_bridge_auth::client_proof(token, &client_nonce, &nonce),
+            proof: vault_bridge::auth::client_proof(token, &client_nonce, &nonce),
         },
         &mut session,
     );
@@ -1859,7 +1750,7 @@ fn protocol_3_refuses_a_client_that_cannot_prove_itself() {
     };
     let challenge = |send: &mut dyn FnMut(Request, &mut Session) -> Response,
                      session: &mut Session| {
-        let client_nonce = vault_bridge_auth::nonce().unwrap();
+        let client_nonce = vault_bridge::auth::nonce().unwrap();
         let Response::Challenge { nonce, .. } = send(
             Request::Hello {
                 token: None,
@@ -1876,7 +1767,7 @@ fn protocol_3_refuses_a_client_that_cannot_prove_itself() {
     // A proof made without the token.
     let mut session = Session::New;
     let (c, a) = challenge(&mut send, &mut session);
-    let forged = vault_bridge_auth::client_proof("a-guessed-token", &c, &a);
+    let forged = vault_bridge::auth::client_proof("a-guessed-token", &c, &a);
     assert_eq!(
         send(Request::Auth { proof: forged }, &mut session),
         unauthorized()
@@ -1886,7 +1777,7 @@ fn protocol_3_refuses_a_client_that_cannot_prove_itself() {
     // The app's own proof, echoed back: different label, so it never works.
     let mut session = Session::New;
     let (c, a) = challenge(&mut send, &mut session);
-    let echoed = vault_bridge_auth::app_proof(token, &c, &a);
+    let echoed = vault_bridge::auth::app_proof(token, &c, &a);
     assert_eq!(
         send(Request::Auth { proof: echoed }, &mut session),
         unauthorized()
@@ -1895,7 +1786,7 @@ fn protocol_3_refuses_a_client_that_cannot_prove_itself() {
     // A proof from an earlier connection: the app's nonce is fresh each time.
     let mut session = Session::New;
     let (c, a) = challenge(&mut send, &mut session);
-    let replay = vault_bridge_auth::client_proof(token, &c, &a);
+    let replay = vault_bridge::auth::client_proof(token, &c, &a);
     let mut session = Session::New;
     challenge(&mut send, &mut session);
     assert_eq!(
@@ -1905,15 +1796,15 @@ fn protocol_3_refuses_a_client_that_cannot_prove_itself() {
 
     // No challenge outstanding.
     let mut session = Session::New;
-    let proof = vault_bridge_auth::client_proof(token, &c, &a);
+    let proof = vault_bridge::auth::client_proof(token, &c, &a);
     assert_eq!(send(Request::Auth { proof }, &mut session), unauthorized());
 
     // Without a well-formed nonce, or claiming a protocol that sent the token.
     for (protocol, nonce) in [
         (Some(PROTOCOL_VERSION), None),
         (Some(PROTOCOL_VERSION), Some("cafebabe".to_string())),
-        (Some(2), vault_bridge_auth::nonce()),
-        (None, vault_bridge_auth::nonce()),
+        (Some(2), vault_bridge::auth::nonce()),
+        (None, vault_bridge::auth::nonce()),
     ] {
         let mut session = Session::New;
         let hello = Request::Hello {
@@ -1951,7 +1842,7 @@ fn a_protocol_2_client_is_still_served() {
     let mut session = Session::New;
     assert_eq!(
         hello("the-real-token", &mut session),
-        welcome(Some(vault_bridge_auth::v2_proof(
+        welcome(Some(vault_bridge::auth::v2_proof(
             "the-real-token",
             "cafebabe"
         )))

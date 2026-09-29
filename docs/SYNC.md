@@ -8,11 +8,12 @@ changes.
 
 ## Authenticated files and concurrent writes
 
-New unlocked saves use `SYBRVLT6`. A domain-separated HMAC-SHA256 under the
-vault key covers the complete serialized body: header, encrypted item list and
-purge records. Unlock and sync verify it before accepting changes, including
-empty remote vaults. Per-item AEAD remains unchanged. Invalid authentication is
-an error and never permission to replace a remote file.
+New unlocked saves use `SYBRVLT7`. A domain-separated HMAC-SHA256 under a key
+derived from the vault key covers the complete serialized body: header,
+encrypted item list and purge records. Unlock and sync verify it before
+accepting changes, including empty remote vaults. Per-item AEAD remains
+unchanged. Invalid authentication is an error and never permission to replace a
+remote file.
 
 V1–V4 files carry no tag, so anyone who can write a file could once relabel a
 newer one as V4 and have it unlock. From V6 the master-password wrap names the
@@ -20,7 +21,7 @@ authenticated container in its AAD, so a relabelled file no longer opens with
 the password, and quick unlock or a USB key never opens an unauthenticated
 file at all. A V5 vault binds its wrap the next time it is unlocked with the
 master password; a device that only uses quick unlock adopts the bound wrap
-from the first V6 file it syncs.
+from the first V6 or later file it syncs.
 
 V1–V4 files still open with the master password; saving after unlock upgrades
 them. A locked legacy copy stays in the legacy format until the key is
@@ -28,10 +29,46 @@ available. During migration, legacy sync can import authenticated item
 ciphertext from the same password's header, but cannot introduce unverified
 purge records or password rotations. Start by opening and syncing the latest
 existing copy with the updated app. Update all devices before continuing: older
-Arca builds intentionally refuse V6 files.
+Arca builds intentionally refuse V7 files.
 Legacy formats have no whole-file integrity protection; this upgrade cannot
 retroactively authenticate an old file or provide protection against replay of
 an entire previously valid file.
+
+## Master password changes
+
+Changing the master password gives the vault a new key. Whoever knew the old
+password and kept a copy of the old file can read nothing written since, and a
+device that has the new key merges nothing sealed with the old one: anyone who
+knew the old password could have written it.
+
+Every V7 file records its key epoch and carries the keys it replaced, sealed
+under the current one. A device sorts each remote copy by them:
+
+- **Sealed with its own key:** merged, as always.
+- **From a later change** (`KeyRotated`): the cycle merges the copies it can
+  open, keeps the newest changed copy and reports `needsPassword`; nothing is
+  pushed until the user enters the new password. That copy carries the key the
+  device's own vault is sealed with, so a locked device opens with the new
+  password alone: the desktop from the copy its background sync keeps, an
+  iPhone by loading its vault unopened (`vault_ffi_vault_load`) and running one
+  cycle when the typed password does not open it. A copy that does not carry
+  that key is refused even when the password opens it (`DifferentVault`): that
+  is what a copy forged by someone who knows an old password looks like.
+- **From before a change** (`StaleKey`): skipped and retired with the cycle's
+  inputs, like a torn upload. The device that wrote it still has those edits
+  and pushes them again once it has the new password.
+- **Anything else** is a foreign or tampered vault, and is refused as before.
+
+Quick unlock, the USB key and macOS's protected Touch ID key all wrapped the old
+key. After a change the desktop brings them back: silently on Windows and Linux,
+with one Touch ID prompt on macOS, and the USB key if it is plugged in
+(otherwise its next use asks for the password once). iOS mints a new device key,
+which needs no prompt.
+
+Change the password on one computer and let the others catch up. Two computers
+that change it while apart end up with keys neither can take on from the other,
+and each refuses the other's copy; a desktop refuses a change while one from
+elsewhere is already waiting, but it cannot know about one it has not seen.
 
 Each successful cloud upload now creates a new file, then retires only the
 input files already incorporated in it. A checksum preflight alone leaves a
@@ -40,6 +77,45 @@ upload wins. Separate immutable uploads preserve both edits even if either
 process stops before another cycle. The next cycle merges any concurrent
 copies. Listings consume every page; a peer retiring an input during a cycle
 causes a retry.
+
+## When Drive goes back in time
+
+Whoever controls the Google account (Google, or someone who got into it) can
+show any copy Drive has ever held, and hide the newest. They cannot forge a
+copy: every one is sealed. So every V7 copy carries, in its sealed header part,
+the devices that push the vault: an id each picks at random, the name the user
+knows it by, how many copies it has pushed, and when it last did. Only holders
+of the vault key read that list. Copies merge upwards (per device, the entry
+that knows of more uploads), so what Drive holds together accounts for every
+upload a device has already seen, unless someone took the newer copies away.
+
+A device checks that whenever it pulls everything. A cycle that finds its own
+last upload still in place skips the download, and has nothing to check: that
+copy accounts for everything the device knew when it pushed it. Otherwise it
+compares every copy sealed with its current key, together, with what it knows
+itself, leaving itself out, since its own count runs ahead whenever an upload
+fails. A device that is away and pushes a copy knowing only of the others' older
+uploads is no sign of anything; only the union counts. Devices whose uploads
+Drive no longer accounts for are reported (`rolledBack`) until the user has
+seen it: the desktop's status bar and the iPhone's banner name them. Nothing
+waits on the user: the push that follows puts Drive right. An empty Drive, or
+one holding no copy of this vault, tells nothing.
+
+Only uploads sealed with the current key are judged. Around a password change,
+copies sealed with the old key are left out on purpose (`StaleKey`), so each
+device's entry also says which key its latest upload was sealed with. Right
+after a change nothing on Drive is sealed with the new key yet, which is how it
+should be; once a device has pushed with it, Drive holding only copies from
+before the change has lost that upload.
+
+The desktop keeps its id in a `device-id` file beside the vault, which never
+syncs, and uses the computer's name. An iPhone keeps its id in the app's
+defaults, so a reinstall counts as a new device. Both list every device and
+when it last pushed: in Settings on the desktop, under Options → Synced devices
+on iOS. That list is where the one case this check cannot see shows up: uploads
+Drive withheld from the other devices from the start, before any of them saw
+one, look just like a device that has not synced. There it is a phone that
+"synced 3 days ago" when it was used this morning.
 
 ## Built (foundation)
 
@@ -199,9 +275,8 @@ folder, which needs the path-config UI below. Flagged by an adversarial review.
    across writers; a peer/cloud write landing mid-save is lost (never a *torn*
    file — the atomic rename guarantees a complete old-or-new vault, just a lost
    update). Consider a file lock or a re-check-after-write.
-4. **Header changes over sync.** `merge_remote` keeps the local header. If master
-   password rotation (`change_master_password`, currently unwired) ships, a
-   stale-header device would revert the rotation on its next save. Add a header
-   version/epoch and take the newer header before wiring password change.
+4. **Header changes over sync.** Built: the header carries a rewrap epoch, and
+   a password change a new key epoch (see
+   [Master password changes](#master-password-changes)).
 5. **Status/refresh UX.** Show sync state; refresh the item list when a
    background merge brings in a peer's changes.

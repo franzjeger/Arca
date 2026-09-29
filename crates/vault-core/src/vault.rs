@@ -2,16 +2,18 @@
 //!
 //! On-disk layout produced by [`Vault::to_bytes`]:
 //! ```text
-//! "SYBRVLT6"            (8-byte magic; V5 down to V1 remain readable)
+//! "SYBRVLT7"            (8-byte magic; V6 down to V1 remain readable)
 //! bincode(VaultBody {   (cleartext header + per-item ciphertext)
 //!     header,
 //!     items: [ { id, AeadBlob }, ... ],
 //!     purges: [ { id, at }, ... ],
 //! })
-//! HMAC-SHA256(vault_key, context || bincode(body))
+//! HMAC-SHA256(tag_key, context || bincode(body))
 //! ```
 //! The header is cleartext (public KDF params + wrapped keys); every item is
-//! sealed individually with the vault key, with the item id bound as AAD.
+//! sealed individually with the items key, with the item id bound as AAD. The
+//! items key and the tag key are derived from the vault key (HKDF-SHA256), so
+//! the vault key itself seals nothing but is only ever unwrapped.
 //!
 //! V1–V4 carry no tag, so nothing stops an attacker from relabelling a newer
 //! file as one of them. Two rules make that useless: from V6 the master wrap
@@ -24,6 +26,7 @@
 
 use crate::VaultItem;
 use bincode::Options;
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::Sha256;
@@ -31,34 +34,147 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, AeadBlob};
+use crate::devices::{self, Device};
 use crate::error::{Error, Result};
 use crate::header::{KdfParams, VaultHeader};
 use crate::item::{Item, ItemSummary};
-use crate::secret::SymmetricKey;
+use crate::secret::{SymmetricKey, KEY_LEN};
 use crate::sync::Purge;
 
 /// Container magics. V1 framed the v2 header (no rewrap epoch); V2 added the
 /// rewrap epoch; V3 adds the purge list; V4 gates encrypted per-item revision
 /// ancestry so older clients cannot silently strip conflict metadata. V5 adds
-/// whole-container authentication; V6 binds the master wrap to it. Legacy
-/// files upgrade on an unlocked save.
+/// whole-container authentication; V6 binds the master wrap to it; V7 adds
+/// the key epoch and derived keys. Legacy files upgrade on an unlocked save.
 const MAGIC_V1: &[u8; 8] = b"SYBRVLT1";
 const MAGIC_V2: &[u8; 8] = b"SYBRVLT2";
 const MAGIC_V3: &[u8; 8] = b"SYBRVLT3";
 const MAGIC_V4: &[u8; 8] = b"SYBRVLT4";
 const MAGIC_V5: &[u8; 8] = b"SYBRVLT5";
-const MAGIC: &[u8; 8] = b"SYBRVLT6";
+const MAGIC_V6: &[u8; 8] = b"SYBRVLT6";
+const MAGIC: &[u8; 8] = b"SYBRVLT7";
 const AUTH_LEN: usize = 32;
 
 /// First format version that is always authenticated by a container tag.
 const SEALED_SINCE: u16 = 5;
 
+/// First format version whose items and tag use keys derived from the vault key.
+const SUBKEYS_SINCE: u16 = 7;
+
 /// Magic and tag context of an authenticated container of `version`.
 fn sealed_format(version: u16) -> (&'static [u8; 8], &'static [u8]) {
-    if version >= VaultHeader::BOUND_WRAP_VERSION {
-        (MAGIC, b"arca/vault-container/SYBRVLT6\0")
-    } else {
-        (MAGIC_V5, b"arca/vault-container/SYBRVLT5\0")
+    match version {
+        5 => (MAGIC_V5, b"arca/vault-container/SYBRVLT5\0"),
+        6 => (MAGIC_V6, b"arca/vault-container/SYBRVLT6\0"),
+        _ => (MAGIC, b"arca/vault-container/SYBRVLT7\0"),
+    }
+}
+
+/// The keys a container of a given version seals with. From V7 the item key
+/// and the tag key are derived from the vault key with HKDF, so no key does
+/// two jobs; before, the vault key did both.
+struct Keys {
+    items: SymmetricKey,
+    tag: SymmetricKey,
+}
+
+impl Keys {
+    fn of(vault_key: &SymmetricKey, version: u16) -> Result<Self> {
+        if version < SUBKEYS_SINCE {
+            return Ok(Self {
+                items: vault_key.clone(),
+                tag: vault_key.clone(),
+            });
+        }
+        Ok(Self {
+            items: derive(vault_key, b"arca/v7/items")?,
+            tag: derive(vault_key, b"arca/v7/container-tag")?,
+        })
+    }
+}
+
+/// A key for one job, derived from the vault key; `info` names the job.
+fn derive(vault_key: &SymmetricKey, info: &[u8]) -> Result<SymmetricKey> {
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    Hkdf::<Sha256>::new(None, vault_key.as_bytes())
+        .expand(info, key.as_mut_slice())
+        .map_err(|_| Error::KeyDerivation)?;
+    Ok(SymmetricKey::from_bytes(*key))
+}
+
+/// Names the key the header's sealed part is sealed with, and binds that use
+/// as its AAD.
+const SEALED_META: &[u8] = b"arca/v7/sealed-meta";
+
+/// The header's sealed part, open: what only the vault key's holders read.
+#[derive(Clone, Default)]
+struct Meta {
+    /// The keys password changes replaced, newest first.
+    previous_keys: Vec<SymmetricKey>,
+    /// The devices that push this vault; see [`crate::devices`].
+    devices: Vec<Device>,
+}
+
+/// [`Meta`] as the header seals it: CBOR, every field defaulting, so a build
+/// that knows fewer fields still reads the ones it knows, and one that knows
+/// more reads an older header as empty in the rest.
+#[derive(Default, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct SealedMeta {
+    #[serde(default)]
+    previous_keys: Vec<[u8; KEY_LEN]>,
+    #[serde(default)]
+    #[zeroize(skip)]
+    devices: Vec<Device>,
+}
+
+/// Seal what the header keeps from everyone but the vault key's holders.
+fn seal_meta(vault_key: &SymmetricKey, meta: &Meta) -> Result<Option<AeadBlob>> {
+    if meta.previous_keys.is_empty() && meta.devices.is_empty() {
+        return Ok(None);
+    }
+    let sealed = SealedMeta {
+        previous_keys: meta
+            .previous_keys
+            .iter()
+            .map(|key| *key.as_bytes())
+            .collect(),
+        devices: meta.devices.clone(),
+    };
+    let mut plaintext = Zeroizing::new(Vec::new());
+    ciborium::into_writer(&sealed, &mut *plaintext).map_err(|_| Error::Serialization)?;
+    let key = derive(vault_key, SEALED_META)?;
+    crypto::seal(&key, &plaintext, SEALED_META).map(Some)
+}
+
+/// Open what [`seal_meta`] sealed.
+fn open_meta(vault_key: &SymmetricKey, sealed: Option<&AeadBlob>) -> Result<Meta> {
+    let Some(blob) = sealed else {
+        return Ok(Meta::default());
+    };
+    let plaintext = crypto::open(&derive(vault_key, SEALED_META)?, blob, SEALED_META)?;
+    // Authentic, yet unreadable to us: a newer build's, not garbage.
+    let mut sealed: SealedMeta =
+        ciborium::from_reader(plaintext.as_slice()).map_err(|_| Error::UnsupportedVersion)?;
+    Ok(Meta {
+        previous_keys: sealed
+            .previous_keys
+            .iter()
+            .map(|key| SymmetricKey::from_bytes(*key))
+            .collect(),
+        devices: core::mem::take(&mut sealed.devices),
+    })
+}
+
+/// Add `keys` to `previous`, skipping the current key and ones already there.
+fn remember_keys(
+    previous: &mut Vec<SymmetricKey>,
+    current: &SymmetricKey,
+    keys: impl IntoIterator<Item = SymmetricKey>,
+) {
+    for key in keys {
+        if key != *current && !previous.contains(&key) {
+            previous.push(key);
+        }
     }
 }
 
@@ -90,10 +206,19 @@ struct VaultBody {
     purges: Vec<Purge>,
 }
 
-/// Body layout of `SYBRVLT2` containers: the current header, no purge list.
+/// Body layout of `SYBRVLT3` to `SYBRVLT6` containers: the header before the
+/// key epoch. V5 is still written while a vault's master wrap is unbound.
+#[derive(Serialize, Deserialize)]
+struct BodyV6 {
+    header: crate::header::HeaderV6,
+    items: Vec<EncryptedItem>,
+    purges: Vec<Purge>,
+}
+
+/// Body layout of `SYBRVLT2` containers: no purge list.
 #[derive(Deserialize)]
 struct BodyWithoutPurges {
-    header: VaultHeader,
+    header: crate::header::HeaderV6,
     items: Vec<EncryptedItem>,
 }
 
@@ -115,6 +240,7 @@ enum VaultState {
     },
     Unlocked {
         vault_key: SymmetricKey,
+        meta: Meta,
         items: Vec<Item>,
     },
 }
@@ -126,6 +252,14 @@ struct Sealed {
     version: u16,
     body: Vec<u8>,
     tag: [u8; AUTH_LEN],
+}
+
+/// A container sealed from the unlocked state: the header and items as
+/// written, and the authenticated bytes they were written as.
+struct Sealing {
+    header: VaultHeader,
+    items: Vec<EncryptedItem>,
+    sealed: Sealed,
 }
 
 impl Sealed {
@@ -143,16 +277,14 @@ fn body_codec() -> impl Options {
         .with_limit((MAX_VAULT_BYTES - MAGIC.len() - AUTH_LEN) as u64)
 }
 
-fn encode_body(body: &VaultBody) -> Result<Vec<u8>> {
+fn encode_body<T: Serialize>(body: &T) -> Result<Vec<u8>> {
     body_codec()
         .serialize(body)
         .map_err(|_| Error::Serialization)
 }
 
 fn decode_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    body_codec()
-        .deserialize(bytes)
-        .map_err(|_| Error::Serialization)
+    body_codec().deserialize(bytes).map_err(|_| Error::Format)
 }
 
 /// A password vault. Create a new one with [`Vault::create`], or load an
@@ -184,6 +316,8 @@ impl Vault {
             master_wrapped_vault_key,
             device_wrapped_vault_key: None,
             rewrap_epoch: 0,
+            key_epoch: 0,
+            sealed_meta: None,
         };
 
         Ok(Self {
@@ -192,6 +326,7 @@ impl Vault {
             purges: Vec::new(),
             state: VaultState::Unlocked {
                 vault_key,
+                meta: Meta::default(),
                 items: Vec::new(),
             },
         })
@@ -205,33 +340,40 @@ impl Vault {
         }
         let (magic, rest) = bytes.split_at(MAGIC.len());
         let (header, items, purges, sealed) = match magic {
-            m if m == MAGIC || m == MAGIC_V5 => {
-                let version = if m == MAGIC {
-                    VaultHeader::BOUND_WRAP_VERSION
-                } else {
-                    SEALED_SINCE
+            m if m == MAGIC || m == MAGIC_V6 || m == MAGIC_V5 => {
+                let version = match m {
+                    m if m == MAGIC => VaultHeader::FORMAT_VERSION,
+                    m if m == MAGIC_V6 => VaultHeader::BOUND_WRAP_VERSION,
+                    _ => SEALED_SINCE,
                 };
-                // A torn or tampered authenticated file must not read as
-                // foreign: callers replace a `Format` file with their own.
-                let split = rest.len().checked_sub(AUTH_LEN).ok_or(Error::Decryption)?;
+                // A container that does not even parse was torn (a partial
+                // upload, a crash mid-write) before anything in it could be
+                // authenticated: `Format`, which callers may replace.
+                let split = rest.len().checked_sub(AUTH_LEN).ok_or(Error::Format)?;
                 let (body, tag) = rest.split_at(split);
-                let parsed: VaultBody = decode_body(body).map_err(|_| Error::Decryption)?;
+                let (header, items, purges) = if version >= SUBKEYS_SINCE {
+                    let parsed: VaultBody = decode_body(body)?;
+                    (parsed.header, parsed.items, parsed.purges)
+                } else {
+                    let parsed: BodyV6 = decode_body(body)?;
+                    (parsed.header.into(), parsed.items, parsed.purges)
+                };
                 let sealed = Sealed {
                     version,
                     body: body.to_vec(),
-                    tag: tag.try_into().map_err(|_| Error::Decryption)?,
+                    tag: tag.try_into().map_err(|_| Error::Format)?,
                 };
-                (parsed.header, parsed.items, parsed.purges, Some(sealed))
+                (header, items, purges, Some(sealed))
             }
             m if m == MAGIC_V4 || m == MAGIC_V3 => {
-                let body: VaultBody = decode_body(rest)?;
-                (body.header, body.items, body.purges, None)
+                let body: BodyV6 = decode_body(rest)?;
+                (body.header.into(), body.items, body.purges, None)
             }
             m if m == MAGIC_V2 => {
                 // Written before hard deletes left a record. An empty purge
                 // list is the truth about such a file, not a fallback.
                 let body: BodyWithoutPurges = decode_body(rest)?;
-                (body.header, body.items, Vec::new(), None)
+                (body.header.into(), body.items, Vec::new(), None)
             }
             m if m == MAGIC_V1 => {
                 // Legacy container: v2 header without the rewrap epoch.
@@ -270,9 +412,7 @@ impl Vault {
     /// when unlocked, items are re-sealed with fresh nonces.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         match &self.state {
-            VaultState::Unlocked { vault_key, items } => Ok(self
-                .seal(vault_key, encrypt_items(vault_key, items)?)?
-                .to_container()),
+            VaultState::Unlocked { .. } => Ok(self.seal()?.sealed.to_container()),
             VaultState::Locked {
                 sealed: Some(sealed),
                 ..
@@ -283,8 +423,8 @@ impl Vault {
                 items,
                 sealed: None,
             } => {
-                let body = encode_body(&VaultBody {
-                    header: self.header.clone(),
+                let body = encode_body(&BodyV6 {
+                    header: (&self.header).into(),
                     items: items.clone(),
                     purges: self.purges.clone(),
                 })?;
@@ -293,25 +433,76 @@ impl Vault {
         }
     }
 
-    /// Encode and tag a container body holding `items` (already encrypted).
-    fn seal(&self, vault_key: &SymmetricKey, items: Vec<EncryptedItem>) -> Result<Sealed> {
-        // Unlocked implies V5+: a legacy container only opens with the
-        // password, and that unlock binds the wrap (V6).
-        let version = self.header.format_version.max(SEALED_SINCE);
-        let body = encode_body(&VaultBody {
-            header: VaultHeader {
+    /// Encrypt the items and tag the container, in the newest format the
+    /// header allows: V7, or V5 while the master wrap is unbound (a vault
+    /// opened with its device key, before the password has been entered on
+    /// this build).
+    fn seal(&self) -> Result<Sealing> {
+        let VaultState::Unlocked {
+            vault_key,
+            meta,
+            items,
+        } = &self.state
+        else {
+            return Err(Error::Locked);
+        };
+        let version = if self.header.master_wrap_is_bound() {
+            VaultHeader::FORMAT_VERSION
+        } else {
+            SEALED_SINCE
+        };
+        let keys = Keys::of(vault_key, version)?;
+        let encrypted = encrypt_items(&keys.items, items)?;
+        let purges = self.purges.clone();
+        let (header, body) = if version >= SUBKEYS_SINCE {
+            let header = VaultHeader {
+                format_version: version,
+                sealed_meta: seal_meta(vault_key, meta)?,
+                ..self.header.clone()
+            };
+            let body = encode_body(&VaultBody {
+                header: header.clone(),
+                items: encrypted.clone(),
+                purges,
+            })?;
+            (header, body)
+        } else {
+            // Previous keys come from a password change, or with a V7 header
+            // from a peer; both bind the wrap first. Devices wait for the
+            // same: a V5 header has nowhere to keep them.
+            debug_assert!(meta.previous_keys.is_empty());
+            let header = VaultHeader {
                 format_version: version,
                 ..self.header.clone()
-            },
-            items,
-            purges: self.purges.clone(),
-        })?;
-        let tag = container_mac(vault_key, version)
+            };
+            let body = encode_body(&BodyV6 {
+                header: (&header).into(),
+                items: encrypted.clone(),
+                purges,
+            })?;
+            (header, body)
+        };
+        let tag = container_mac(&keys.tag, version)
             .chain_update(&body)
             .finalize()
             .into_bytes()
             .into();
-        Ok(Sealed { version, body, tag })
+        Ok(Sealing {
+            header,
+            items: encrypted,
+            sealed: Sealed { version, body, tag },
+        })
+    }
+
+    /// The format of a locked container: what its tag and items were sealed as.
+    fn container_version(&self) -> u16 {
+        match &self.state {
+            VaultState::Locked {
+                sealed: Some(sealed),
+                ..
+            } => sealed.version,
+            _ => self.header.format_version,
+        }
     }
 
     // ----- locking --------------------------------------------------------
@@ -342,7 +533,7 @@ impl Vault {
         self.finish_unlock(vault_key)?;
         if let Some(wrap) = bound {
             self.header.master_wrapped_vault_key = wrap;
-            self.header.format_version = VaultHeader::BOUND_WRAP_VERSION;
+            self.header.format_version = VaultHeader::FORMAT_VERSION;
         }
         Ok(())
     }
@@ -398,12 +589,18 @@ impl Vault {
     /// Common tail of the two unlock paths: decrypt items, transition state.
     fn finish_unlock(&mut self, vault_key: SymmetricKey) -> Result<()> {
         self.verify_authentication(&vault_key)?;
+        let keys = Keys::of(&vault_key, self.container_version())?;
         let items = match &self.state {
-            VaultState::Locked { items, .. } => decrypt_items(&vault_key, items)?,
+            VaultState::Locked { items, .. } => decrypt_items(&keys.items, items)?,
             // unreachable: callers guard on `is_unlocked()` first.
             VaultState::Unlocked { .. } => return Ok(()),
         };
-        self.state = VaultState::Unlocked { vault_key, items };
+        let meta = open_meta(&vault_key, self.header.sealed_meta.as_ref())?;
+        self.state = VaultState::Unlocked {
+            vault_key,
+            meta,
+            items,
+        };
         self.session_id = Uuid::new_v4();
         Ok(())
     }
@@ -411,16 +608,19 @@ impl Vault {
     /// Lock the vault: re-seal current items and drop (zeroize) the vault key
     /// and plaintext items.
     pub fn lock(&mut self) -> Result<()> {
-        if let VaultState::Unlocked { vault_key, items } = &self.state {
+        if self.is_unlocked() {
             // Encrypt before changing state. If serialization or randomness
             // fails, keeping the still-unlocked state is safer than silently
             // replacing the user's item set with an empty locked vault.
-            let resealed = encrypt_items(vault_key, items)?;
-            let sealed = self.seal(vault_key, resealed.clone())?;
-            self.header.format_version = sealed.version;
+            let Sealing {
+                header,
+                items,
+                sealed,
+            } = self.seal()?;
+            self.header = header;
             // Reassigning drops the old Unlocked state → key + plaintext zeroized.
             self.state = VaultState::Locked {
-                items: resealed,
+                items,
                 sealed: Some(sealed),
             };
         }
@@ -455,6 +655,13 @@ impl Vault {
         Ok(crate::security::audit(self.unlocked_items()?))
     }
 
+    /// The active (not deleted) items, borrowed. For reading many items, this
+    /// rather than `get_item` per summary, which finds each id by a linear
+    /// search and clones its plaintext.
+    pub fn active_items(&self) -> Result<impl Iterator<Item = &Item>> {
+        Ok(self.unlocked_items()?.iter().filter(|i| !i.is_deleted()))
+    }
+
     /// Fetch a full (decrypted) item by id. The returned clone carries
     /// plaintext secrets and zeroizes on drop.
     pub fn get_item(&self, id: Uuid) -> Result<Item> {
@@ -469,15 +676,19 @@ impl Vault {
     /// this unlocked vault, keeping the most-recently-changed version of each
     /// item (see [`crate::sync::merge`]).
     ///
-    /// The peer's items are decrypted with *this* vault's key — valid because a
-    /// synced vault shares one stable vault key across devices. A decryption
-    /// failure therefore means the file is a *different* vault, and the merge is
-    /// refused ([`Error::Decryption`]) rather than silently importing garbage.
-    /// Requires this vault to be unlocked.
+    /// Only a copy sealed with this vault's current key merges. One sealed
+    /// after a password change this vault has not taken on is
+    /// [`Error::KeyRotated`]; one from before a change is [`Error::StaleKey`]
+    /// and is never merged, since anyone who knew the old password could have
+    /// written it. Anything else is a *different* vault or tampered with, and
+    /// the merge is refused ([`Error::Decryption`]) rather than importing
+    /// garbage. Requires this vault to be unlocked.
     pub fn merge_remote(&mut self, remote_bytes: &[u8]) -> Result<()> {
         let remote = Self::from_bytes(remote_bytes)?;
+        self.authenticate(&remote)?;
         let vault_key = self.vault_key()?;
-        remote.verify_authentication(vault_key)?;
+        let remote_keys = Keys::of(vault_key, remote.container_version())?;
+        let remote_meta = open_meta(vault_key, remote.header.sealed_meta.as_ref())?;
         let VaultState::Locked {
             items: remote_enc,
             sealed,
@@ -509,22 +720,11 @@ impl Vault {
             }
         }
         let remote_header = remote.header;
-        let remote_purges = remote.purges;
-        let VaultState::Unlocked { vault_key, items } = &mut self.state else {
-            return Err(Error::Locked);
-        };
-        let remote_items = decrypt_items(vault_key, &remote_enc)?;
-        // Purges first, then applied to the union: a hard delete on either side
-        // has to reach items that only the other side still had.
-        self.purges = crate::sync::merge_purges(core::mem::take(&mut self.purges), remote_purges);
-        let local = core::mem::take(items);
-        *items = crate::sync::apply_purges(
-            crate::sync::merge_versioned(local, remote_items),
-            &self.purges,
-        );
-        // Header: adopt a NEWER master rewrap (password rotation / KDF upgrade)
-        // from the peer, or the same one already bound to authenticated
-        // containers. The vault key itself never changes on rotation, so the
+        let remote_items = decrypt_items(&remote_keys.items, &remote_enc)?;
+        self.absorb(remote_items, remote.purges, remote_meta)?;
+        // Header: adopt a newer rewrap of this same key (a password change
+        // made by a V6 build, which kept the key), or the same one already
+        // bound to authenticated containers. The key is unchanged, so the
         // local device wrap stays valid and is kept.
         let newer = remote_header.rewrap_epoch > self.header.rewrap_epoch;
         let binds = remote_header.rewrap_epoch == self.header.rewrap_epoch
@@ -538,6 +738,196 @@ impl Vault {
             self.header.format_version = remote_header.format_version;
         }
         Ok(())
+    }
+
+    /// Take on a master password change made on another device.
+    ///
+    /// `remote_bytes` is a copy sealed after the change (one that was
+    /// [`Error::KeyRotated`]) and `password` the new password. The vault
+    /// switches to that copy's key and header, and merges it. The copy must
+    /// carry the key this vault is sealed with, as every change made from this
+    /// vault does; otherwise it is [`Error::DifferentVault`], even when the
+    /// password opens it. That is what stops a copy forged by someone who
+    /// knows an old password from taking the vault over.
+    ///
+    /// Works locked too: the copy carries the key this vault was sealed with,
+    /// so the new password alone opens both. Quick unlock wrapped the old key
+    /// and is dropped; callers holding the device key re-enable it. A copy
+    /// that is not from a later change than this vault's is
+    /// [`Error::StaleKey`].
+    pub fn adopt_rotation(&mut self, remote_bytes: &[u8], password: &str) -> Result<()> {
+        let mut remote = Self::from_bytes(remote_bytes)?;
+        if remote.header.key_epoch <= self.header.key_epoch {
+            return Err(Error::StaleKey);
+        }
+        remote.unlock(password)?;
+        let VaultState::Unlocked {
+            vault_key: new_key,
+            meta: carried,
+            items: remote_items,
+        } = remote.state
+        else {
+            return Err(Error::Locked);
+        };
+        let ours = match &self.state {
+            VaultState::Unlocked { vault_key, .. } => {
+                carried.previous_keys.iter().find(|key| *key == vault_key)
+            }
+            VaultState::Locked { sealed: None, .. } => None,
+            VaultState::Locked { .. } => carried
+                .previous_keys
+                .iter()
+                .find(|key| self.verify_authentication(key).is_ok()),
+        }
+        .cloned()
+        .ok_or(Error::DifferentVault)?;
+        if !self.is_unlocked() {
+            self.finish_unlock(ours)?;
+        }
+        let VaultState::Unlocked {
+            vault_key, meta, ..
+        } = &mut self.state
+        else {
+            return Err(Error::Locked);
+        };
+        let old_key = core::mem::replace(vault_key, new_key);
+        let old_meta = core::mem::replace(meta, carried);
+        let known = core::iter::once(old_key).chain(old_meta.previous_keys);
+        remember_keys(&mut meta.previous_keys, vault_key, known);
+        devices::merge(&mut meta.devices, old_meta.devices);
+        self.absorb(remote_items, remote.purges, Meta::default())?;
+        self.header = VaultHeader {
+            device_wrapped_vault_key: None,
+            ..remote.header
+        };
+        Ok(())
+    }
+
+    /// Merge a peer's items, hard deletes and sealed header part into the
+    /// unlocked vault.
+    fn absorb(
+        &mut self,
+        remote_items: Vec<Item>,
+        remote_purges: Vec<Purge>,
+        remote_meta: Meta,
+    ) -> Result<()> {
+        let VaultState::Unlocked {
+            vault_key,
+            meta,
+            items,
+        } = &mut self.state
+        else {
+            return Err(Error::Locked);
+        };
+        // Purges first, then applied to the union: a hard delete on either side
+        // has to reach items that only the other side still had.
+        self.purges = crate::sync::merge_purges(core::mem::take(&mut self.purges), remote_purges);
+        let local = core::mem::take(items);
+        *items = crate::sync::apply_purges(
+            crate::sync::merge_versioned(local, remote_items),
+            &self.purges,
+        );
+        remember_keys(
+            &mut meta.previous_keys,
+            vault_key,
+            remote_meta.previous_keys,
+        );
+        devices::merge(&mut meta.devices, remote_meta.devices);
+        Ok(())
+    }
+
+    // ----- devices ----------------------------------------------------------
+
+    /// The devices that push this vault, as far as this copy knows.
+    pub fn devices(&self) -> Result<&[Device]> {
+        match &self.state {
+            VaultState::Unlocked { meta, .. } => Ok(&meta.devices),
+            VaultState::Locked { .. } => Err(Error::Locked),
+        }
+    }
+
+    /// Record that device `id`, called `name`, is pushing this copy at `now`
+    /// (Unix ms): its count goes up by one. The sync layer calls it on the copy
+    /// it is about to upload.
+    pub fn record_upload(&mut self, id: Uuid, name: &str, now: i64) -> Result<()> {
+        let key_epoch = self.header.key_epoch;
+        let VaultState::Unlocked { meta, .. } = &mut self.state else {
+            return Err(Error::Locked);
+        };
+        let uploads = meta
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .map_or(0, |d| d.uploads)
+            + 1;
+        let this = Device {
+            id,
+            name: name.to_owned(),
+            uploads,
+            last_upload: now,
+            key_epoch,
+        };
+        devices::merge(&mut meta.devices, [this]);
+        Ok(())
+    }
+
+    /// The devices, other than `except`, whose uploads this vault has seen
+    /// but that no copy in `remotes` accounts for any more: the storage went
+    /// back in time. Only copies sealed with this vault's key say anything,
+    /// and only uploads sealed with it are judged: around a password change,
+    /// uploads sealed with the old key are left out on purpose. When
+    /// `remotes` holds no copy of this vault at all (an empty or new account,
+    /// a foreign vault) there is nothing to judge, and the answer is empty.
+    ///
+    /// `remotes` must be everything the storage holds. One copy alone proves
+    /// nothing: a device that was offline pushes a copy that knows of other
+    /// devices' older uploads, and that is no sign of anything.
+    pub fn devices_behind(&self, remotes: &[Vec<u8>], except: Uuid) -> Result<Vec<Device>> {
+        let VaultState::Unlocked {
+            vault_key, meta, ..
+        } = &self.state
+        else {
+            return Err(Error::Locked);
+        };
+        let mut ours = false;
+        let mut seen = Vec::new();
+        for bytes in remotes {
+            let Ok(remote) = Self::from_bytes(bytes) else {
+                continue;
+            };
+            if !matches!(
+                remote.state,
+                VaultState::Locked {
+                    sealed: Some(_),
+                    ..
+                }
+            ) {
+                continue;
+            }
+            if remote.verify_authentication(vault_key).is_ok() {
+                ours = true;
+                if let Ok(remote_meta) = open_meta(vault_key, remote.header.sealed_meta.as_ref()) {
+                    seen.extend(remote_meta.devices);
+                }
+            } else if meta
+                .previous_keys
+                .iter()
+                .any(|key| remote.verify_authentication(key).is_ok())
+            {
+                // Ours, from before a password change: it accounts for none of
+                // the uploads made with the new key.
+                ours = true;
+            }
+        }
+        if !ours {
+            return Ok(Vec::new());
+        }
+        Ok(devices::behind(
+            &meta.devices,
+            &seen,
+            except,
+            self.header.key_epoch,
+        ))
     }
 
     /// Merge duplicate active logins (same host + username): the newest wins,
@@ -759,20 +1149,42 @@ impl Vault {
         Ok(())
     }
 
-    /// Re-key the vault under a new master password (fresh salt + re-wrap).
-    /// Existing quick-unlock stays valid (it is wrapped under the device key,
-    /// not the master password).
+    /// Change the master password. The vault key is replaced too: whoever
+    /// knew the old password (with a copy of the old file, say) can read
+    /// nothing written from now on, and a device with the new key merges
+    /// nothing sealed with the old one. `key_epoch` goes up, so other devices
+    /// ask for the new password on their next sync ([`Error::KeyRotated`]).
+    /// The old key is kept, sealed under the new one, so they can open their
+    /// own copies with just the new password.
+    ///
+    /// Quick unlock wrapped the old key and is dropped: callers holding the
+    /// device key re-enable it with [`Vault::enable_device_unlock`]. Keys
+    /// wrapped outside the container ([`Vault::wrap_vault_key`]) need the
+    /// same.
     pub fn change_master_password(&mut self, new_password: &str) -> Result<()> {
-        let vault_key = self.vault_key()?.clone();
-        let new_params = KdfParams::new_default()?;
-        let master_key = crypto::derive_master_key(new_password, &new_params)?;
-        let wrapped = crypto::wrap_key(&master_key, &vault_key, &new_params.master_wrap_aad(true))?;
-        self.header.kdf = new_params;
+        self.vault_key()?;
+        self.rotate(new_password, KdfParams::new_default()?)
+    }
+
+    /// [`Vault::change_master_password`] under the given KDF parameters.
+    fn rotate(&mut self, new_password: &str, params: KdfParams) -> Result<()> {
+        let new_key = SymmetricKey::generate()?;
+        let master_key = crypto::derive_master_key(new_password, &params)?;
+        let wrapped = crypto::wrap_key(&master_key, &new_key, &params.master_wrap_aad(true))?;
+        let VaultState::Unlocked {
+            vault_key, meta, ..
+        } = &mut self.state
+        else {
+            return Err(Error::Locked);
+        };
+        meta.previous_keys
+            .insert(0, core::mem::replace(vault_key, new_key));
+        self.header.kdf = params;
         self.header.master_wrapped_vault_key = wrapped;
-        self.header.format_version = VaultHeader::BOUND_WRAP_VERSION;
-        // Monotonic epoch: peers adopt the higher-epoch header on merge, so the
-        // rotation propagates instead of being reverted by a stale header.
+        self.header.device_wrapped_vault_key = None;
+        self.header.format_version = VaultHeader::FORMAT_VERSION;
         self.header.rewrap_epoch += 1;
+        self.header.key_epoch += 1;
         Ok(())
     }
 
@@ -871,6 +1283,31 @@ impl Vault {
 
     // ----- internals ------------------------------------------------------
 
+    /// Check that `remote` is sealed with this vault's current key; see
+    /// [`Vault::merge_remote`] for what it is otherwise.
+    fn authenticate(&self, remote: &Vault) -> Result<()> {
+        let VaultState::Unlocked {
+            vault_key, meta, ..
+        } = &self.state
+        else {
+            return Err(Error::Locked);
+        };
+        if remote.verify_authentication(vault_key).is_ok() {
+            return Ok(());
+        }
+        if remote.header.key_epoch > self.header.key_epoch {
+            return Err(Error::KeyRotated);
+        }
+        if meta
+            .previous_keys
+            .iter()
+            .any(|key| remote.verify_authentication(key).is_ok())
+        {
+            return Err(Error::StaleKey);
+        }
+        Err(Error::Decryption)
+    }
+
     fn verify_authentication(&self, key: &SymmetricKey) -> Result<()> {
         let VaultState::Locked {
             sealed: Some(sealed),
@@ -879,7 +1316,7 @@ impl Vault {
         else {
             return Ok(());
         };
-        container_mac(key, sealed.version)
+        container_mac(&Keys::of(key, sealed.version)?.tag, sealed.version)
             .chain_update(&sealed.body)
             .verify_slice(&sealed.tag)
             .map_err(|_| Error::Decryption)
@@ -959,7 +1396,9 @@ fn encrypt_items(vault_key: &SymmetricKey, items: &[Item]) -> Result<Vec<Encrypt
     items
         .iter()
         .map(|item| {
-            validate_revision(item)?;
+            if !revision_in_bounds(item) {
+                return Err(Error::Serialization);
+            }
             let plaintext = encode_item_payload(item)?;
             let blob = crypto::seal(vault_key, &plaintext, item.id.as_bytes())?;
             Ok(EncryptedItem { id: item.id, blob })
@@ -973,22 +1412,24 @@ fn decrypt_items(vault_key: &SymmetricKey, items: &[EncryptedItem]) -> Result<Ve
         .iter()
         .map(|enc| {
             let plaintext = crypto::open(vault_key, &enc.blob, enc.id.as_bytes())?;
-            let item: Item = decode_item_payload(&plaintext)?;
+            // Authentic, since it opened under our key, yet unreadable to us:
+            // written by a newer build, which is never a reason to discard it.
+            let item: Item =
+                decode_item_payload(&plaintext).map_err(|_| Error::UnsupportedVersion)?;
             // Defense in depth: the decrypted id must match the cleartext id.
             if item.id != enc.id {
                 return Err(Error::Decryption);
             }
-            validate_revision(&item)?;
+            if !revision_in_bounds(&item) {
+                return Err(Error::UnsupportedVersion);
+            }
             Ok(item)
         })
         .collect()
 }
 
-fn validate_revision(item: &Item) -> Result<()> {
-    if item.revision_ancestors.len() > MAX_REVISION_ANCESTORS {
-        return Err(Error::Format);
-    }
-    Ok(())
+fn revision_in_bounds(item: &Item) -> bool {
+    item.revision_ancestors.len() <= MAX_REVISION_ANCESTORS
 }
 
 #[cfg(test)]
@@ -1133,11 +1574,14 @@ mod tests {
             m if m == MAGIC_V4 => 4,
             _ => 3,
         };
-        let VaultState::Unlocked { vault_key, items } = &vault.state else {
+        let VaultState::Unlocked {
+            vault_key, items, ..
+        } = &vault.state
+        else {
             panic!("legacy_file needs an unlocked vault");
         };
-        let body = encode_body(&VaultBody {
-            header: legacy_header(vault, password, version),
+        let body = encode_body(&BodyV6 {
+            header: (&legacy_header(vault, password, version)).into(),
             items: encrypt_items(vault_key, items).unwrap(),
             purges: vault.purges.clone(),
         })
@@ -1154,18 +1598,82 @@ mod tests {
         file
     }
 
-    /// Relabel a sealed file as V4 by rewriting the magic and the header's
-    /// `format_version`: two bytes, no key needed.
-    fn relabel_as_v4(file: &[u8], keep_tag: bool) -> Vec<u8> {
-        let end = if keep_tag {
-            file.len()
-        } else {
-            file.len() - AUTH_LEN
+    /// The unlocked `vault` saved the way a V6 build saved it, under `header`:
+    /// items and tag under the vault key itself.
+    fn v6_file(vault: &Vault, header: &VaultHeader) -> Vec<u8> {
+        let VaultState::Unlocked {
+            vault_key, items, ..
+        } = &vault.state
+        else {
+            panic!("v6_file needs an unlocked vault");
         };
-        let mut out = file[..end].to_vec();
-        out[..MAGIC.len()].copy_from_slice(MAGIC_V4);
-        out[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&4u16.to_le_bytes());
-        out
+        let header = VaultHeader {
+            format_version: 6,
+            ..header.clone()
+        };
+        let body = encode_body(&BodyV6 {
+            header: (&header).into(),
+            items: encrypt_items(vault_key, items).unwrap(),
+            purges: vault.purges.clone(),
+        })
+        .unwrap();
+        let tag = container_mac(vault_key, 6).chain_update(&body).finalize();
+        [MAGIC_V6.as_slice(), &body, &tag.into_bytes()].concat()
+    }
+
+    /// `vault` opened from `file` with `password`.
+    fn open(file: &[u8], password: &str) -> Vault {
+        let mut vault = Vault::from_bytes(file).unwrap();
+        vault.unlock(password).unwrap();
+        vault
+    }
+
+    fn titles(vault: &Vault) -> Vec<String> {
+        let mut titles: Vec<String> = vault
+            .list_items(false)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    /// Relabel a V7 file as the unauthenticated V4 format: re-encode its body
+    /// in the V4 layout under `format_version` 4. No key needed.
+    fn relabel_as_v4(file: &[u8], keep_tag: bool) -> Vec<u8> {
+        let body = body_of(file);
+        let mut header = crate::header::HeaderV6::from(&body.header);
+        header.format_version = 4;
+        let old = encode_body(&BodyV6 {
+            header,
+            items: body.items,
+            purges: body.purges,
+        })
+        .unwrap();
+        let tag = if keep_tag {
+            &file[file.len() - AUTH_LEN..]
+        } else {
+            &[]
+        };
+        [MAGIC_V4.as_slice(), &old, tag].concat()
+    }
+
+    #[test]
+    fn active_items_are_the_undeleted_ones_and_need_an_unlocked_vault() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "kept", 10)).unwrap();
+        vault.upsert_item(login_item(2, "binned", 10)).unwrap();
+        vault.delete_item(Uuid::from_bytes([2; 16]), 20).unwrap();
+        let titles: Vec<&str> = vault
+            .active_items()
+            .unwrap()
+            .map(|item| item.data.title())
+            .collect();
+        assert_eq!(titles, ["kept"]);
+
+        vault.lock().unwrap();
+        assert!(matches!(vault.active_items(), Err(Error::Locked)));
     }
 
     #[test]
@@ -1206,7 +1714,82 @@ mod tests {
         let mut forged = MAGIC.to_vec();
         forged.extend_from_slice(&bincode::serialize(&body).unwrap());
         forged.extend_from_slice(&[0; AUTH_LEN]);
-        assert!(matches!(Vault::from_bytes(&forged), Err(Error::Format)));
+        // Refused as newer, not garbage: a later build may raise the limits.
+        assert!(matches!(
+            Vault::from_bytes(&forged),
+            Err(Error::UnsupportedVersion)
+        ));
+    }
+
+    /// `Format` is the one error that lets a caller replace the bytes, so it
+    /// must mean exactly "nothing in here was authenticated".
+    #[test]
+    fn a_torn_container_is_format_and_nothing_else_is() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let file = vault.to_bytes().unwrap();
+        for torn in [
+            &file[..MAGIC.len()],
+            &file[..file.len() / 2],
+            &file[..file.len() - 1],
+        ] {
+            assert!(
+                matches!(Vault::from_bytes(torn), Err(Error::Format)),
+                "{}",
+                torn.len()
+            );
+        }
+        let legacy = legacy_file(&vault, "pw", MAGIC_V4);
+        assert!(matches!(
+            Vault::from_bytes(&legacy[..legacy.len() - 3]),
+            Err(Error::Format)
+        ));
+
+        // Whole but tampered: refused, never replaceable.
+        let mut tampered = file.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        let mut opened = Vault::from_bytes(&tampered).unwrap();
+        assert!(matches!(opened.unlock("pw"), Err(Error::Decryption)));
+    }
+
+    /// An item that opens under our key but does not decode was written by a
+    /// build that knows more than this one. Discarding it would lose data.
+    #[test]
+    fn authentic_content_this_build_cannot_decode_is_newer_not_garbage() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let VaultState::Unlocked {
+            vault_key, items, ..
+        } = &vault.state
+        else {
+            unreachable!();
+        };
+        let keys = Keys::of(vault_key, VaultHeader::FORMAT_VERSION).unwrap();
+        let mut sealed = encrypt_items(&keys.items, items).unwrap();
+        sealed[0].blob = crypto::seal(&keys.items, &[0xff, 0xff], sealed[0].id.as_bytes()).unwrap();
+        let body = encode_body(&VaultBody {
+            header: vault.header.clone(),
+            items: sealed,
+            purges: Vec::new(),
+        })
+        .unwrap();
+        let tag = container_mac(&keys.tag, VaultHeader::FORMAT_VERSION)
+            .chain_update(&body)
+            .finalize()
+            .into_bytes()
+            .into();
+        let version = VaultHeader::FORMAT_VERSION;
+        let file = Sealed { version, body, tag }.to_container();
+
+        let mut opened = Vault::from_bytes(&file).unwrap();
+        assert!(matches!(
+            opened.unlock("pw"),
+            Err(Error::UnsupportedVersion)
+        ));
+        assert!(matches!(
+            vault.merge_remote(&file),
+            Err(Error::UnsupportedVersion)
+        ));
     }
 
     #[test]
@@ -1314,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_container_is_read_and_rewritten_as_v6() {
+    fn v3_container_is_read_and_rewritten_as_v7() {
         let mut vault = Vault::create("pw", cheap_params()).unwrap();
         vault.upsert_item(login_item(1, "legacy", 10)).unwrap();
         let old = legacy_file(&vault, "pw", MAGIC_V3);
@@ -1388,16 +1971,18 @@ mod tests {
         // Rebuild the file in the old shape: same header and items, no purge
         // list, old magic.
         let items = match &vault.state {
-            VaultState::Unlocked { vault_key, items } => encrypt_items(vault_key, items).unwrap(),
+            VaultState::Unlocked {
+                vault_key, items, ..
+            } => encrypt_items(vault_key, items).unwrap(),
             VaultState::Locked { items, .. } => items.clone(),
         };
         #[derive(Serialize)]
         struct OldBody {
-            header: VaultHeader,
+            header: crate::header::HeaderV6,
             items: Vec<EncryptedItem>,
         }
         let mut old = MAGIC_V2.to_vec();
-        let header = legacy_header(&vault, "pw", 3);
+        let header = (&legacy_header(&vault, "pw", 3)).into();
         old.extend_from_slice(&bincode::serialize(&OldBody { header, items }).unwrap());
 
         let mut reloaded = Vault::from_bytes(&old).unwrap();
@@ -1439,31 +2024,313 @@ mod tests {
         assert!(matches!(a.merge_remote(&foreign), Err(Error::Decryption)));
     }
 
+    /// A V6 build's password change kept the vault key and only rewrapped
+    /// it, so peers merge its file and take its header on.
     #[test]
-    fn merge_remote_adopts_a_newer_master_rewrap() {
-        // Device A and B share a vault; A rotates the master password.
+    fn merge_remote_adopts_a_v6_builds_rewrap_of_the_same_key() {
         let mut a = Vault::create("old-pw", cheap_params()).unwrap();
         a.upsert_item(login_item(1, "X", 10)).unwrap();
         let base = a.to_bytes().unwrap();
-        let mut b = Vault::from_bytes(&base).unwrap();
-        b.unlock("old-pw").unwrap();
+        let mut b = open(&base, "old-pw");
 
-        a.change_master_password("new-pw").unwrap();
-        assert_eq!(a.header().rewrap_epoch, 1);
-        let rotated = a.to_bytes().unwrap();
+        let kdf = KdfParams {
+            salt: vec![9u8; KdfParams::SALT_LEN],
+            ..cheap_params()
+        };
+        let master_key = crypto::derive_master_key("new-pw", &kdf).unwrap();
+        let wrap = crypto::wrap_key(
+            &master_key,
+            a.vault_key().unwrap(),
+            &kdf.master_wrap_aad(true),
+        )
+        .unwrap();
+        let rewrapped = VaultHeader {
+            kdf,
+            master_wrapped_vault_key: wrap,
+            rewrap_epoch: 1,
+            ..a.header.clone()
+        };
 
-        // B merges A's file: the rotated header must be adopted, so a vault
-        // serialized by B now opens with the NEW password only.
-        b.merge_remote(&rotated).unwrap();
+        // B takes the rewrap on, so B's copy opens with the new password only.
+        b.merge_remote(&v6_file(&a, &rewrapped)).unwrap();
         assert_eq!(b.header().rewrap_epoch, 1);
-        let from_b = b.to_bytes().unwrap();
-        let mut check = Vault::from_bytes(&from_b).unwrap();
+        let mut check = Vault::from_bytes(&b.to_bytes().unwrap()).unwrap();
         assert!(check.unlock("old-pw").is_err());
         check.unlock("new-pw").unwrap();
 
         // And a STALE peer file (epoch 0) must NOT revert B's header.
         b.merge_remote(&base).unwrap();
         assert_eq!(b.header().rewrap_epoch, 1);
+    }
+
+    #[test]
+    fn a_password_change_replaces_the_vault_key() {
+        let mut vault = Vault::create("old", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        vault
+            .enable_device_unlock(&SymmetricKey::generate().unwrap())
+            .unwrap();
+        let before = vault.to_bytes().unwrap();
+        let old_key = vault.vault_key().unwrap().clone();
+
+        vault.rotate("new", cheap_params()).unwrap();
+        assert_eq!(vault.header().key_epoch, 1);
+        assert!(!vault.has_device_unlock(), "its wrap held the old key");
+        let after = vault.to_bytes().unwrap();
+
+        // The old key opens nothing written since; the new password does, and
+        // the copy from before is recognised as this vault's, and not merged.
+        let locked = Vault::from_bytes(&after).unwrap();
+        assert!(locked.verify_authentication(&old_key).is_err());
+        let mut reopened = open(&after, "new");
+        assert_eq!(titles(&reopened), ["bank"]);
+        assert!(matches!(
+            reopened.merge_remote(&before),
+            Err(Error::StaleKey)
+        ));
+        assert!(Vault::from_bytes(&after).unwrap().unlock("old").is_err());
+    }
+
+    /// The sealed part of the header is CBOR so a later build can add to it:
+    /// a field this build does not know is skipped, and authentic content it
+    /// cannot read at all is a newer build's, not garbage.
+    #[test]
+    fn the_sealed_header_part_takes_fields_a_later_build_adds() {
+        #[derive(Serialize)]
+        struct Later {
+            previous_keys: Vec<[u8; KEY_LEN]>,
+            not_yet_invented: Vec<String>,
+        }
+        let vault_key = SymmetricKey::generate().unwrap();
+        let old = SymmetricKey::generate().unwrap();
+        let seal = |plaintext: &[u8]| {
+            crypto::seal(
+                &derive(&vault_key, SEALED_META).unwrap(),
+                plaintext,
+                SEALED_META,
+            )
+            .unwrap()
+        };
+        let mut later = Vec::new();
+        let fields = Later {
+            previous_keys: vec![*old.as_bytes()],
+            not_yet_invented: vec!["later".into()],
+        };
+        ciborium::into_writer(&fields, &mut later).unwrap();
+        let meta = open_meta(&vault_key, Some(&seal(&later))).unwrap();
+        assert!(meta.previous_keys == [old]);
+
+        assert!(matches!(
+            open_meta(&vault_key, Some(&seal(b"\xff not cbor"))),
+            Err(Error::UnsupportedVersion)
+        ));
+    }
+
+    /// Two devices push in turn. A copy from the past, or the copy of a
+    /// device that was away, never counts as the storage going back; the
+    /// storage holding only copies that know fewer of the other device's
+    /// uploads does.
+    #[test]
+    fn a_storage_that_went_back_in_time_is_told_from_one_that_did_not() {
+        let mac = Uuid::from_bytes([1; 16]);
+        let phone = Uuid::from_bytes([2; 16]);
+        let mut on_mac = Vault::create("pw", cheap_params()).unwrap();
+        on_mac.record_upload(mac, "Mac", 1).unwrap();
+        let first = on_mac.to_bytes().unwrap();
+
+        let mut on_phone = open(&first, "pw");
+        on_phone.record_upload(phone, "iPhone", 2).unwrap();
+        let from_phone = on_phone.to_bytes().unwrap();
+        on_mac.merge_remote(&from_phone).unwrap();
+        on_mac.record_upload(mac, "Mac", 3).unwrap();
+        let latest = on_mac.to_bytes().unwrap();
+        on_phone.merge_remote(&latest).unwrap();
+        on_phone.record_upload(phone, "iPhone", 4).unwrap();
+        let phone_again = on_phone.to_bytes().unwrap();
+        on_mac.merge_remote(&phone_again).unwrap();
+        let names: Vec<_> = on_mac.devices().unwrap().iter().map(|d| &d.name).collect();
+        assert_eq!(names, ["Mac", "iPhone"]);
+
+        // The storage holds the phone's latest copy, maybe beside an older one.
+        let current = [first.clone(), phone_again.clone()];
+        assert!(on_mac.devices_behind(&current, mac).unwrap().is_empty());
+        // It holds only copies from before the phone's latest upload.
+        let behind = on_mac.devices_behind(&[first, from_phone], mac).unwrap();
+        assert_eq!(behind.len(), 1);
+        assert_eq!(behind[0].id, phone);
+        // Empty, or someone else's vault: nothing to judge.
+        assert!(on_mac.devices_behind(&[], mac).unwrap().is_empty());
+        let foreign = Vault::create("pw", cheap_params())
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        assert!(on_mac.devices_behind(&[foreign], mac).unwrap().is_empty());
+
+        // The device list survives a save.
+        let reopened = open(&on_mac.to_bytes().unwrap(), "pw");
+        assert_eq!(reopened.devices().unwrap(), on_mac.devices().unwrap());
+    }
+
+    /// Storage that holds nothing but copies from before a password change,
+    /// once a device has pushed with the new key, has lost that upload.
+    #[test]
+    fn only_copies_from_before_a_password_change_are_a_step_back() {
+        let mac = Uuid::from_bytes([1; 16]);
+        let phone = Uuid::from_bytes([2; 16]);
+        let mut on_mac = Vault::create("old", cheap_params()).unwrap();
+        let before = on_mac.to_bytes().unwrap();
+        on_mac.rotate("new", cheap_params()).unwrap();
+        on_mac.record_upload(mac, "Mac", 1).unwrap();
+        let mut on_phone = open(&on_mac.to_bytes().unwrap(), "new");
+        on_phone.record_upload(phone, "iPhone", 2).unwrap();
+        on_mac.merge_remote(&on_phone.to_bytes().unwrap()).unwrap();
+
+        let behind = on_mac.devices_behind(&[before], mac).unwrap();
+        assert_eq!(behind.len(), 1);
+        assert_eq!(behind[0].id, phone);
+    }
+
+    /// Around a password change, uploads sealed with the old key are left out
+    /// on purpose (`StaleKey`). Neither the device that made the change nor
+    /// one that takes it on later may call that the storage going back;
+    /// uploads made with the new key are judged as before.
+    #[test]
+    fn a_password_change_is_no_step_back() {
+        let [mac, laptop, phone] = [1, 2, 3].map(|n| Uuid::from_bytes([n; 16]));
+        let mut on_mac = Vault::create("old", cheap_params()).unwrap();
+        let mut on_laptop = open(&on_mac.to_bytes().unwrap(), "old");
+        let mut on_phone = open(&on_mac.to_bytes().unwrap(), "old");
+        on_phone.record_upload(phone, "iPhone", 1).unwrap();
+        on_mac.merge_remote(&on_phone.to_bytes().unwrap()).unwrap();
+
+        // The Mac changes the password. The laptop, not knowing yet, pushes
+        // with the old key; the phone merges that and pushes too, and its
+        // copy is all the storage holds.
+        on_mac.rotate("new", cheap_params()).unwrap();
+        on_laptop.record_upload(laptop, "Laptop", 2).unwrap();
+        on_phone
+            .merge_remote(&on_laptop.to_bytes().unwrap())
+            .unwrap();
+        on_phone.record_upload(phone, "iPhone", 3).unwrap();
+        let stale = on_phone.to_bytes().unwrap();
+        assert!(on_mac
+            .devices_behind(std::slice::from_ref(&stale), mac)
+            .unwrap()
+            .is_empty());
+
+        // The Mac leaves that copy out and pushes with the new key, which the
+        // phone takes on. The laptop's upload the Mac left out was sealed
+        // with the old key, so that is no step back either.
+        assert!(matches!(on_mac.merge_remote(&stale), Err(Error::StaleKey)));
+        on_mac.record_upload(mac, "Mac", 4).unwrap();
+        let rotated = on_mac.to_bytes().unwrap();
+        on_phone.adopt_rotation(&rotated, "new").unwrap();
+        let rotated = [rotated];
+        assert!(on_phone.devices_behind(&rotated, phone).unwrap().is_empty());
+
+        // Uploads made with the new key are judged again.
+        on_phone.record_upload(phone, "iPhone", 5).unwrap();
+        on_mac.merge_remote(&on_phone.to_bytes().unwrap()).unwrap();
+        let behind = on_mac.devices_behind(&rotated, mac).unwrap();
+        assert_eq!(behind.iter().map(|d| d.id).collect::<Vec<_>>(), [phone]);
+    }
+
+    #[test]
+    fn a_device_that_missed_the_change_takes_it_on_and_keeps_its_edits() {
+        let mut a = Vault::create("old", cheap_params()).unwrap();
+        a.upsert_item(login_item(1, "shared", 10)).unwrap();
+        let mut b = open(&a.to_bytes().unwrap(), "old");
+        b.upsert_item(login_item(2, "made on b", 11)).unwrap();
+        let from_b_before = b.to_bytes().unwrap();
+
+        a.rotate("new", cheap_params()).unwrap();
+        a.upsert_item(login_item(3, "made on a", 12)).unwrap();
+        let rotated = a.to_bytes().unwrap();
+
+        assert!(matches!(b.merge_remote(&rotated), Err(Error::KeyRotated)));
+        assert!(matches!(
+            b.adopt_rotation(&rotated, "old"),
+            Err(Error::Decryption)
+        ));
+        b.adopt_rotation(&rotated, "new").unwrap();
+        assert_eq!(b.header().key_epoch, 1);
+        assert_eq!(titles(&b), ["made on a", "made on b", "shared"]);
+        assert!(matches!(
+            b.adopt_rotation(&rotated, "new"),
+            Err(Error::StaleKey)
+        ));
+
+        // B's copy from before the change is not merged; its edit arrives
+        // with B's next copy instead.
+        assert!(matches!(
+            a.merge_remote(&from_b_before),
+            Err(Error::StaleKey)
+        ));
+        a.merge_remote(&b.to_bytes().unwrap()).unwrap();
+        assert_eq!(titles(&a), ["made on a", "made on b", "shared"]);
+    }
+
+    #[test]
+    fn a_locked_device_opens_with_just_the_new_password() {
+        let mut a = Vault::create("old", cheap_params()).unwrap();
+        a.upsert_item(login_item(1, "shared", 10)).unwrap();
+        let mut b = open(&a.to_bytes().unwrap(), "old");
+        b.upsert_item(login_item(2, "made on b", 11)).unwrap();
+        let mut b = Vault::from_bytes(&b.to_bytes().unwrap()).unwrap();
+
+        // Two changes while B was away.
+        a.rotate("new", cheap_params()).unwrap();
+        a.rotate("newer", cheap_params()).unwrap();
+        let rotated = a.to_bytes().unwrap();
+
+        assert!(b.unlock("newer").is_err());
+        assert!(matches!(
+            b.adopt_rotation(&rotated, "new"),
+            Err(Error::Decryption)
+        ));
+        b.adopt_rotation(&rotated, "newer").unwrap();
+        assert_eq!(b.header().key_epoch, 2);
+        assert_eq!(titles(&b), ["made on b", "shared"]);
+        assert_eq!(titles(&open(&b.to_bytes().unwrap(), "newer")).len(), 2);
+    }
+
+    #[test]
+    fn a_change_that_does_not_carry_our_key_is_refused_even_if_the_password_opens_it() {
+        // Someone who knows the old password forges a change of their own.
+        let mut vault = Vault::create("leaked", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let leaked = vault.to_bytes().unwrap();
+        vault.rotate("new", cheap_params()).unwrap();
+
+        let mut forger = open(&leaked, "leaked");
+        forger.rotate("leaked", cheap_params()).unwrap();
+        forger.rotate("leaked", cheap_params()).unwrap();
+        forger.upsert_item(login_item(9, "phishing", 99)).unwrap();
+        let forged = forger.to_bytes().unwrap();
+
+        assert!(matches!(
+            vault.merge_remote(&forged),
+            Err(Error::KeyRotated)
+        ));
+        assert!(matches!(
+            vault.adopt_rotation(&forged, "leaked"),
+            Err(Error::DifferentVault)
+        ));
+        let mut locked = Vault::from_bytes(&vault.to_bytes().unwrap()).unwrap();
+        assert!(matches!(
+            locked.adopt_rotation(&forged, "leaked"),
+            Err(Error::DifferentVault)
+        ));
+        assert_eq!(titles(&vault), ["bank"]);
+
+        // Nor does another vault's change, whatever its password.
+        let mut other = Vault::create("other", cheap_params()).unwrap();
+        other.rotate("other", cheap_params()).unwrap();
+        let mut fresh = Vault::create("pw", cheap_params()).unwrap();
+        assert!(matches!(
+            fresh.adopt_rotation(&other.to_bytes().unwrap(), "other"),
+            Err(Error::DifferentVault)
+        ));
     }
 
     #[test]
@@ -1617,13 +2484,9 @@ mod tests {
         peer.unlock("pw").unwrap();
         peer.upsert_item(login_item(2, "legacy peer edit", 20))
             .unwrap();
-        let mut body = body_of(&peer.to_bytes().unwrap());
-        body.header = legacy_header(&peer, "pw", 4);
-        let legacy = |body: &VaultBody| {
-            let mut out = MAGIC_V4.to_vec();
-            out.extend(bincode::serialize(body).unwrap());
-            out
-        };
+        let file = legacy_file(&peer, "pw", MAGIC_V4);
+        let mut body: BodyV6 = decode_body(&file[MAGIC.len()..]).unwrap();
+        let legacy = |body: &BodyV6| [MAGIC_V4.as_slice(), &encode_body(body).unwrap()].concat();
         local.merge_remote(&legacy(&body)).unwrap();
         assert_eq!(local.list_items(true).unwrap().len(), 2);
         let mut locked = Vault::from_bytes(&legacy(&body)).unwrap();
@@ -1650,10 +2513,15 @@ mod tests {
 
     #[test]
     fn stripping_the_authentication_tag_is_not_a_format_downgrade() {
+        // The body in the V4 layout, still saying it is V7, without its tag.
         let vault = Vault::create("pw", cheap_params()).unwrap();
-        let mut bytes = vault.to_bytes().unwrap();
-        bytes.truncate(bytes.len() - AUTH_LEN);
-        bytes[..MAGIC.len()].copy_from_slice(MAGIC_V4);
+        let body = body_of(&vault.to_bytes().unwrap());
+        let old = BodyV6 {
+            header: (&body.header).into(),
+            items: body.items,
+            purges: body.purges,
+        };
+        let bytes = [MAGIC_V4.as_slice(), &encode_body(&old).unwrap()].concat();
         assert!(matches!(Vault::from_bytes(&bytes), Err(Error::Decryption)));
     }
 
@@ -1673,8 +2541,30 @@ mod tests {
 
     // ---- downgrade: an unauthenticated relabel must not open -------------
 
+    /// From V7 the vault key itself seals nothing: items and the tag use keys
+    /// derived from it. V6 files, from the build before, still open.
     #[test]
-    fn a_v6_file_relabelled_as_v4_does_not_open() {
+    fn v7_seals_with_derived_keys_and_v6_files_still_open() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "bank", 10)).unwrap();
+        let file = vault.to_bytes().unwrap();
+        let vault_key = vault.vault_key().unwrap();
+        let body = body_of(&file);
+        let raw_tag = container_mac(vault_key, VaultHeader::FORMAT_VERSION)
+            .chain_update(&file[MAGIC.len()..file.len() - AUTH_LEN])
+            .finalize()
+            .into_bytes();
+        assert_ne!(raw_tag.as_slice(), &file[file.len() - AUTH_LEN..]);
+        let item = &body.items[0];
+        assert!(crypto::open(vault_key, &item.blob, item.id.as_bytes()).is_err());
+
+        let opened = open(&v6_file(&vault, &vault.header), "pw");
+        assert_eq!(titles(&opened), ["bank"]);
+        assert!(opened.to_bytes().unwrap().starts_with(MAGIC));
+    }
+
+    #[test]
+    fn a_v7_file_relabelled_as_v4_does_not_open() {
         let mut vault = Vault::create("pw", cheap_params()).unwrap();
         vault.upsert_item(login_item(1, "bank", 10)).unwrap();
         let device_key = SymmetricKey::generate().unwrap();
@@ -1695,22 +2585,33 @@ mod tests {
     }
 
     #[test]
-    fn a_v6_file_relabelled_as_v5_does_not_open() {
+    fn a_v7_file_relabelled_as_v6_or_v5_does_not_open() {
         let vault = Vault::create("pw", cheap_params()).unwrap();
         let file = vault.to_bytes().unwrap();
 
-        // Magic alone: the header still says 6.
-        let mut magic_only = file.clone();
-        magic_only[..MAGIC.len()].copy_from_slice(MAGIC_V5);
-        assert!(matches!(
-            Vault::from_bytes(&magic_only),
-            Err(Error::Decryption)
-        ));
+        // The magic alone: the body is not in their layout.
+        for magic in [MAGIC_V6, MAGIC_V5] {
+            let mut relabelled = file.clone();
+            relabelled[..MAGIC.len()].copy_from_slice(magic);
+            assert!(Vault::from_bytes(&relabelled).is_err());
+        }
 
-        // Magic and header: the tag was made under the V6 context.
-        magic_only[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&5u16.to_le_bytes());
-        let mut relabelled = Vault::from_bytes(&magic_only).unwrap();
-        assert!(matches!(relabelled.unlock("pw"), Err(Error::Decryption)));
+        // Re-encoded in their layout with the tag it had: the tag was made
+        // under the V7 context with the derived tag key.
+        for (magic, version) in [(MAGIC_V6, 6u16), (MAGIC_V5, 5)] {
+            let body = body_of(&file);
+            let mut header = crate::header::HeaderV6::from(&body.header);
+            header.format_version = version;
+            let old = encode_body(&BodyV6 {
+                header,
+                items: body.items,
+                purges: body.purges,
+            })
+            .unwrap();
+            let forged = [magic.as_slice(), &old, &file[file.len() - AUTH_LEN..]].concat();
+            let mut opened = Vault::from_bytes(&forged).unwrap();
+            assert!(matches!(opened.unlock("pw"), Err(Error::Decryption)));
+        }
     }
 
     #[test]
@@ -1721,7 +2622,7 @@ mod tests {
 
         let mut loaded = Vault::from_bytes(&v5).unwrap();
         loaded.unlock("pw").unwrap();
-        assert_eq!(loaded.header().format_version, 6);
+        assert_eq!(loaded.header().format_version, VaultHeader::FORMAT_VERSION);
         let upgraded = loaded.to_bytes().unwrap();
         assert!(upgraded.starts_with(MAGIC));
 
@@ -1780,7 +2681,7 @@ mod tests {
         assert_eq!(phone.header().format_version, 5);
 
         phone.merge_remote(&vault.to_bytes().unwrap()).unwrap();
-        assert_eq!(phone.header().format_version, 6);
+        assert!(phone.header().master_wrap_is_bound());
         let saved = phone.to_bytes().unwrap();
         assert!(saved.starts_with(MAGIC));
         Vault::from_bytes(&saved).unwrap().unlock("pw").unwrap();

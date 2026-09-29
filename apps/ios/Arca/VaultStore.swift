@@ -175,8 +175,26 @@ final class VaultStore {
         // Argon2id with the vault header's parameters — hundreds of
         // milliseconds, off the main actor inside VaultSession.
         await open(fallback: "Couldn't unlock the vault.") {
-            try await VaultSession.openWithMasterPassword(password)
+            do {
+                return try await VaultSession.openWithMasterPassword(password)
+            } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
+                // Perhaps the password was changed on another device: sync
+                // keeps the copy sealed under it, which opens this vault too.
+                guard let token = SyncCredentialStore.load() else { throw WrongPassword() }
+                do {
+                    guard let session = try await VaultSession.openWithChangedPassword(
+                        password, refreshToken: token)
+                    else { throw WrongPassword() }
+                    return session
+                } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
+                    throw WrongPassword()
+                }
+            }
         }
+    }
+
+    private struct WrongPassword: LocalizedError {
+        var errorDescription: String? { "Wrong master password." }
     }
 
     /// Unlock with the stored device key, behind Face ID / Touch ID.
@@ -501,12 +519,70 @@ final class VaultStore {
     /// Whether a Google credential is stored on this device (no keychain read).
     var syncConnected: Bool { SyncCredentialStore.exists }
 
+    /// Sync found the master password changed on another device, and pushes
+    /// nothing until this phone has it (see `adoptNewPassword`).
+    var needsNewPassword: Bool { syncStatus?.needsPassword == true }
+
+    /// Take on a master password change made on another device. Returns nil
+    /// once done, or a message for the prompt to show.
+    func adoptNewPassword(_ password: String) async -> String? {
+        guard let sync, let session else { return "The vault is locked." }
+        let hadQuickUnlock = quickUnlockEnabled
+        do {
+            try await sync.adoptPassword(password)
+        } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
+            return "That is not the new master password."
+        } catch {
+            log.error("adopt password failed: \(vaultLogMessage(for: error), privacy: .public)")
+            return Self.message(error, fallback: "Couldn't use the new master password.")
+        }
+        guard self.session === session else { return nil }
+        // Quick unlock wrapped the old vault key. A new device key wraps the
+        // new one; minting it needs no Face ID.
+        quickUnlockEnabled = false
+        if hadQuickUnlock { await enableQuickUnlock() }
+        failure = nil
+        await reload(session)
+        await runSync()
+        return nil
+    }
+
+    /// Devices whose latest changes Google Drive had lost. Sync has already
+    /// put them back; this says so until the user has seen it.
+    var driveLostChanges: [String] { syncStatus?.rolledBack ?? [] }
+
+    func acknowledgeLostChanges() async {
+        guard let sync else { return }
+        await sync.acknowledgeRollback()
+        guard self.sync === sync, let status = try? await sync.status(), self.sync === sync
+        else { return }
+        syncStatus = status
+    }
+
+    /// Every device that syncs this vault, this one first and then the most
+    /// recent. Empty until one of them has pushed.
+    func syncDevices() async -> [SyncedDevice] {
+        guard let session else { return [] }
+        let me = SyncDeviceIdentity.id
+        let devices = (try? await session.devices()) ?? []
+        return devices
+            .map { SyncedDevice(device: $0, isThisDevice: UUID(uuidString: $0.id) == me) }
+            .sorted { a, b in
+                a.isThisDevice != b.isThisDevice
+                    ? a.isThisDevice : a.device.lastUpload > b.device.lastUpload
+            }
+    }
+
     /// Build the engine for a freshly opened vault and, if this device is
     /// already signed in, reconnect and pull.
     private func startSync(_ session: VaultSession) async {
         do {
             guard self.session === session else { return }
             let engine = try await session.makeSync()
+            // Every copy this phone pushes then records the upload, which is
+            // how the other devices tell a current copy from one Drive held on
+            // to.
+            try await engine.setDevice(id: SyncDeviceIdentity.id, name: SyncDeviceIdentity.name)
             guard self.session === session else { return }
             sync = engine
             guard let token = SyncCredentialStore.load() else { return }
@@ -541,7 +617,8 @@ final class VaultStore {
             // the list on screen is now behind what the engine already holds.
             if status.merged { await reload(session) }
             guard self.session === session else { return }
-            if let message = status.lastError { failure = message }
+            // A changed password is asked for, not reported as a failure.
+            if let message = status.lastError, status.needsPassword != true { failure = message }
         } catch {
             guard self.session === session else { return }
             log.error("sync failed: \(vaultLogMessage(for: error), privacy: .public)")
@@ -660,4 +737,12 @@ final class VaultStore {
             return false
         }
     }
+}
+
+/// A device that syncs this vault, as the devices sheet lists it.
+struct SyncedDevice: Identifiable {
+    let device: VaultDevice
+    let isThisDevice: Bool
+
+    var id: String { device.id }
 }

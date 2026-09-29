@@ -151,10 +151,14 @@ pub fn options_from_rules(rules: &str, default_length: usize) -> PasswordOptions
     // Required characters are allowed by definition, whatever `allowed` says.
     let mut permitted = allowed.unwrap_or(Classes::all());
     permitted.merge(required);
+    // `required: special` still wins over an explicit set: the site insists,
+    // so the risk of an unaccepted character is one it has taken on itself.
+    permitted.special &= !explicit_set_seen || required.special;
 
-    // An `allowed:` clause naming only things we do not recognise leaves an
-    // empty alphabet, and generation would fail outright — on real input, since
-    // websites write this string by hand. Fall back to alphanumeric: accepted
+    // Nothing left that we know the site accepts: an `allowed:` naming only
+    // things we do not recognise, or only an explicit set of symbols. Websites
+    // write this string by hand, so this is real input, and failing it would
+    // leave the user with nothing. Fall back to alphanumeric: accepted
     // everywhere, and still far more entropy at this length than any site needs.
     if permitted == Classes::default() {
         permitted = Classes {
@@ -183,9 +187,7 @@ pub fn options_from_rules(rules: &str, default_length: usize) -> PasswordOptions
         lowercase: permitted.lower,
         uppercase: permitted.upper,
         digits: permitted.digit,
-        // `required: special` still wins: the site insists, so the risk of an
-        // unaccepted character is one it has taken on itself.
-        symbols: permitted.special && (!explicit_set_seen || required.special),
+        symbols: permitted.special,
     }
 }
 
@@ -497,6 +499,9 @@ mod rules_tests {
             "nonsense",
             "minlength: banana;",
             "allowed: fuchsia;",
+            // An explicit set of symbols alone: symbols are off for explicit
+            // sets, which used to leave no characters at all.
+            "allowed: [-];",
         ] {
             let o = options_from_rules(junk, 20);
             assert!(o.length > 0, "{junk:?} produced a zero length");
