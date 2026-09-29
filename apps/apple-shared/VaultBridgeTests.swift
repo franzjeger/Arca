@@ -154,6 +154,71 @@ final class VaultBridgeTests: XCTestCase {
             UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301"))
     }
 
+    // MARK: Duplicate logins
+
+    /// The JSON documented in vault_ffi.h, as `vault_ffi_find_duplicates`
+    /// sends it.
+    func testDecodesTheDocumentedDuplicatesJSON() throws {
+        let json = """
+            [{"possible":false,"keep":"b","logins":[\
+            {"id":"b","revision":"rb","title":"Example","site":"example.test",\
+            "username":"me@example.test","modifiedAt":1759000000000,"password":0,\
+            "hasPassword":true,"hasTotp":false,"hasNotes":false},\
+            {"id":"a","revision":"ra","title":"Example","site":"example.test",\
+            "username":"me@example.test","modifiedAt":1758000000000,"password":1,\
+            "hasPassword":true,"hasTotp":true,"hasNotes":true}]}]
+            """
+        let groups = try JSONDecoder().decode([DuplicateGroup].self, from: Data(json.utf8))
+
+        XCTAssertEqual(groups.count, 1)
+        XCTAssertEqual(groups.first?.keep, "b")
+        XCTAssertEqual(groups.first?.logins.map(\.password), [0, 1])
+        XCTAssertEqual(groups.first?.logins.last?.hasTotp, true)
+        XCTAssertEqual(groups.first?.logins.first?.modifiedAt, 1_759_000_000_000)
+    }
+
+    /// The request carries the names the library parses, and each login shown
+    /// once, even when it is in two groups.
+    func testTheMergeRequestIsWhatTheLibraryReads() throws {
+        let login = DuplicateLogin(
+            id: "b", revision: "rb", title: "Example", site: "example.test",
+            username: "me", modifiedAt: 1, password: 0, hasPassword: true,
+            hasTotp: false, hasNotes: false)
+        let request = DuplicateMergeRequest(
+            choices: [DuplicateChoice(keep: "b", ids: ["b", "a"])], shown: [login, login])
+        let object = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(request)) as? [String: Any]
+
+        XCTAssertEqual(
+            object?["choices"] as? [[String: AnyHashable]],
+            [["keep": "b", "ids": ["b", "a"]]])
+        XCTAssertEqual(
+            object?["shown"] as? [[String: String]],
+            [["id": "b", "revision": "rb"]])
+    }
+
+    /// Both exports are linked, and refuse a missing handle the way every
+    /// other export does.
+    func testTheDuplicateExportsRefuseANullHandle() {
+        var json: UnsafeMutablePointer<UInt8>?
+        var length = 0
+        XCTAssertEqual(
+            vault_ffi_find_duplicates(nil, &json, &length), VaultFFICode.nullArgument)
+        var merged = 0
+        let request: [UInt8] = Array("{}".utf8)
+        XCTAssertEqual(
+            vault_ffi_merge_duplicates(nil, request, request.count, 0, &merged, &json, &length),
+            VaultFFICode.nullArgument)
+        XCTAssertNil(json)
+    }
+
+    func testAReviewThatWentStaleAsksToLookAgain() {
+        let stale = VaultError.ffi(code: VaultFFICode.changed, operation: "merge_duplicates")
+        let failed = VaultError.ffi(code: VaultFFICode.operationFailed, operation: "merge_duplicates")
+        XCTAssertNotEqual(stale.errorDescription, failed.errorDescription)
+        XCTAssertTrue(stale.errorDescription?.contains("Look again") ?? false)
+    }
+
     // MARK: A password change made elsewhere, kept
 
     /// Bytes that are not a vault are never kept, and a kept file that no
