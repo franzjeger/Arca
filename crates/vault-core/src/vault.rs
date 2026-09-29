@@ -961,9 +961,7 @@ impl Vault {
             })
         });
         if !unchanged {
-            return Err(Error::InvalidArgument(
-                "These logins changed. Look for duplicates again before merging.",
-            ));
+            return Err(Error::Changed);
         }
         let shown = |id: &Uuid| reviewed.iter().any(|(r, _)| r == id);
         if choices.iter().any(|choice| {

@@ -86,6 +86,11 @@ pub enum Error {
     /// Invalid arguments supplied by the caller (e.g. password length 0).
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
+    /// Items someone chose about changed after they were shown: sync or
+    /// another app wrote in between. The choice was about what is no longer
+    /// there, so nothing was done; show them again.
+    #[error("the items changed after they were shown")]
+    Changed,
 
     /// A passkey operation failed (bad key material, or the item is not a
     /// passkey). Deliberately indistinct — carries no key material.

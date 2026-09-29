@@ -63,13 +63,13 @@ it("says so when there is nothing to merge", async () => {
 it("shows why a merge was refused and offers to look again", async () => {
   vi.mocked(api.findDuplicates).mockResolvedValue([same]);
   vi.mocked(api.mergeDuplicates).mockRejectedValue({
-    code: "invalid_argument",
-    message: "These logins changed. Look for duplicates again before merging.",
+    code: "changed",
+    message: "These logins changed after they were shown. Look again before merging.",
   });
   const onMerged = vi.fn();
   render(<DuplicatesDialog onClose={vi.fn()} onMerged={onMerged} />);
   await userEvent.click(await screen.findByRole("button", { name: "Merge 1 group" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("These logins changed.");
+  expect(await screen.findByRole("alert")).toHaveTextContent("These logins changed after they were shown.");
   expect(onMerged).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole("button", { name: "Look again" }));
   expect(api.findDuplicates).toHaveBeenCalledTimes(2);
