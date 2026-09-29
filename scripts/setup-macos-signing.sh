@@ -14,8 +14,8 @@
 #     signing request written here, and the next run finds the certificate;
 #   * Developer ID profiles for the app and its AutoFill extension, which grant
 #     the App Group, shared keychain and AutoFill capabilities on every Mac;
-#   * notarization credentials in the login keychain, from the same API key,
-#     so no Apple ID password or app-specific password is involved.
+#   * notarization credentials from the same API key, so no Apple ID password
+#     or app-specific password is involved.
 #
 # WHAT IT LEAVES BEHIND
 #
@@ -23,8 +23,9 @@
 #   ~/.arca/signing/developer-id.cer     the certificate Apple issued
 #   ~/.arca/signing/developer-id-keychain-password
 #   ~/Library/Keychains/arca-developer-id.keychain-db
+#                                        the key, the certificate, and the
+#                                        notarytool profile "arca-notary"
 #   ~/Library/Developer/Xcode/UserData/Provisioning Profiles/*.provisionprofile
-#   a notarytool profile named "arca-notary"
 #
 # Its own keychain, apart from the iPhone's: setup-ios-signing.sh recreates that
 # one from scratch, which would take this key with it.
@@ -101,11 +102,15 @@ KEY_ID="$(sed -n 1p "$KEY_FILE" | tr -d '[:space:]')"
 ISSUER_ID="$(sed -n 2p "$KEY_FILE" | tr -d '[:space:]')"
 P8="$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
 [ -f "$P8" ] || die "no private key at $P8."
-xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+# In this keychain, beside the signing key, not notarytool's default. That one
+# keeps them where nothing can read them while the screen is locked, and
+# notarytool then says they do not exist: a release left running while you
+# are away would build for minutes and fail at the last step.
+xcrun notarytool store-credentials "$NOTARY_PROFILE" --keychain "$KC" \
   --key "$P8" --key-id "$KEY_ID" --issuer "$ISSUER_ID" >/dev/null
-xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null \
+xcrun notarytool history --keychain "$KC" --keychain-profile "$NOTARY_PROFILE" >/dev/null \
   || die "notarytool cannot use the stored credentials."
-echo "   $NOTARY_PROFILE"
+echo "   $NOTARY_PROFILE, in $KCNAME"
 
 step "Verifying"
 security find-identity -v -p codesigning | grep -q "Developer ID Application" \
