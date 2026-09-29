@@ -43,10 +43,11 @@ fully scripted — no id-copying or file-editing.
 ./extension/install-macos.sh
 ```
 
-This builds the host (release), installs it at `~/.local/lib/arca/vault-native-host`
-and registers installed Chromium-family browsers and Firefox. Registrations
-use that stable path, independent of the checkout and Cargo build cache. The
-desktop installer performs the same update alongside the app and CLI.
+Arca carries the native messaging host inside the app
+(`/Applications/Arca.app/Contents/MacOS/vault-native-host`) and registers it
+with the installed Chromium-family browsers and Firefox each time it starts, so
+installing or updating the app replaces both halves of the bridge. The script
+starts Arca once and checks that the browsers now start that host.
 
 Then the **one step Chrome won't let any tool automate** (Google blocks
 programmatic unpacked installs, by design):
@@ -63,13 +64,14 @@ loads do not start the app. On Linux, automatic startup supports the local
 installer and the standard `/usr/bin/vault-desktop` package; on other platforms
 or custom install paths, start the desktop app manually first.
 
-Reload the extension and the website tabs after updating its files.
-(Undo: delete the `no.sybr.vault.json` files the script printed.)
+Reload the extension and the website tabs after updating its files. To
+disconnect a browser, remove the extension: Arca writes the `no.sybr.vault.json`
+registrations again whenever it starts.
 
 Handshake smoke test of the host alone:
 
 ```bash
-printf '\x10\x00\x00\x00{"type":"hello"}' | ~/.local/lib/arca/vault-native-host | xxd | head
+printf '\x10\x00\x00\x00{"type":"hello"}' | /Applications/Arca.app/Contents/MacOS/vault-native-host | xxd | head
 ```
 
 ### Linux

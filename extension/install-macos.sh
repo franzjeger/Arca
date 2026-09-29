@@ -1,37 +1,33 @@
 #!/usr/bin/env bash
 #
-# One-shot installer for the Arca native-messaging host (macOS).
+# Connects the browser extension to Arca on macOS.
 #
-# Builds the host binary and registers it for every installed Chromium-family
-# browser, with the extension's PINNED id (derived from the public `key` in
-# chromium/manifest.json). After running this, the only manual step left is
-# Chrome's mandatory "Load unpacked" (Google blocks programmatic unpacked
-# installs) — and because the id is pinned, no id-copying or file-editing is
-# needed.
-#
-# Re-runnable and reversible: delete the written no.sybr.vault.json files to
-# undo (see the paths it prints).
+# The native messaging host ships inside Arca.app, and Arca registers it with
+# every installed Chromium-family browser and Firefox each time it starts, so
+# there is nothing to build or copy here: this starts Arca once and checks that
+# the browsers now start its host. What is left is Chrome's "Load unpacked"
+# (Google blocks programmatic unpacked installs), and because the extension's
+# id is pinned by the public `key` in chromium/manifest.json, no id-copying or
+# file-editing is needed.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-CARGO_OUTPUT="$(python3 "$REPO/scripts/cargo-target-dir.py")"
-HOST_BIN="$CARGO_OUTPUT/release/vault-native-host"
+APP="/Applications/Arca.app"
+HOST="$APP/Contents/MacOS/vault-native-host"
 
-echo "==> Building the native messaging host (release)…"
-( cd "$REPO" && cargo build -p vault-native-host --release )
-[ -x "$HOST_BIN" ] || { echo "host binary not found at $HOST_BIN" >&2; exit 1; }
+[ -d "$APP" ] || { echo "Install Arca in /Applications first (scripts/install-app-macos.sh)." >&2; exit 1; }
+[ -x "$HOST" ] || { echo "This Arca predates the browser host inside the app. Update it (scripts/install-app-macos.sh)." >&2; exit 1; }
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 
-# Share the desktop installer's stable host path and atomic registration logic.
-JOURNAL_ROOT="$(mktemp -d /tmp/arca-host-install.XXXXXX)"
-trap 'rm -rf "$JOURNAL_ROOT"' EXIT
-python3 "$REPO/scripts/install-macos-support.py" --host-only \
-  "$REPO" "$CARGO_OUTPUT" "$JOURNAL_ROOT/rollback"
+echo "==> Starting Arca, which registers its browser host…"
+open -g -a "$APP"
+python3 "$REPO/scripts/verify-installed-bridge.py" --registrations "$HOST" "$VERSION"
 
 cat <<DONE
 
 Done. Last step (Chrome's one unavoidable click):
   1. chrome://extensions  ->  enable "Developer mode"
   2. "Load unpacked"  ->  select:  $REPO/extension/chromium
-The pinned extension id matches the host registration above.
+The pinned extension id matches the registration Arca wrote.
 Then keep the desktop app open + unlocked and autofill will work.
 DONE

@@ -2,7 +2,8 @@
 #
 # Build the release app and (re)install it into /Applications.
 #
-# Produces a development-signed Arca.app with native AutoFill.
+# Produces a development-signed Arca.app with native AutoFill and its browser
+# host inside.
 # ARCA_ADHOC=1 explicitly builds without shared capabilities or AutoFill.
 # Distribution to OTHER machines needs a Developer ID + notarization instead.
 set -euo pipefail
@@ -29,7 +30,6 @@ NEW_APP_INSTALLED=0
 INSTALL_COMMITTED=0
 WAS_RUNNING=0
 SUPPORT_JOURNAL=""
-HOST_BIN="$HOME/.local/lib/arca/vault-native-host"
 
 cleanup() {
   status=$?
@@ -123,11 +123,13 @@ echo "==> Building the arca command line…"
 cargo build --release -p arca-cli --manifest-path "$REPO/Cargo.toml" \
   || die "the arca command line failed to build"
 
-# The browser host is installed with the CLI after bundle verification.
-# Registrations always point at ~/.local/lib/arca, never a Cargo build cache.
+# The browser host goes inside the app, beside its executable. Arca registers
+# it with the browsers when it starts (src-tauri/src/browser_host.rs), so an
+# update replaces both halves of the bridge together.
 echo "==> Building the native messaging host (release)…"
 cargo build --release -p vault-native-host --manifest-path "$REPO/Cargo.toml" \
   || die "the native messaging host failed to build"
+ditto --norsrc "$CARGO_OUTPUT/release/vault-native-host" "$APP_SRC/Contents/MacOS/vault-native-host"
 
 # All profiles come from Xcode or the installed app and were matched to one
 # usable certificate, this Mac, both bundle IDs and their capabilities above.
@@ -157,7 +159,8 @@ if [ "${ARCA_ADHOC:-}" != "1" ]; then
   python3 "$REPO/scripts/prepare-autofill-signing.py" --prepare \
     "$APP_SRC" "$ENTITLEMENTS" "$APP_ENT" "$SIGNING_PLAN"
   xattr -cr "$APP_SRC"
-  echo "==> Signing the extension, then the app"
+  echo "==> Signing the browser host and the extension, then the app"
+  codesign --force -s "$IDENTITY" -i no.sybr.vault.native-host "$APP_SRC/Contents/MacOS/vault-native-host"
   codesign --force --entitlements "$APPEX_ENT" -s "$IDENTITY" "$APP_SRC/Contents/PlugIns/ArcaAutoFill.appex"
   codesign --force --entitlements "$APP_ENT" -s "$IDENTITY" "$APP_SRC"
   for bundle in "$APP_SRC/Contents/PlugIns/ArcaAutoFill.appex" "$APP_SRC"; do
@@ -214,11 +217,11 @@ INSTALLED_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionStri
 [ "$INSTALLED_VERSION" = "$EXPECTED_VERSION" ] \
   || die "installed app version $INSTALLED_VERSION does not match build $EXPECTED_VERSION"
 SUPPORT_JOURNAL="$SIGNING_DIR/support-rollback"
-python3 "$REPO/scripts/install-macos-support.py" "$REPO" "$CARGO_OUTPUT" "$SUPPORT_JOURNAL"
+python3 "$REPO/scripts/install-macos-support.py" "$CARGO_OUTPUT" "$SUPPORT_JOURNAL"
 echo "==> Launching and verifying the installed app…"
 open -a "$APP_DST"
-python3 "$REPO/scripts/verify-installed-bridge.py" \
-  "$HOST_BIN" "$EXPECTED_VERSION" \
+python3 "$REPO/scripts/verify-installed-bridge.py" --registrations \
+  "$APP_DST/Contents/MacOS/vault-native-host" "$EXPECTED_VERSION" \
   || die "The installed app failed its live bridge check"
 if [ "$WAS_RUNNING" != 1 ]; then
   osascript -e 'quit app "Arca"'

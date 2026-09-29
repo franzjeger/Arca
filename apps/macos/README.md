@@ -66,10 +66,12 @@ default. Distribution/notarization is a separate workflow in
 ## Installation and verification
 
 The installer runs the full smoke suite, builds the app and native host, then
-embeds and signs the AutoFill extension. The CLI is installed in `~/.local/bin`
-and the browser host in `~/.local/lib/arca/vault-native-host`; browser manifests
-use that stable path even if Cargo's output directory changes. App, helper
-binaries and registrations are restored if installation verification fails.
+embeds and signs the browser host and the AutoFill extension inside the app.
+The CLI is installed in `~/.local/bin`. Arca registers the host it carries with
+the installed browsers when it starts, and the installer checks that they now
+start it. The host an older install left in `~/.local/lib/arca` is removed. If
+installation verification fails, the app, the CLI, that old host and the
+browser registrations are all restored.
 
 `CARGO_TARGET_DIR` controls Cargo output. Apple build products default to its
 `apple/ArcaHost` subdirectory, or `ARCA_APPLE_BUILD_ROOT/ArcaHost` when set.
