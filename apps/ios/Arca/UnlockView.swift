@@ -27,7 +27,7 @@ struct UnlockView: View {
     /// locked — where a biometric prompt cannot possibly succeed. Firing there
     /// spent the one attempt on nothing, so coming back to an unlocked phone
     /// offered a button instead of a face. The attempt now belongs to becoming
-    /// active, and leaving active re-arms it.
+    /// active, and going to the background re-arms it.
     private func attemptBiometrics() async {
         guard scenePhase == .active, !didTryBiometrics else { return }
         guard await store.resolveQuickUnlockAvailability() else { return }
@@ -101,9 +101,11 @@ struct UnlockView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task { await attemptBiometrics() }
-            } else {
-                // Going away re-arms it. A declined or failed attempt still does
-                // not loop, because nothing re-triggers until the app comes back.
+            } else if phase == .background {
+                // Only really leaving re-arms it. The Face ID sheet itself makes
+                // the app inactive, so re-arming on `.inactive` answered every
+                // failed or declined attempt with another prompt the moment the
+                // sheet closed, for ever, with the password field unreachable.
                 didTryBiometrics = false
             }
         }
