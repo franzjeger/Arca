@@ -16,9 +16,14 @@ export function LockScreen({
   const creating = !status.exists;
   // Sync saw the master password change on another device. The new password
   // opens this vault as it is (see `sync_adopt_password`), so say so before
-  // the old one is typed out of habit.
+  // the old one is typed out of habit. Once this computer has kept that
+  // change, it is the ONLY way in: nothing that wrapped the old key opens it.
   const { status: sync } = useSyncStatus();
-  const passwordChanged = !creating && !!sync?.needsPassword;
+  const changeKept = !creating && !!status.passwordChangePending;
+  const passwordChanged = changeKept || (!creating && !!sync?.needsPassword);
+  // The previous password was typed while a change is kept. That is either
+  // habit or a change the user never made, and only they know which.
+  const [previousTyped, setPreviousTyped] = useState(false);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
@@ -77,11 +82,31 @@ export function LockScreen({
       return;
     }
     setBusy(true);
+    setPreviousTyped(false);
     try {
       if (creating) await api.createVault(password);
       else await api.unlock(password);
       setPassword("");
       setConfirm("");
+      onUnlocked();
+    } catch (e) {
+      setError(errorMessage(e));
+      setPreviousTyped(isApiError(e) && e.code === "previous_password");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // The change was not the user's: the password they just typed, and this
+  // computer's own verification, open the vault as before (see
+  // `deny_password_change`).
+  const deny = async () => {
+    if (!password) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await api.denyPasswordChange(password);
+      setPassword("");
       onUnlocked();
     } catch (e) {
       setError(errorMessage(e));
@@ -148,6 +173,7 @@ export function LockScreen({
   // clicking into it: typing your password must not spawn biometric prompts.
   const canBiometric =
     !creating &&
+    !changeKept &&
     status.quickUnlockAvailable &&
     status.biometricAvailable &&
     !quickBroken;
@@ -158,7 +184,8 @@ export function LockScreen({
   // still waits for focus — the vault should not spring open in the
   // background while the window sits behind something else — and it still
   // fires once, so a stale key does not produce an error on every focus.
-  const keyFile = !creating && status.keyFile?.enrolled ? status.keyFile : null;
+  const keyFile =
+    !creating && !changeKept && status.keyFile?.enrolled ? status.keyFile : null;
   const keyPresent = !!keyFile?.present;
   const keyTried = useRef(false);
   const keyPending = useRef(false);
@@ -233,7 +260,9 @@ export function LockScreen({
                 : "Sign in with the Google account your vault syncs to, then unlock it with its master password."
               : creating
                 ? "Your master password encrypts everything locally. It is never stored or sent anywhere. If you forget it, the vault cannot be recovered."
-                : passwordChanged
+                : changeKept
+                  ? "Your master password was changed on another device. Only the new one opens Arca here now; quick unlock comes back once you have entered it."
+                  : passwordChanged
                   ? "Your master password was changed on another device. Enter the new one."
                   : keyFile
                     ? keyPresent
@@ -282,6 +311,24 @@ export function LockScreen({
           )}
 
           {error && <p className="px-1 text-[12px] text-red-400">{error}</p>}
+
+          {previousTyped && (
+            <div className="space-y-2 rounded-lg bg-fill/5 p-3 ring-1 ring-line/10">
+              <p className="text-[12px] leading-relaxed text-neutral-400">
+                Didn't change it? Then a copy in your Google Drive claims a new
+                master password, and someone else may know your password and
+                have access to your Google account. Change both once you are in.
+              </p>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void deny()}
+                className="w-full rounded-lg bg-fill/5 py-2 text-[13px] font-medium text-neutral-100 ring-1 ring-line/15 hover:bg-fill/10 disabled:opacity-60"
+              >
+                I didn't change it: unlock with this password
+              </button>
+            </div>
+          )}
 
           {(!restoring || account) && (
             <button

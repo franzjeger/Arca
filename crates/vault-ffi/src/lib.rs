@@ -104,7 +104,14 @@ pub mod sync;
 /// `vault_ffi_sync_set_device` (this device's id and name),
 /// `vault_ffi_sync_acknowledge_rollback`, `vault_ffi_devices`, and `rolledBack`
 /// in the sync status: devices whose latest changes the remote had lost.
-pub const ABI_VERSION: i32 = 20;
+///
+/// v21: a device that knows of a master password change keeps the copy that
+/// carries it, and refuses the old password and quick unlock until it takes
+/// the change on. Adds `vault_ffi_sync_rotated_copy` (the copy sync found),
+/// `vault_ffi_vault_adopt` (take the change on from a kept copy, locked and
+/// offline) and `vault_ffi_vault_key_epoch` (to tell a kept copy the vault has
+/// since caught up with).
+pub const ABI_VERSION: i32 = 21;
 
 // Return codes.
 pub(crate) const OK: i32 = 0;
@@ -915,6 +922,77 @@ pub unsafe extern "C" fn vault_ffi_vault_load(
             *out_handle = Box::into_raw(Box::new(VaultHandle {
                 vault: Arc::new(Mutex::new(vault)),
             }));
+            OK
+        }
+        Err(code) => code,
+    }
+}
+
+/// Take on a master password change made on another device from `copy`, a copy
+/// of this vault sealed after the change that the caller kept when sync found
+/// it (ABI v21). Works on a handle that is not open yet
+/// ([`vault_ffi_vault_load`]) and leaves it open under the new key; writing the
+/// vault is the caller's (`vault_ffi_merge_and_serialize`). Needs no network.
+///
+/// Returns `OK`; `ERR_DECRYPT` when `password` does not open the copy;
+/// `ERR_DIFFERENT_VAULT` when it opens one that is not this vault's (a
+/// different vault, or one forged by someone who knew an old password); and
+/// `ERR_NOT_FOUND` when this vault already has that change or a later one.
+///
+/// # Safety
+/// `handle` must be valid; `copy` must point to `copy_len` readable bytes;
+/// `password` must be a NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_vault_adopt(
+    handle: *mut VaultHandle,
+    copy: *const u8,
+    copy_len: usize,
+    password: *const c_char,
+) -> i32 {
+    if handle.is_null() || copy.is_null() || password.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let Some(password) = cstr(password) else {
+        return ERR_UTF8;
+    };
+    let copy = slice::from_raw_parts(copy, copy_len);
+    let handle = &*handle;
+    let mut vault = match lock_vault(&handle.vault) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let adopted = guard_result(|| match vault.adopt_rotation(copy, password) {
+        // Caught up another way since the copy was kept.
+        Err(Error::StaleKey) => Err(Error::NotFound),
+        adopted => adopted,
+    });
+    match adopted {
+        Ok(()) => OK,
+        Err(code) => code,
+    }
+}
+
+/// The key epoch a vault file's header names (ABI v21): how many master
+/// password changes the vault had been through when that copy was sealed.
+/// Read without a key, so unauthenticated: for telling whether a copy the
+/// caller kept is still ahead of its vault, never for trusting either.
+///
+/// # Safety
+/// `vault_bytes` must point to `vault_len` readable bytes; `out_epoch` must be
+/// a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_vault_key_epoch(
+    vault_bytes: *const u8,
+    vault_len: usize,
+    out_epoch: *mut u64,
+) -> i32 {
+    if vault_bytes.is_null() || out_epoch.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let bytes = slice::from_raw_parts(vault_bytes, vault_len);
+    match guard_result(|| Vault::from_bytes(bytes).map(|v| v.header().key_epoch)) {
+        Ok(epoch) => {
+            *out_epoch = epoch;
             OK
         }
         Err(code) => code,
@@ -2396,8 +2474,60 @@ mod tests {
     // Pinned deliberately: clients gate features on this number, so a bump has
     // to be a conscious edit here, not a side effect.
     #[test]
-    fn abi_version_is_20() {
-        assert_eq!(vault_ffi_abi_version(), 20);
+    fn abi_version_is_21() {
+        assert_eq!(vault_ffi_abi_version(), 21);
+    }
+
+    /// A phone that kept the copy sealed after a password change takes the
+    /// change on from it with the new password alone: locked, offline, and
+    /// only once.
+    #[test]
+    fn a_kept_copy_takes_a_changed_password_on() {
+        let mut params = vault_core::KdfParams::new_default().unwrap();
+        params.m_cost_kib = 256;
+        params.t_cost = 1;
+        let here = Vault::create("old", params).unwrap();
+        let local = here.to_bytes().unwrap();
+        let mut elsewhere = Vault::from_bytes(&local).unwrap();
+        elsewhere.unlock("old").unwrap();
+        elsewhere.change_master_password("new").unwrap();
+        let changed = elsewhere.to_bytes().unwrap();
+
+        let epoch = |bytes: &[u8]| {
+            let mut epoch = u64::MAX;
+            let code =
+                unsafe { vault_ffi_vault_key_epoch(bytes.as_ptr(), bytes.len(), &mut epoch) };
+            assert_eq!(code, OK);
+            epoch
+        };
+        assert_eq!((epoch(&local), epoch(&changed)), (0, 1));
+
+        let mut handle: *mut VaultHandle = ptr::null_mut();
+        let loaded = unsafe { vault_ffi_vault_load(local.as_ptr(), local.len(), &mut handle) };
+        assert_eq!(loaded, OK);
+        let adopt = |password: &str| {
+            let password = CString::new(password).unwrap();
+            unsafe {
+                vault_ffi_vault_adopt(handle, changed.as_ptr(), changed.len(), password.as_ptr())
+            }
+        };
+        assert_eq!(adopt("old"), ERR_DECRYPT);
+        assert_eq!(adopt("new"), OK);
+        let (mut out, mut len) = (ptr::null_mut(), 0usize);
+        assert_eq!(unsafe { vault_ffi_items(handle, &mut out, &mut len) }, OK);
+        unsafe { vault_ffi_free(out, len) };
+        assert_eq!(adopt("new"), ERR_NOT_FOUND);
+
+        let merged =
+            unsafe { vault_ffi_merge_and_serialize(handle, ptr::null(), 0, &mut out, &mut len) };
+        assert_eq!(merged, OK);
+        let written = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
+        unsafe { vault_ffi_free(out, len) };
+        unsafe { vault_ffi_vault_free(handle) };
+        assert_eq!(epoch(&written), 1);
+        let mut reopened = Vault::from_bytes(&written).unwrap();
+        assert!(reopened.unlock("old").is_err());
+        reopened.unlock("new").unwrap();
     }
 
     /// A loaded handle is a vault not yet open: it answers what the header

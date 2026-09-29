@@ -1,6 +1,6 @@
 /* vault-ffi — C ABI over vault-core for native platform integrations.
  *
- * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 20). All
+ * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 21). All
  * out-buffers are heap-allocated by the library and must be released with
  * vault_ffi_free(ptr, len), which also zeroes them.
  *
@@ -89,6 +89,24 @@ int32_t vault_ffi_devices(VaultHandle *handle, uint8_t **out_json,
  * this handle is how a locked client finds that change. Free it like any handle. */
 int32_t vault_ffi_vault_load(const uint8_t *vault_bytes, size_t vault_len,
                              VaultHandle **out_handle);
+
+/* ADDED IN ABI v21. Take on a master password change made on another device
+ * from a copy the caller kept (vault_ffi_sync_rotated_copy): works on a handle
+ * that is not open yet (vault_ffi_vault_load), needs no network, and leaves the
+ * handle open under the new key. Persist it with vault_ffi_merge_and_serialize
+ * under the vault lock. Quick unlock wrapped the old key and is gone: re-enable
+ * it if it was on. Returns 0; -7 when password does not open the copy; -11
+ * when it opens one that is not this vault's; -5 when the vault already has
+ * this change or a later one. */
+int32_t vault_ffi_vault_adopt(VaultHandle *handle, const uint8_t *copy,
+                              size_t copy_len, const char *password);
+
+/* ADDED IN ABI v21. The key epoch a vault file's header names: how many master
+ * password changes the vault had been through when that copy was sealed. Read
+ * without a key, so unauthenticated: for telling whether a kept copy is still
+ * ahead of its vault, never for trusting either. */
+int32_t vault_ffi_vault_key_epoch(const uint8_t *vault_bytes, size_t vault_len,
+                                  uint64_t *out_epoch);
 
 /* ADDED IN ABI v3, purely additive.
  * Open + unlock from the MASTER PASSWORD (NUL-terminated UTF-8). Needed by any
@@ -347,6 +365,14 @@ int32_t vault_ffi_sync_now(SyncHandle *handle, uint8_t **out_vault_bytes,
  * password does not open the changed copy; -11 when it opens one that is not
  * this vault's; -5 when sync is not waiting for a password. */
 int32_t vault_ffi_sync_adopt_password(SyncHandle *handle, const char *password);
+
+/* ADDED IN ABI v21. The copy sealed after a master password change that sync
+ * found and waits on, for the caller to keep beside the vault: with it the lock
+ * screen refuses the old password and quick unlock, and takes the change on
+ * even offline (vault_ffi_vault_adopt). -5 when sync is not waiting for a
+ * password. Free the buffer with vault_ffi_free. */
+int32_t vault_ffi_sync_rotated_copy(SyncHandle *handle, uint8_t **out_bytes,
+                                    size_t *out_len);
 
 /* Begin a sign-in: returns the authorization URL to open, and a handle holding
  * the PKCE verifier. redirect_uri is whatever the platform can catch (a custom

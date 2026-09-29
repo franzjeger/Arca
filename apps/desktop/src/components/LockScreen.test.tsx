@@ -20,6 +20,7 @@ vi.mock("../lib/api", async () => {
       keyfileUnlock: vi.fn(),
       unlock: vi.fn(),
       createVault: vi.fn(),
+      denyPasswordChange: vi.fn(),
     },
   };
 });
@@ -27,6 +28,7 @@ vi.mock("../lib/api", async () => {
 const quickUnlock = vi.mocked(api.quickUnlock);
 const keyfileUnlock = vi.mocked(api.keyfileUnlock);
 const unlock = vi.mocked(api.unlock);
+const denyPasswordChange = vi.mocked(api.denyPasswordChange);
 
 /** Linux with a USB key enrolled: no biometric, no keychain quick unlock. */
 function keyStatus(present: boolean, overrides: Partial<VaultStatus> = {}): VaultStatus {
@@ -64,6 +66,55 @@ describe("LockScreen", () => {
     sync.status = { pending: true, syncing: false, connected: true, account: null, lastSyncUnix: null, lastError: null, needsPassword: true };
     render(<LockScreen status={status({ quickUnlockAvailable: false })} onUnlocked={vi.fn()} />);
     expect(screen.getByText(/changed on another device\. Enter the new one/)).toBeInTheDocument();
+  });
+
+  describe("a password change this computer has kept", () => {
+    it("offers no quick unlock and no USB key, and says why", async () => {
+      render(
+        <LockScreen
+          status={status({
+            passwordChangePending: true,
+            keyFile: { enrolled: true, present: true, volumeLabel: "ESD-USB", volumeId: "3CCC-1EA9", lockOnRemoval: true },
+          })}
+          onUnlocked={vi.fn()}
+        />,
+      );
+      expect(screen.getByText(/Only the new one opens Arca here now/)).toBeInTheDocument();
+      await act(async () => {});
+      expect(quickUnlock).not.toHaveBeenCalled();
+      expect(keyfileUnlock).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: /Touch ID|quick unlock/i })).not.toBeInTheDocument();
+    });
+
+    it("lets the user deny a change they did not make, with the password they have", async () => {
+      unlock.mockRejectedValue(
+        apiError("previous_password", "That is your previous master password."),
+      );
+      denyPasswordChange.mockResolvedValue({ quickUnlockLost: false });
+      const onUnlocked = vi.fn();
+      const user = userEvent.setup();
+      render(<LockScreen status={status({ passwordChangePending: true })} onUnlocked={onUnlocked} />);
+
+      await user.type(screen.getByPlaceholderText("Master password"), "old");
+      await user.click(screen.getByRole("button", { name: "Unlock" }));
+      const deny = await screen.findByRole("button", { name: /I didn't change it/ });
+      expect(screen.getByText(/someone else may know your password/)).toBeInTheDocument();
+      expect(onUnlocked).not.toHaveBeenCalled();
+
+      await user.click(deny);
+      expect(denyPasswordChange).toHaveBeenCalledWith("old");
+      await waitFor(() => expect(onUnlocked).toHaveBeenCalled());
+    });
+
+    it("does not offer the way out for a password that is simply wrong", async () => {
+      unlock.mockRejectedValue(apiError("invalid_credentials", "That master password is not correct."));
+      const user = userEvent.setup();
+      render(<LockScreen status={status({ passwordChangePending: true })} onUnlocked={vi.fn()} />);
+      await user.type(screen.getByPlaceholderText("Master password"), "wrong");
+      await user.click(screen.getByRole("button", { name: "Unlock" }));
+      await screen.findByText(/not correct/i);
+      expect(screen.queryByRole("button", { name: /I didn't change it/ })).not.toBeInTheDocument();
+    });
   });
 
   describe("USB key", () => {

@@ -65,6 +65,24 @@ with one Touch ID prompt on macOS, and the USB key if it is plugged in
 (otherwise its next use asks for the password once). iOS mints a new device key,
 which needs no prompt.
 
+A device that learns of a change keeps the copy that carries it beside its
+vault, where a restart or a lock does not lose it and nothing syncs it. From
+then on only the new password opens that device, and opening takes the change
+on, offline too (`vault_ffi_vault_adopt` on iOS, `rotation::adopt` on the
+desktop). The password the change replaced is refused, and says so. Nothing that
+wrapped the old key opens the vault either: the device removes its quick-unlock
+keys (Face ID, Touch ID, Windows Hello, the macOS AutoFill extension's copy) the
+moment it keeps the copy, the USB key and the iOS AutoFill extension refuse, and
+taking the change on brings quick unlock back as above.
+
+A copy like that is not proof. The key that could prove it is the one the
+device lacks, and whoever can write to the Google account can put one there. So
+the user can deny a change they did not make: with the previous password and
+the device's own verification (Face ID or the passcode on iOS, Touch ID or the
+login password on macOS, Windows Hello), the vault opens as before, quick
+unlock comes back, and that copy never blocks the device again. Linux has no
+such verification to ask for, and there the previous password alone decides.
+
 Change the password on one computer and let the others catch up. Two computers
 that change it while apart end up with keys neither can take on from the other,
 and each refuses the other's copy; a desktop refuses a change while one from

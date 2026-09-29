@@ -533,6 +533,34 @@ pub unsafe extern "C" fn vault_ffi_sync_adopt_password(
     }
 }
 
+/// The copy sealed after a master password change that sync found and is
+/// waiting on (ABI v21). The caller keeps it where the lock screen can read it:
+/// with it, the device refuses the old password and quick unlock, and takes the
+/// change on with the new password even offline ([`crate::vault_ffi_vault_adopt`]).
+/// `ERR_NOT_FOUND` when sync is not waiting for a password. Free the buffer
+/// with [`crate::vault_ffi_free`].
+///
+/// # Safety
+/// `handle` must be valid; `out_bytes`/`out_len` writable pointers.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_sync_rotated_copy(
+    handle: *mut SyncHandle,
+    out_bytes: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if handle.is_null() || out_bytes.is_null() || out_len.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let handle = &*handle;
+    match handle.engine.rotated_copy() {
+        Some(copy) => {
+            emit(copy, out_bytes, out_len);
+            OK
+        }
+        None => ERR_NOT_FOUND,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Interactive sign-in
 // ---------------------------------------------------------------------------
@@ -906,6 +934,17 @@ mod tests {
         assert_eq!(
             unsafe { vault_ffi_sync_adopt_password(sync, pw.as_ptr()) },
             ERR_NOT_FOUND
+        );
+        // Nothing waiting, nothing to keep.
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+        assert_eq!(
+            unsafe { vault_ffi_sync_rotated_copy(sync, &mut out, &mut len) },
+            ERR_NOT_FOUND
+        );
+        assert!(out.is_null());
+        assert_eq!(
+            unsafe { vault_ffi_sync_rotated_copy(std::ptr::null_mut(), &mut out, &mut len) },
+            ERR_NULL_ARG
         );
         unsafe {
             vault_ffi_sync_free(sync);

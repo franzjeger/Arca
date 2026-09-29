@@ -154,6 +154,27 @@ final class VaultBridgeTests: XCTestCase {
             UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301"))
     }
 
+    // MARK: A password change made elsewhere, kept
+
+    /// Bytes that are not a vault are never kept, and a kept file that no
+    /// longer reads as one is removed rather than blocking the vault for ever.
+    func testAKeptPasswordChangeIsOnlyEverAVault() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let kept = PendingPasswordChange(directory: directory)
+
+        XCTAssertNil(VaultShared.keyEpoch(of: Data("not a vault".utf8)))
+        XCTAssertFalse(kept.record(Data("not a vault".utf8)))
+        XCTAssertNil(kept.pending())
+
+        let file = directory.appendingPathComponent("pending-password-change.vault")
+        try Data("torn".utf8).write(to: file)
+        XCTAssertNil(kept.pending())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
     // MARK: Errors stay secret-free
 
     /// These strings are logged at `.public` privacy, so they survive into a

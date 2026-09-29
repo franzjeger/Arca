@@ -108,6 +108,20 @@ final class VaultSync: @unchecked Sendable {
         }
     }
 
+    /// The copy sealed after a master password change that the last cycle found
+    /// and is waiting on, for `PendingPasswordChange` to keep. Nil when sync is
+    /// not waiting for a password.
+    func rotatedCopy() async -> Data? {
+        try? await VaultSession.runSync {
+            var bytes: UnsafeMutablePointer<UInt8>?
+            var length = 0
+            let code = vault_ffi_sync_rotated_copy(self.handle, &bytes, &length)
+            guard code == VaultFFICode.ok, let bytes else { return nil }
+            defer { vault_ffi_free(bytes, length) }
+            return Data(bytes: bytes, count: length)
+        }
+    }
+
     /// The user has seen that Google Drive went back in time.
     func acknowledgeRollback() async {
         try? await VaultSession.runSync { vault_ffi_sync_acknowledge_rollback(self.handle) }
@@ -189,28 +203,9 @@ final class VaultSync: @unchecked Sendable {
         }
     }
 
-    /// Write the shared vault to the file: under the vault lock, fold whatever
-    /// is on disk NOW into the handle and serialize that, so merge and write
-    /// are one step no other process can split.
+    /// Write the shared vault to the file (see `VaultSession.writeMerged`).
     private func writeBack() throws {
-        try VaultShared.withVaultLock {
-            let disk = (try? VaultShared.loadVault()) ?? Data()
-            var merged: UnsafeMutablePointer<UInt8>?
-            var mergedLength = 0
-            let mergeCode = disk.withUnsafeBytes { buf in
-                vault_ffi_merge_and_serialize(
-                    self.session.rawHandle,
-                    buf.bindMemory(to: UInt8.self).baseAddress,
-                    buf.count,
-                    &merged,
-                    &mergedLength)
-            }
-            guard mergeCode == VaultFFICode.ok, let merged, mergedLength > 0 else {
-                throw SyncError.ffi(code: mergeCode, operation: "merge_and_serialize")
-            }
-            defer { vault_ffi_free(merged, mergedLength) }
-            try VaultShared.writeVault(Data(bytes: merged, count: mergedLength))
-        }
+        try session.writeMerged()
     }
 
     private static func decode(_ bytes: UnsafeMutablePointer<UInt8>, _ length: Int) throws

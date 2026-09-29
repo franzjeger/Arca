@@ -4,9 +4,17 @@
 
 **Update every device together.** Vault files are now `SYBRVLT7`, which 0.6.x
 and earlier refuse to open, and the iOS app needs this release's library
-(C ABI v20). Update Arca on every computer and phone before any of them syncs:
+(C ABI v21). Update Arca on every computer and phone before any of them syncs:
 a device still on 0.6.x cannot sync with the others until it is updated.
 
+- Security: once a device knows the master password was changed on another
+  device, only the new password opens it. The old password went on opening
+  the device's own copy, and Face ID, Touch ID, Windows Hello, the USB key and
+  AutoFill did too, until the change was taken on; now they are refused, and
+  entering the new password takes the change on, offline too. Someone who can
+  write to the Google account could plant a copy that claims a change, so a
+  change you did not make can be denied with your current password and the
+  device's own Face ID, passcode, Touch ID or Windows Hello.
 - iOS: when Face ID cannot open the vault, the unlock screen says why and
   waits for the master password. It asked for Face ID again the moment the
   prompt closed, for ever, so the password field was never reachable. A

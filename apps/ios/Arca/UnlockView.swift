@@ -29,7 +29,9 @@ struct UnlockView: View {
     /// offered a button instead of a face. The attempt now belongs to becoming
     /// active, and going to the background re-arms it.
     private func attemptBiometrics() async {
-        guard scenePhase == .active, !didTryBiometrics else { return }
+        // A change made elsewhere that this phone kept: only the new password
+        // opens it now.
+        guard scenePhase == .active, !didTryBiometrics, !store.passwordChangeKept else { return }
         guard await store.resolveQuickUnlockAvailability() else { return }
         didTryBiometrics = true
         await store.unlockWithDeviceKey()
@@ -47,6 +49,13 @@ struct UnlockView: View {
             Text("Arca")
                 .font(.largeTitle.bold())
 
+            if store.passwordChangeKept {
+                Text("Your master password was changed on another device. Only the new one opens Arca here now; Face ID comes back once you have entered it.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
             SecureField("Master password", text: $password)
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.never)
@@ -63,6 +72,25 @@ struct UnlockView: View {
                     .multilineTextAlignment(.center)
             }
 
+            if store.previousPasswordTyped {
+                VStack(spacing: 10) {
+                    Text("Didn't change it? Then a copy in your Google Drive claims a new master password, and someone else may know your password and have access to your Google account. Change both once you are in.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("I didn't change it: unlock with this password") {
+                        Task {
+                            await store.denyPasswordChange(password: password)
+                            if store.phase == .unlocked { password = "" }
+                        }
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .disabled(isUnlocking || password.isEmpty)
+                }
+                .padding(12)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
+
             Button(action: submit) {
                 if isUnlocking {
                     ProgressView().frame(maxWidth: .infinity)
@@ -73,7 +101,7 @@ struct UnlockView: View {
             .buttonStyle(.borderedProminent)
             .disabled(password.isEmpty || isUnlocking)
 
-            if store.quickUnlockAvailable {
+            if store.quickUnlockAvailable, !store.passwordChangeKept {
                 Button("Use Face ID", systemImage: "faceid") {
                     Task { await store.unlockWithDeviceKey() }
                 }
@@ -115,9 +143,10 @@ struct UnlockView: View {
         guard !password.isEmpty, !isUnlocking else { return }
         Task {
             await store.unlock(password: password)
-            // Cleared either way. A wrong password is worth retyping; leaving it
-            // in a live @State String is not worth the convenience.
-            password = ""
+            // Cleared either way — a wrong password is worth retyping; leaving
+            // it in a live @State String is not worth the convenience — except
+            // the one a kept change replaced, which "I didn't change it" needs.
+            if !store.previousPasswordTyped { password = "" }
         }
     }
 }

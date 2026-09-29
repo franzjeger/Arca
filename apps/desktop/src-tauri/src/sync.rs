@@ -74,21 +74,38 @@ impl LocalVault for AppStateVault {
         let mut guard = state
             .lock()
             .map_err(|_| LocalError::Save("app state poisoned".into()))?;
-        let AppState { store, vault, .. } = &mut *guard;
-        let Some(vault) = vault.as_mut() else {
-            return Err(LocalError::Locked);
-        };
-        if !vault.is_unlocked() {
-            // Merging needs the key, so the engine defers — unless the password
-            // changed elsewhere, which the lock screen needs to know.
-            return Err(vault_sync::locked(vault, remotes));
+        let pushed = merge_into(&mut guard, remotes, whole, &self.device);
+        if let Err(LocalError::KeyRotated(copy)) = &pushed {
+            // Kept beside the vault: from now on only the new password opens
+            // it here, and nothing that wrapped the old key does.
+            if crate::pending_change::record(&guard, copy) {
+                crate::pending_change::drop_quick_unlock(&guard.store);
+            }
         }
-        let behind = merge_and_save(vault, store, remotes, whole, &self.device)?;
-        let bytes = vault
-            .to_bytes()
-            .map_err(|e| LocalError::Save(e.to_string()))?;
-        Ok(Push { bytes, behind })
+        pushed
     }
+}
+
+fn merge_into(
+    st: &mut AppState,
+    remotes: &[Vec<u8>],
+    whole: bool,
+    device: &ThisDevice,
+) -> Result<Push, LocalError> {
+    let AppState { store, vault, .. } = st;
+    let Some(vault) = vault.as_mut() else {
+        return Err(LocalError::Locked);
+    };
+    if !vault.is_unlocked() {
+        // Merging needs the key, so the engine defers — unless the password
+        // changed elsewhere, which the lock screen needs to know.
+        return Err(vault_sync::locked(vault, remotes));
+    }
+    let behind = merge_and_save(vault, store, remotes, whole, device)?;
+    let bytes = vault
+        .to_bytes()
+        .map_err(|e| LocalError::Save(e.to_string()))?;
+    Ok(Push { bytes, behind })
 }
 
 fn merge_and_save(
@@ -168,7 +185,7 @@ impl SyncObserver for TauriEvents {
     }
 
     fn status_changed(&self, status: &SyncStatus) {
-        let _ = self.app.emit("sync-status", SyncStatusDto::from(status));
+        let _ = self.app.emit("sync-status", dto(status));
     }
 }
 
@@ -183,6 +200,9 @@ struct Sync {
     drive: Arc<DriveStore>,
     /// This computer, as the copies it pushes name it.
     device: ThisDevice,
+    /// The vault file, for what is kept beside it. Read without the app state,
+    /// whose lock the persist paths already hold when they mark sync dirty.
+    vault_path: Option<std::path::PathBuf>,
 }
 
 /// One vault, one sync loop, one process. A global because [`mark_dirty`] is
@@ -198,6 +218,11 @@ fn sync(app: &AppHandle) -> &'static Sync {
             Arc::new(KeychainTokens),
         ));
         let device = this_device(app);
+        let vault_path = app
+            .state::<Mutex<AppState>>()
+            .lock()
+            .ok()
+            .map(|st| st.store.path().to_path_buf());
         let engine = Arc::new(SyncEngine::new(
             drive.clone(),
             Arc::new(AppStateVault {
@@ -210,6 +235,7 @@ fn sync(app: &AppHandle) -> &'static Sync {
             engine,
             drive,
             device,
+            vault_path,
         }
     })
 }
@@ -307,7 +333,24 @@ pub fn acknowledge_rollback(app: &AppHandle) {
 
 /// Status DTO for the UI.
 pub fn status(app: &AppHandle) -> SyncStatusDto {
-    SyncStatusDto::from(&sync(app).engine.status())
+    dto(&sync(app).engine.status())
+}
+
+/// A change the user said was not theirs asks for no password: every cycle
+/// still finds the copy that claims it, and asking again would contradict them.
+fn dto(status: &SyncStatus) -> SyncStatusDto {
+    let mut dto = SyncStatusDto::from(status);
+    if dto.needs_password {
+        if let Some(sync) = SYNC.get() {
+            let denied = sync.vault_path.as_deref().is_some_and(|path| {
+                sync.engine
+                    .rotated_copy()
+                    .is_some_and(|copy| crate::pending_change::is_denied_at(path, &copy))
+            });
+            dto.needs_password = !denied;
+        }
+    }
+    dto
 }
 
 /// Run sync now (the background loop and the manual "Sync now" both land here).

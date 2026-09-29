@@ -797,3 +797,57 @@ fn a_breach_range_that_never_arrived_leaves_its_login_unchecked() {
         ("leaked", 9_545_824)
     );
 }
+
+/// A saved vault this computer holds locked, and a copy of it after its
+/// master password was changed on another device, which sync found and kept.
+fn locked_with_a_known_change(dir: &TempDir) -> Mutex<AppState> {
+    let store = VaultStore::new(dir.path().join("v.vault"), "svc", "acct");
+    let here = Vault::create("old", cheap_params()).unwrap();
+    store.save(&here).unwrap();
+    let mut elsewhere = here.clone();
+    elsewhere.change_master_password("new").unwrap();
+    let changed = elsewhere.to_bytes().unwrap();
+    let (clip, _) = ClipboardManager::memory();
+    let st = AppState::new(store, None, clip);
+    assert!(crate::pending_change::record(&st, &changed));
+    Mutex::new(st)
+}
+
+/// Once this computer knows of a change made elsewhere, the password it
+/// replaced opens nothing, and says why; the new one opens the vault and takes
+/// the change on.
+#[test]
+fn a_known_password_change_refuses_the_previous_password() {
+    let dir = TempDir::new().unwrap();
+    let state = locked_with_a_known_change(&dir);
+
+    let refused = do_unlock(&state, "old").unwrap_err();
+    assert_eq!(refused.code, "previous_password");
+    let wrong = do_unlock(&state, "neither").unwrap_err();
+    assert_eq!(wrong.code, "invalid_credentials");
+    assert!(!state.lock().unwrap().vault().unwrap().is_unlocked());
+
+    do_unlock(&state, "new").unwrap();
+    let st = state.lock().unwrap();
+    assert!(st.vault().unwrap().is_unlocked());
+    assert_eq!(st.vault().unwrap().header().key_epoch, 1);
+    assert!(crate::pending_change::pending(&st).is_none());
+}
+
+/// The user who did not change the password opens with the one they have,
+/// and the same copy never blocks this computer again.
+#[test]
+fn denying_a_change_opens_with_the_previous_password() {
+    let dir = TempDir::new().unwrap();
+    let state = locked_with_a_known_change(&dir);
+
+    let wrong = crate::rotation::deny(&state, "neither").unwrap_err();
+    assert_eq!(wrong.code, "invalid_credentials");
+    assert!(crate::pending_change::pending(&state.lock().unwrap()).is_some());
+
+    crate::rotation::deny(&state, "old").unwrap();
+    let st = state.lock().unwrap();
+    assert!(st.vault().unwrap().is_unlocked());
+    assert_eq!(st.vault().unwrap().header().key_epoch, 0);
+    assert!(crate::pending_change::pending(&st).is_none());
+}
