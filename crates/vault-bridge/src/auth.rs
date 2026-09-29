@@ -12,7 +12,7 @@
 //! message carried the token, so whoever bound the port next could compute
 //! the "app" proof from it and be sent the next submitted password.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
@@ -21,7 +21,7 @@ const NONCE_BYTES: usize = 16;
 /// A fresh 128-bit challenge from the OS CSPRNG, as lowercase hex.
 pub fn nonce() -> Option<String> {
     let mut bytes = [0u8; NONCE_BYTES];
-    getrandom::getrandom(&mut bytes).ok()?;
+    getrandom::fill(&mut bytes).ok()?;
     Some(hex(&bytes))
 }
 

@@ -7,7 +7,7 @@
 //! TODO(phase-2): support configurable digits/period and SHA-256/512 once we
 //! parse `otpauth://` URIs on import.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use zeroize::Zeroizing;
 

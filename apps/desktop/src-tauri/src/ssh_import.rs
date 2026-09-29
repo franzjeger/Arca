@@ -295,7 +295,7 @@ pub fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
+    use ssh_key::rand_core::OsRng;
     use ssh_key::{Algorithm, LineEnding, PrivateKey};
     use vault_core::KdfParams;
 

@@ -105,7 +105,7 @@ pub fn fingerprint(public_blob: &[u8]) -> String {
 /// entropy failure as an error rather than panicking.
 pub fn generate(comment: &str) -> Result<NewSshKey> {
     let mut seed = Zeroizing::new([0u8; SEED_LEN]);
-    getrandom::getrandom(&mut seed[..]).map_err(|_| Error::Random)?;
+    getrandom::fill(&mut seed[..]).map_err(|_| Error::Random)?;
     let signing = SigningKey::from_bytes(&seed);
     let public_blob = encode_public_blob(signing.verifying_key().as_bytes());
     let authorized_key = authorized_key_line(&public_blob, comment)?;

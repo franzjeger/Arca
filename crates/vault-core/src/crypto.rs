@@ -35,7 +35,7 @@ pub struct AeadBlob {
 
 /// Fill a buffer with cryptographically-secure random bytes from the OS.
 pub fn fill_random(buf: &mut [u8]) -> Result<()> {
-    getrandom::getrandom(buf).map_err(|_| Error::Random)
+    getrandom::fill(buf).map_err(|_| Error::Random)
 }
 
 /// Derive the 256-bit master key from the master password and the vault's
@@ -72,7 +72,7 @@ pub fn seal(key: &SymmetricKey, plaintext: &[u8], aad: &[u8]) -> Result<AeadBlob
 
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: plaintext,
                 aad,
@@ -94,7 +94,7 @@ pub fn open(key: &SymmetricKey, blob: &AeadBlob, aad: &[u8]) -> Result<Zeroizing
 
     let plaintext = cipher
         .decrypt(
-            XNonce::from_slice(&blob.nonce),
+            &XNonce::from(blob.nonce),
             Payload {
                 msg: &blob.ciphertext,
                 aad,
@@ -127,4 +127,21 @@ pub fn unwrap_key(
     let mut arr = [0u8; KEY_LEN];
     arr.copy_from_slice(&bytes);
     Ok(SymmetricKey::from_bytes(arr))
+}
+
+#[cfg(test)]
+mod tests {
+    use zeroize::ZeroizeOnDrop;
+
+    fn wiped_when_dropped<T: ZeroizeOnDrop>() {}
+
+    /// The crates keep their own copies of the keys they are handed, and wipe
+    /// them on drop only where they say so. chacha20poly1305 0.11 moved that
+    /// behind a feature flag; this stops compiling if one is lost again.
+    #[test]
+    fn the_keys_the_crates_copy_are_wiped_when_dropped() {
+        wiped_when_dropped::<chacha20poly1305::XChaCha20Poly1305>();
+        wiped_when_dropped::<p256::ecdsa::SigningKey>();
+        wiped_when_dropped::<ed25519_dalek::SigningKey>();
+    }
 }
