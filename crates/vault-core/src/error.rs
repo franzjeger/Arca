@@ -26,23 +26,54 @@ pub enum Error {
     #[error("key derivation failed")]
     KeyDerivation,
 
-    /// The on-disk container is not a recognized vault.
+    /// The bytes are not a readable vault: not one of our containers, or one
+    /// that is truncated or corrupt before anything in it could be
+    /// authenticated. Nothing in them can be trusted, so nothing is lost by
+    /// replacing them — the one error that permits it.
     #[error("unrecognized or unsupported vault format")]
     Format,
 
-    /// The vault was written by a NEWER build than this one. Distinct from
-    /// [`Error::Format`] so sync layers refuse (rather than "repair"/overwrite)
-    /// a legitimate newer-version peer file. The fix is updating the app.
+    /// The vault was written by a NEWER build than this one: a container or
+    /// format version this build does not know, key-derivation costs above its
+    /// limits, or authenticated content it cannot decode. Distinct from
+    /// [`Error::Format`] so callers refuse, rather than "repair" or delete, a
+    /// legitimate newer file. The fix is updating the app.
     #[error("vault written by a newer version of the app")]
     UnsupportedVersion,
 
-    /// (De)serialization of the vault structure failed.
-    #[error("vault (de)serialization failed")]
+    /// The file was sealed after a master password change this vault has not
+    /// taken on: its key is one only the new password opens. Nothing is wrong
+    /// with the file; see `Vault::adopt_rotation`.
+    #[error("the master password was changed on another device")]
+    KeyRotated,
+
+    /// The file is this vault's, sealed with a key a password change has
+    /// since replaced: a copy written before the change. Nothing in it is
+    /// trusted, since whoever knew the old password could have written it,
+    /// and nothing is lost by dropping it: the device that wrote it merges its
+    /// changes again once it takes on the new password.
+    #[error("vault copy from before a master password change")]
+    StaleKey,
+
+    /// The password opens the file, but the file does not continue this
+    /// vault: it holds none of this vault's keys. A different vault, a copy
+    /// forged by someone who knew an old password, or this vault changed to
+    /// two passwords on two devices at once.
+    #[error("the file belongs to a different vault")]
+    DifferentVault,
+
+    /// Writing the vault structure failed. An internal error, never a verdict
+    /// on bytes that were read.
+    #[error("vault serialization failed")]
     Serialization,
 
     /// No item with the given id exists.
     #[error("item not found")]
     NotFound,
+
+    /// An edit named an item of another kind; an edit never changes one.
+    #[error("item is of another kind")]
+    WrongKind,
 
     /// The operating system RNG failed to produce randomness.
     #[error("secure random generation failed")]

@@ -1,4 +1,5 @@
-// Styles stay inside the picker shadow root, isolated from website CSS.
+// Styles for Arca's UI in a page (the picker and the save prompt). They live
+// inside closed shadow roots, isolated from website CSS in both directions.
 (() => {
   globalThis.__arcaPickerStyles = `:host { color-scheme: dark; }
 * { box-sizing: border-box; }
@@ -120,5 +121,34 @@ button { font: inherit; }
 .sybr-panel-header button { border: 0; border-radius: 5px; background: transparent; color: inherit; font-size: 20px; padding: 0 5px; cursor: pointer; }
 .sybr-panel-header button:hover, button:focus-visible { background: #363638; outline: 2px solid #64a8ff; }
 .sybr-title, .sybr-user { min-width: 0; overflow-wrap: anywhere; }
+.sybr-savebar-content {
+  color-scheme: dark;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 380px;
+  padding: 12px 14px;
+  background: #1c1c1e;
+  color: #f5f5f7;
+  border: 1px solid #2e2e30;
+  border-radius: 12px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+}
+.sybr-savebar-text { flex: 1; line-height: 1.35; }
+.sybr-savebar-yes, .sybr-savebar-no {
+  flex: none;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.sybr-savebar-yes { background: #2563eb; color: #fff; }
+.sybr-savebar-yes:hover { background: #1d4ed8; }
+.sybr-savebar-no { background: rgba(255, 255, 255, 0.08); color: #d1d1d6; }
+.sybr-savebar-no:hover { background: rgba(255, 255, 255, 0.14); }
 `;
 })();

@@ -61,6 +61,13 @@ impl KdfParams {
         })
     }
 
+    /// Whether any cost is above what this build accepts from a header.
+    pub(crate) fn exceeds_limits(&self) -> bool {
+        self.m_cost_kib > Self::MAX_M_COST_KIB
+            || self.t_cost > Self::MAX_T_COST
+            || self.p_cost > Self::MAX_P_COST
+    }
+
     /// Validate public KDF parameters before they reach Argon2.
     ///
     /// Vault headers can come from removable media or a sync peer. Bounding
@@ -93,7 +100,21 @@ impl KdfParams {
         v.extend_from_slice(&self.salt);
         v
     }
+
+    /// AAD for the master-password wrap. A `bound` wrap names the
+    /// authenticated container, so it cannot be opened from inside an older,
+    /// unauthenticated one.
+    pub(crate) fn master_wrap_aad(&self, bound: bool) -> Vec<u8> {
+        let params = self.aad();
+        if bound {
+            [BOUND_WRAP_CONTEXT, &params].concat()
+        } else {
+            params
+        }
+    }
 }
+
+const BOUND_WRAP_CONTEXT: &[u8] = b"arca/master-wrap/authenticated-container\0";
 
 /// The cleartext vault header.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,11 +129,24 @@ pub struct VaultHeader {
     /// quick/biometric unlock. `None` until the user opts in. The device key
     /// itself lives only in the OS keychain (see `vault-store`).
     pub device_wrapped_vault_key: Option<AeadBlob>,
-    /// Monotonic master-rewrap epoch: bumped on every master-password change
-    /// (or future KDF hardening). Sync merges adopt the header with the HIGHER
-    /// epoch, so a rotation done on one device propagates instead of being
-    /// reverted by a peer's stale header. Legacy (v2) files load as epoch 0.
+    /// Monotonic master-rewrap epoch: bumped on every master-password change.
+    /// Between files sealed with the same vault key, sync merges adopt the
+    /// header with the HIGHER epoch, so a rewrap done on one device propagates
+    /// instead of being reverted by a peer's stale header. Legacy (v2) files
+    /// load as epoch 0.
     pub rewrap_epoch: u64,
+    /// Which vault key the items are sealed under, counted from 0. Every
+    /// master password change creates a new vault key and bumps this, so a
+    /// device still holding an older key knows the file needs the new
+    /// password, not a merge. Files before v7 load as epoch 0.
+    pub key_epoch: u64,
+    /// What the header carries that only the vault key may read, sealed under
+    /// a key derived from it: the vault keys from before each password change,
+    /// which let a device that missed a change open its own copy with just the
+    /// new password, and tell a peer's copy from before the change apart from
+    /// a foreign vault. CBOR inside, so a later build can add to it without a
+    /// new format. `None` while there is nothing to seal, and before v7.
+    pub sealed_meta: Option<AeadBlob>,
 }
 
 impl VaultHeader {
@@ -121,10 +155,28 @@ impl VaultHeader {
     pub fn check_master_password(&self, password: &str) -> bool {
         crypto::derive_master_key(password, &self.kdf)
             .and_then(|key| {
-                crypto::unwrap_key(&key, &self.master_wrapped_vault_key, &self.kdf.aad())
+                crypto::unwrap_key(
+                    &key,
+                    &self.master_wrapped_vault_key,
+                    &self.master_wrap_aad(),
+                )
             })
             .is_ok()
     }
+
+    /// Whether the master wrap is bound to authenticated containers (v6+).
+    pub(crate) fn master_wrap_is_bound(&self) -> bool {
+        self.format_version >= Self::BOUND_WRAP_VERSION
+    }
+
+    /// The AAD this header's master wrap was sealed with.
+    pub(crate) fn master_wrap_aad(&self) -> Vec<u8> {
+        self.kdf.master_wrap_aad(self.master_wrap_is_bound())
+    }
+
+    /// First version whose master wrap only opens an authenticated container.
+    pub(crate) const BOUND_WRAP_VERSION: u16 = 6;
+
     /// Current on-disk format version understood by this build.
     ///
     /// v1 (never released with real data): item payloads encoded with bincode.
@@ -136,18 +188,24 @@ impl VaultHeader {
     /// v4: item payloads carry encrypted revision ancestry; `SYBRVLT4` prevents
     ///     older clients from silently accepting and then stripping it.
     /// v5: the complete container carries a vault-key authentication tag.
-    pub const FORMAT_VERSION: u16 = 5;
+    /// v6: the master wrap is bound to that tag's container (`SYBRVLT6`), so a
+    ///     file relabelled as v4 or older no longer opens with the password.
+    /// v7: a password change replaces the vault key. The header carries
+    ///     `key_epoch` and the keys it replaced; items and the container tag
+    ///     use keys derived from the vault key (HKDF), not the key itself.
+    pub const FORMAT_VERSION: u16 = 7;
 
     /// Validate that this build can read the header.
     pub(crate) fn check_supported(&self) -> Result<()> {
         if self.format_version == 0 {
             return Err(Error::Format);
         }
-        if self.format_version > Self::FORMAT_VERSION {
+        // Costs above our limits may be a newer build that raised them, so
+        // they are refused, never treated as garbage to overwrite. Either way
+        // Argon2 never starts with an attacker's resource costs.
+        if self.format_version > Self::FORMAT_VERSION || self.kdf.exceeds_limits() {
             return Err(Error::UnsupportedVersion);
         }
-        // A malformed untrusted header is a format error; do not start Argon2
-        // with its attacker-selected resource costs.
         self.kdf.validate().map_err(|_| Error::Format)?;
         Ok(())
     }
@@ -171,6 +229,46 @@ impl From<LegacyHeaderV2> for VaultHeader {
             master_wrapped_vault_key: h.master_wrapped_vault_key,
             device_wrapped_vault_key: h.device_wrapped_vault_key,
             rewrap_epoch: 0,
+            key_epoch: 0,
+            sealed_meta: None,
+        }
+    }
+}
+
+/// The header as `SYBRVLT2` to `SYBRVLT6` containers serialized it: every
+/// field up to `rewrap_epoch` (bincode is positional, so each layout needs its
+/// own type).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct HeaderV6 {
+    pub format_version: u16,
+    pub kdf: KdfParams,
+    pub master_wrapped_vault_key: AeadBlob,
+    pub device_wrapped_vault_key: Option<AeadBlob>,
+    pub rewrap_epoch: u64,
+}
+
+impl From<HeaderV6> for VaultHeader {
+    fn from(h: HeaderV6) -> Self {
+        Self {
+            format_version: h.format_version,
+            kdf: h.kdf,
+            master_wrapped_vault_key: h.master_wrapped_vault_key,
+            device_wrapped_vault_key: h.device_wrapped_vault_key,
+            rewrap_epoch: h.rewrap_epoch,
+            key_epoch: 0,
+            sealed_meta: None,
+        }
+    }
+}
+
+impl From<&VaultHeader> for HeaderV6 {
+    fn from(h: &VaultHeader) -> Self {
+        Self {
+            format_version: h.format_version,
+            kdf: h.kdf.clone(),
+            master_wrapped_vault_key: h.master_wrapped_vault_key.clone(),
+            device_wrapped_vault_key: h.device_wrapped_vault_key.clone(),
+            rewrap_epoch: h.rewrap_epoch,
         }
     }
 }

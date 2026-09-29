@@ -29,12 +29,19 @@
 //! wrapper over it. Network access is confined to the sync surface.
 //!
 //! Every entry point is wrapped so a panic becomes an error code instead of
-//! unwinding across the C boundary.
+//! unwinding across the C boundary. That needs `panic = "unwind"`, which the
+//! `release-ffi` profile provides and the check below enforces.
 //!
 //! SECURITY: returned buffers may contain secrets (a passkey private key, or a
 //! password). The caller must copy them into the platform credential / encrypted
 //! vault and free them promptly; [`vault_ffi_free`] zeroes them. Error codes
 //! never leak key material or plaintext.
+
+#[cfg(panic = "abort")]
+compile_error!(
+    "vault-ffi needs panic = \"unwind\" or its catch_unwind guards are dead: \
+     build with `--profile release-ffi`"
+);
 
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -42,7 +49,10 @@ use std::slice;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
-use vault_core::{host_of, Error, ItemKind, SymmetricKey, Vault, VaultItem, KEY_LEN};
+use vault_core::{
+    host_of, Change, Error, ItemKind, LoginEdit, NoteEdit, SymmetricKey, Vault, VaultItem,
+    WifiEdit, KEY_LEN,
+};
 
 pub mod sync;
 
@@ -73,7 +83,28 @@ pub mod sync;
 ///   merges a peer's items into the very vault the handle exposes.
 ///
 /// v16 adds encrypted per-item password history and prepared password restores.
-pub const ABI_VERSION: i32 = 16;
+///
+/// v17: NULL `notes` in `vault_ffi_upsert_login` and `vault_ffi_upsert_wifi`
+/// keeps the item's notes. Before, it erased them (Wi-Fi refused NULL), and
+/// iOS, which never shows a login's notes, wiped them on every edit. Adds
+/// `vault_ffi_vault_check`, so an import can refuse a file that is not a vault.
+///
+/// v18: a master password change gives the vault a new key. The sync status
+/// gains `needsPassword`, `vault_ffi_sync_adopt_password` takes a change made
+/// on another device on, and two codes are new: `ERR_PASSWORD_CHANGED` for a
+/// file sealed after a change this vault has not taken on, and
+/// `ERR_DIFFERENT_VAULT` for a password that opens a file that is not this
+/// vault's. A merge skips a copy sealed before a change instead of failing.
+///
+/// v19 adds `vault_ffi_vault_load`, a handle to a vault that is not open yet,
+/// so a phone that is still locked can sync, find a master password changed on
+/// another device, and open with that password alone.
+///
+/// v20: every copy says how often each device has pushed it. Adds
+/// `vault_ffi_sync_set_device` (this device's id and name),
+/// `vault_ffi_sync_acknowledge_rollback`, `vault_ffi_devices`, and `rolledBack`
+/// in the sync status: devices whose latest changes the remote had lost.
+pub const ABI_VERSION: i32 = 20;
 
 // Return codes.
 pub(crate) const OK: i32 = 0;
@@ -81,19 +112,35 @@ pub(crate) const ERR_NULL_ARG: i32 = -1;
 pub(crate) const ERR_UTF8: i32 = -2;
 pub(crate) const ERR_OP_FAILED: i32 = -3;
 const ERR_LOCKED: i32 = -4;
-const ERR_NOT_FOUND: i32 = -5;
+pub(crate) const ERR_NOT_FOUND: i32 = -5;
 pub(crate) const ERR_PANIC: i32 = -6;
 const ERR_DECRYPT: i32 = -7;
 const ERR_BAD_KEY_LEN: i32 = -8;
 // -9 (ERR_SYNC_FAILED) is defined by the sync surface.
+const ERR_PASSWORD_CHANGED: i32 = -10;
+const ERR_DIFFERENT_VAULT: i32 = -11;
 
 /// Map a core error to a stable return code (never leaks detail).
-fn err_code(e: &Error) -> i32 {
+pub(crate) fn err_code(e: &Error) -> i32 {
     match e {
         Error::Locked => ERR_LOCKED,
         Error::NotFound => ERR_NOT_FOUND,
         Error::Decryption => ERR_DECRYPT,
+        // An id of another kind is, to a caller editing one kind, not found.
+        Error::WrongKind => ERR_NOT_FOUND,
+        Error::KeyRotated => ERR_PASSWORD_CHANGED,
+        Error::DifferentVault => ERR_DIFFERENT_VAULT,
         _ => ERR_OP_FAILED,
+    }
+}
+
+/// Merge another copy of this vault, where one sealed before a master password
+/// change counts as merged: nothing in it can be trusted, and whoever wrote it
+/// re-sends its edits once it has the new password (`Vault::merge_remote`).
+fn merge_copy(vault: &mut Vault, bytes: &[u8]) -> vault_core::Result<()> {
+    match vault.merge_remote(bytes) {
+        Err(Error::StaleKey) => Ok(()),
+        merged => merged,
     }
 }
 
@@ -363,7 +410,7 @@ pub unsafe extern "C" fn vault_ffi_merge_remote(
     if !vault.is_unlocked() {
         return ERR_LOCKED;
     }
-    match guard_result(|| vault.merge_remote(remote)) {
+    match guard_result(|| merge_copy(&mut vault, remote)) {
         Ok(()) => OK,
         Err(code) => code,
     }
@@ -412,7 +459,7 @@ pub unsafe extern "C" fn vault_ffi_merge_and_serialize(
     // persist a vault that never saw what is on disk.
     if !remote_bytes.is_null() && remote_len > 0 {
         let remote = std::slice::from_raw_parts(remote_bytes, remote_len);
-        if let Err(code) = guard_result(|| vault.merge_remote(remote)) {
+        if let Err(code) = guard_result(|| merge_copy(&mut vault, remote)) {
             return code;
         }
     }
@@ -773,6 +820,25 @@ fn password_for(vault: &Vault, id_str: &str) -> vault_core::Result<Vec<u8>> {
     }
 }
 
+/// Whether `vault_bytes` is a vault this build can open: a container it knows,
+/// that parses, from a version no newer than its own. Needs no key and reads
+/// nothing secret, so a client can refuse a mis-picked file before it replaces
+/// the only copy of a vault (ABI v17). `OK`, or the error opening would give.
+///
+/// # Safety
+/// `vault_bytes` must point to a readable buffer of `vault_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_vault_check(vault_bytes: *const u8, vault_len: usize) -> i32 {
+    if vault_bytes.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let bytes = std::slice::from_raw_parts(vault_bytes, vault_len);
+    match guard_result(|| Vault::from_bytes(bytes).map(drop)) {
+        Ok(()) => OK,
+        Err(code) => code,
+    }
+}
+
 /// Open + unlock a vault from its raw file bytes using a device key (the 32-byte
 /// quick-unlock key from the shared keychain). On `OK`, `*out_handle` is a handle
 /// to free with [`vault_ffi_vault_free`]. Errors: `ERR_BAD_KEY_LEN` (wrong key
@@ -810,6 +876,41 @@ pub unsafe extern "C" fn vault_ffi_vault_open(
         Ok(vault)
     });
     match opened {
+        Ok(vault) => {
+            *out_handle = Box::into_raw(Box::new(VaultHandle {
+                vault: Arc::new(Mutex::new(vault)),
+            }));
+            OK
+        }
+        Err(code) => code,
+    }
+}
+
+/// Load a vault from its raw file bytes WITHOUT opening it (ABI v19).
+///
+/// Nothing can be read through the handle until something opens it, and only
+/// one thing does: [`sync::vault_ffi_sync_adopt_password`], which takes on a
+/// master password changed on another device. That is what this is for. A
+/// phone that is locked cannot learn of the change any other way, because the
+/// sync engine that finds it needs a handle to run over; with this one, the
+/// new password alone opens the vault. Every read on a handle that is still
+/// locked returns `ERR_LOCKED`.
+///
+/// # Safety
+/// `vault_bytes` must point to a readable buffer of `vault_len` bytes;
+/// `out_handle` must be a valid writable pointer.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_vault_load(
+    vault_bytes: *const u8,
+    vault_len: usize,
+    out_handle: *mut *mut VaultHandle,
+) -> i32 {
+    if vault_bytes.is_null() || out_handle.is_null() {
+        return ERR_NULL_ARG;
+    }
+    *out_handle = std::ptr::null_mut();
+    let bytes = slice::from_raw_parts(vault_bytes, vault_len);
+    match guard_result(|| Vault::from_bytes(bytes)) {
         Ok(vault) => {
             *out_handle = Box::into_raw(Box::new(VaultHandle {
                 vault: Arc::new(Mutex::new(vault)),
@@ -914,6 +1015,50 @@ pub unsafe extern "C" fn vault_ffi_identities(
     match guard_result(|| identities_json(&vault)) {
         Ok(json) => {
             emit(json.into_bytes(), out_json, out_json_len);
+            OK
+        }
+        Err(code) => code,
+    }
+}
+
+/// The devices that push this vault (ABI v20), as a UTF-8 JSON array:
+/// `[{"id","name","uploads","lastUpload"}, ...]`, `lastUpload` in Unix ms by
+/// that device's clock. `ERR_LOCKED` until the vault is open. Free the buffer
+/// with [`vault_ffi_free`].
+///
+/// # Safety
+/// `handle` must be valid; `out_json`/`out_json_len` writable pointers.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_devices(
+    handle: *mut VaultHandle,
+    out_json: *mut *mut u8,
+    out_json_len: *mut usize,
+) -> i32 {
+    if handle.is_null() || out_json.is_null() || out_json_len.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let vault = match lock_vault(&(*handle).vault) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let listed = guard_result(|| {
+        let devices: Vec<_> = vault
+            .devices()?
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "id": d.id.to_string(),
+                    "name": d.name,
+                    "uploads": d.uploads,
+                    "lastUpload": d.last_upload,
+                })
+            })
+            .collect();
+        serde_json::to_vec(&devices).map_err(|_| Error::Serialization)
+    });
+    match listed {
+        Ok(json) => {
+            emit(json, out_json, out_json_len);
             OK
         }
         Err(code) => code,
@@ -1308,15 +1453,8 @@ pub unsafe extern "C" fn vault_ffi_passkey_identities(
     };
     match guard_result(|| {
         let b64 = data_encoding::BASE64;
-        // Summaries first, full item only for the passkeys: `get_item` clones
-        // the payload (VaultItem is Drop/zeroize), and most vaults are almost
-        // entirely logins that would be cloned for nothing.
         let mut rows: Vec<serde_json::Value> = Vec::new();
-        for summary in vault.list_items(false)? {
-            if summary.kind != vault_core::ItemKind::Passkey {
-                continue;
-            }
-            let item = vault.get_item(summary.id)?;
+        for item in vault.active_items()? {
             if let VaultItem::Passkey {
                 rp_id,
                 user_name,
@@ -1623,9 +1761,9 @@ pub unsafe extern "C" fn vault_ffi_has_device_unlock(handle: *mut VaultHandle) -
 /// Insert or update a login, returning the new vault bytes and the item id.
 ///
 /// `id` selects an existing item to overwrite; pass NULL or "" to create one.
-/// `totp_secret` and `notes` may be NULL (treated as absent/empty). Timestamps
-/// come from the caller because `vault-core` has no clock: pass milliseconds
-/// since the Unix epoch.
+/// `totp_secret` and `notes` follow the edit semantics of [`optional`]: NULL
+/// keeps what the item has, "" clears it. Timestamps come from the caller
+/// because `vault-core` has no clock: pass milliseconds since the Unix epoch.
 ///
 /// # Safety
 /// `handle` must be valid. Every non-NULL string must be a NUL-terminated
@@ -1647,186 +1785,59 @@ pub unsafe extern "C" fn vault_ffi_upsert_login(
     out_id: *mut *mut u8,
     out_id_len: *mut usize,
 ) -> i32 {
-    if handle.is_null()
-        || title.is_null()
-        || username.is_null()
-        || password.is_null()
-        || url.is_null()
-        || out_vault_bytes.is_null()
-        || out_vault_bytes_len.is_null()
-        || out_id.is_null()
-        || out_id_len.is_null()
-    {
+    if title.is_null() || username.is_null() || password.is_null() || url.is_null() {
         return ERR_NULL_ARG;
     }
-    *out_vault_bytes = std::ptr::null_mut();
-    *out_vault_bytes_len = 0;
-    *out_id = std::ptr::null_mut();
-    *out_id_len = 0;
-
-    // Optional strings: NULL means "not provided", which is distinct from "".
     let (Some(title), Some(username), Some(password), Some(url)) =
         (cstr(title), cstr(username), cstr(password), cstr(url))
     else {
         return ERR_UTF8;
     };
-    let notes = if notes.is_null() {
-        ""
-    } else {
-        match cstr(notes) {
-            Some(s) => s,
-            None => return ERR_UTF8,
-        }
+    let (Ok(totp_secret), Ok(notes)) = (optional(totp_secret), optional(notes)) else {
+        return ERR_UTF8;
     };
-    // v11 gave the null/empty distinction meaning instead of discarding it:
-    //
-    //   null  -> KEEP the existing secret (edit did not touch the field)
-    //   ""    -> CLEAR it (the user removed the code)
-    //   value -> set it; otpauth:// URIs are normalized to their Base32 secret
-    //
-    // Before this, every edit from a client that did not round-trip the secret
-    // rewrote the login with totp_secret: None — so renaming a login on the
-    // phone silently destroyed its verification code. The detail surface
-    // deliberately never hands the secret out, which means "send back what you
-    // got" was never possible; keep-on-null is the only semantics that works.
-    enum TotpIntent {
-        Keep,
-        Clear,
-        Set(String),
-    }
-    let totp_intent = if totp_secret.is_null() {
-        TotpIntent::Keep
-    } else {
-        match cstr(totp_secret) {
-            Some("") => TotpIntent::Clear,
-            Some(s) if s.trim().to_ascii_lowercase().starts_with("otpauth://") => {
-                // Reject a bad URI HERE, where the caller can show the QR scan
-                // failed — storing it raw would surface later as a code that
-                // derives garbage.
-                match vault_core::parse_otpauth_uri(s.trim()) {
-                    Ok(parsed) => TotpIntent::Set(parsed.secret),
-                    Err(_) => return ERR_OP_FAILED,
-                }
-            }
-            Some(s) => TotpIntent::Set(s.trim().to_string()),
-            None => return ERR_UTF8,
-        }
+    let edit = LoginEdit {
+        title: title.into(),
+        username: username.into(),
+        url: url.into(),
+        password: Change::Set(password.into()),
+        totp_secret,
+        notes,
     };
-    let existing_id = if id.is_null() {
-        None
-    } else {
-        match cstr(id) {
-            Some("") => None,
-            Some(s) => match uuid::Uuid::parse_str(s) {
-                Ok(u) => Some(u),
-                Err(_) => return ERR_NOT_FOUND,
-            },
-            None => return ERR_UTF8,
-        }
-    };
-
-    let mut vault = match lock_vault(&(*handle).vault) {
-        Ok(v) => v,
-        Err(code) => return code,
-    };
-    if !vault.is_unlocked() {
-        return ERR_LOCKED;
-    }
-
-    // Keep what we need to undo this if serialization fails, so a failed write
-    // cannot leave the handle holding a change the caller never persisted.
-    let previous = existing_id.and_then(|u| vault.get_item(u).ok());
-
-    let totp = match totp_intent {
-        TotpIntent::Set(s) => Some(s),
-        TotpIntent::Clear => None,
-        TotpIntent::Keep => previous.as_ref().and_then(|item| match &item.data {
-            VaultItem::Login { totp_secret, .. } => totp_secret.clone(),
-            _ => None,
-        }),
-    };
-
-    let data = VaultItem::Login {
-        title: title.to_string(),
-        username: username.to_string(),
-        password: password.to_string(),
-        url: url.to_string(),
-        totp_secret: totp,
-        notes: notes.to_string(),
-    };
-    if let Some(u) = existing_id {
-        if previous.is_none() {
-            return ERR_NOT_FOUND;
-        }
-        // Editing an existing login must not resurrect a deleted one silently,
-        // nor change its kind.
-        if !matches!(
-            previous.as_ref().map(|i| i.data.kind()),
-            Some(ItemKind::Login)
-        ) {
-            return ERR_NOT_FOUND;
-        }
-        let _ = u;
-    }
-
-    let result = guard_result(|| {
-        let item = match (existing_id, previous.as_ref()) {
-            (Some(_), Some(old)) => {
-                let mut it = old.clone();
-                it.data = data;
-                it.modified_at = now_unix_millis;
-                it
-            }
-            _ => vault_core::Item::new(data, now_unix_millis),
-        };
-        let new_id = item.id;
-        vault.upsert_item(item)?;
-        let bytes = reserialize_verified(&vault, None)?;
-        Ok((new_id, bytes))
-    });
-
-    match result {
-        Ok((new_id, bytes)) => {
-            emit(bytes, out_vault_bytes, out_vault_bytes_len);
-            emit(new_id.to_string().into_bytes(), out_id, out_id_len);
-            OK
-        }
-        Err(code) => {
-            // Roll the handle back to the last persisted state.
-            match previous {
-                Some(old) => {
-                    let _ = vault.upsert_item(old);
-                }
-                None => {
-                    // A brand-new item may or may not have landed; if it did,
-                    // remove it. We do not know its id on the failure path, so
-                    // only the edit case is precisely restorable — a fresh item
-                    // that failed to serialize is dropped by the next reload.
-                }
-            }
-            code
-        }
-    }
+    upsert(
+        handle,
+        id,
+        |vault, id| vault.save_login(id, edit, now_unix_millis),
+        out_vault_bytes,
+        out_vault_bytes_len,
+        out_id,
+        out_id_len,
+    )
 }
 
-/// The shared write path for the single-kind upserts (Wi-Fi, note).
+/// An optional field of an edit: NULL leaves it as it is, anything else sets
+/// it ("" clears). Clients never receive some secrets (TOTP) and do not show
+/// others (a login's notes on iOS), so "send back what you got" is impossible
+/// and "absent means erase" destroyed them on every edit — TOTP codes until
+/// ABI v11, notes until v17. `Err` is invalid UTF-8.
+unsafe fn optional(s: *const c_char) -> Result<Change<String>, ()> {
+    if s.is_null() {
+        return Ok(Change::Keep);
+    }
+    cstr(s).map(|value| Change::Set(value.into())).ok_or(())
+}
+
+/// The one write path for every upsert: create on a null id, edit in place on
+/// a valid one, and hand the caller the new vault bytes to persist. What an
+/// edit means is `vault_core::edit`'s business; this is the C plumbing.
 ///
-/// Same contract as `vault_ffi_upsert_login`: create on null id, edit in place
-/// on a valid one — refusing an id whose item is missing, deleted, or of
-/// another kind — and hand the caller the new vault bytes to persist. On a
-/// serialization failure the handle is rolled back to the last persisted item
-/// so it never holds a change the caller could not write.
-///
-/// `upsert_login` keeps its own body because its TOTP keep-on-null semantics
-/// need the previous item BEFORE the payload can be built; these two have no
-/// such dependency and share everything else.
-#[allow(clippy::too_many_arguments)] // the C out-param convention, like its callers
-unsafe fn upsert_of_kind(
+/// The edit is made on a copy and the handle takes the copy only once its
+/// bytes exist, so a failure leaves the handle exactly as persisted — no undo
+/// to run, and no half-applied edit in its password history.
+unsafe fn upsert(
     handle: *mut VaultHandle,
     id: *const c_char,
-    kind: ItemKind,
-    data: VaultItem,
-    now_unix_millis: i64,
+    save: impl FnOnce(&mut Vault, Option<uuid::Uuid>) -> vault_core::Result<uuid::Uuid>,
     out_vault_bytes: *mut *mut u8,
     out_vault_bytes_len: *mut usize,
     out_id: *mut *mut u8,
@@ -1840,6 +1851,10 @@ unsafe fn upsert_of_kind(
     {
         return ERR_NULL_ARG;
     }
+    *out_vault_bytes = std::ptr::null_mut();
+    *out_vault_bytes_len = 0;
+    *out_id = std::ptr::null_mut();
+    *out_id_len = 0;
     let existing_id = if id.is_null() {
         None
     } else {
@@ -1860,48 +1875,26 @@ unsafe fn upsert_of_kind(
     if !vault.is_unlocked() {
         return ERR_LOCKED;
     }
-
-    let previous = existing_id.and_then(|u| vault.get_item(u).ok());
-    if existing_id.is_some()
-        && !matches!(previous.as_ref().map(|i| i.data.kind()), Some(k) if k == kind)
-    {
-        return ERR_NOT_FOUND;
-    }
-
-    let result = guard_result(|| {
-        let item = match (existing_id, previous.as_ref()) {
-            (Some(_), Some(old)) => {
-                let mut it = old.clone();
-                it.data = data;
-                it.modified_at = now_unix_millis;
-                it
-            }
-            _ => vault_core::Item::new(data, now_unix_millis),
-        };
-        let new_id = item.id;
-        vault.upsert_item(item)?;
-        let bytes = reserialize_verified(&vault, None)?;
-        Ok((new_id, bytes))
-    });
-    match result {
+    let mut next = vault.clone();
+    match guard_result(|| {
+        let new_id = save(&mut next, existing_id)?;
+        Ok((new_id, reserialize_verified(&next, None)?))
+    }) {
         Ok((new_id, bytes)) => {
+            *vault = next;
             emit(bytes, out_vault_bytes, out_vault_bytes_len);
             emit(new_id.to_string().into_bytes(), out_id, out_id_len);
             OK
         }
-        Err(code) => {
-            if let Some(old) = previous {
-                let _ = vault.upsert_item(old);
-            }
-            code
-        }
+        Err(code) => code,
     }
 }
 
 /// Create or edit a Wi-Fi network entry (ABI v12).
 ///
 /// `security` is the join-QR token: "WPA", "WEP" or "nopass"; empty means WPA.
-/// Same create/edit and rollback contract as `vault_ffi_upsert_login`.
+/// `notes` may be NULL to keep the entry's notes (ABI v17). Same create/edit
+/// contract as `vault_ffi_upsert_login`.
 ///
 /// # Safety
 /// `handle` valid; string arguments NUL-terminated or null where documented;
@@ -1923,29 +1916,27 @@ pub unsafe extern "C" fn vault_ffi_upsert_wifi(
     out_id: *mut *mut u8,
     out_id_len: *mut usize,
 ) -> i32 {
-    let (Some(title), Some(ssid), Some(password), Some(security), Some(notes)) = (
+    let (Some(title), Some(ssid), Some(password), Some(security), Ok(notes)) = (
         cstr(title),
         cstr(ssid),
         cstr(password),
         cstr(security),
-        cstr(notes),
+        optional(notes),
     ) else {
         return ERR_UTF8;
     };
-    let data = VaultItem::Wifi {
-        title: title.to_string(),
-        ssid: ssid.to_string(),
-        password: password.to_string(),
-        security: security.to_string(),
+    let edit = WifiEdit {
+        title: title.into(),
+        ssid: ssid.into(),
+        password: Change::Set(password.into()),
+        security: security.into(),
         hidden: hidden != 0,
-        notes: notes.to_string(),
+        notes,
     };
-    upsert_of_kind(
+    upsert(
         handle,
         id,
-        ItemKind::Wifi,
-        data,
-        now_unix_millis,
+        |vault, id| vault.save_wifi(id, edit, now_unix_millis),
         out_vault_bytes,
         out_vault_bytes_len,
         out_id,
@@ -1973,16 +1964,14 @@ pub unsafe extern "C" fn vault_ffi_upsert_secure_note(
     let (Some(title), Some(body)) = (cstr(title), cstr(body)) else {
         return ERR_UTF8;
     };
-    let data = VaultItem::SecureNote {
-        title: title.to_string(),
-        body: body.to_string(),
+    let edit = NoteEdit {
+        title: title.into(),
+        body: body.into(),
     };
-    upsert_of_kind(
+    upsert(
         handle,
         id,
-        ItemKind::SecureNote,
-        data,
-        now_unix_millis,
+        |vault, id| vault.save_note(id, edit, now_unix_millis),
         out_vault_bytes,
         out_vault_bytes_len,
         out_id,
@@ -2047,6 +2036,8 @@ pub unsafe extern "C" fn vault_ffi_delete_item(
     }
 }
 
+// A test reads as one scenario, top to bottom; splitting it hides the story.
+#[allow(clippy::too_many_lines)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2405,8 +2396,47 @@ mod tests {
     // Pinned deliberately: clients gate features on this number, so a bump has
     // to be a conscious edit here, not a side effect.
     #[test]
-    fn abi_version_is_16() {
-        assert_eq!(vault_ffi_abi_version(), 16);
+    fn abi_version_is_20() {
+        assert_eq!(vault_ffi_abi_version(), 20);
+    }
+
+    /// A loaded handle is a vault not yet open: it answers what the header
+    /// says, and every read of the items is refused until something opens it.
+    #[test]
+    fn a_loaded_vault_reads_nothing_until_it_is_opened() {
+        let mut params = vault_core::KdfParams::new_default().unwrap();
+        params.m_cost_kib = 256;
+        params.t_cost = 1;
+        let mut vault = Vault::create("pw", params).unwrap();
+        vault
+            .enable_device_unlock(&SymmetricKey::generate().unwrap())
+            .unwrap();
+        let bytes = vault.to_bytes().unwrap();
+
+        let mut handle: *mut VaultHandle = ptr::null_mut();
+        let loaded = unsafe { vault_ffi_vault_load(bytes.as_ptr(), bytes.len(), &mut handle) };
+        assert_eq!(loaded, OK);
+        assert_eq!(unsafe { vault_ffi_has_device_unlock(handle) }, 1);
+        let (mut out, mut len) = (ptr::null_mut(), 0usize);
+        assert_eq!(
+            unsafe { vault_ffi_items(handle, &mut out, &mut len) },
+            ERR_LOCKED
+        );
+        assert_eq!(
+            unsafe { vault_ffi_identities(handle, &mut out, &mut len) },
+            ERR_LOCKED
+        );
+        let merged =
+            unsafe { vault_ffi_merge_and_serialize(handle, ptr::null(), 0, &mut out, &mut len) };
+        assert_eq!(merged, ERR_LOCKED);
+        assert!(out.is_null());
+        unsafe { vault_ffi_vault_free(handle) };
+
+        let not_a_vault = b"not a vault";
+        let refused =
+            unsafe { vault_ffi_vault_load(not_a_vault.as_ptr(), not_a_vault.len(), &mut handle) };
+        assert_ne!(refused, OK);
+        assert!(handle.is_null());
     }
 
     // ---- every-kind surface (ABI v7) -------------------------------------
@@ -2883,6 +2913,128 @@ mod tests {
             )
         };
         assert_eq!(rc, ERR_OP_FAILED);
+        unsafe { vault_ffi_vault_free(handle) };
+    }
+
+    #[test]
+    fn check_accepts_a_vault_and_refuses_anything_else() {
+        let bytes = password_only_vault();
+        assert_eq!(
+            unsafe { vault_ffi_vault_check(bytes.as_ptr(), bytes.len()) },
+            OK
+        );
+        for junk in [
+            b"".as_slice(),
+            b"not a vault",
+            b"SYBRVLT9-from-a-newer-arca",
+        ] {
+            assert_ne!(
+                unsafe { vault_ffi_vault_check(junk.as_ptr(), junk.len()) },
+                OK
+            );
+        }
+        assert_eq!(
+            unsafe { vault_ffi_vault_check(ptr::null(), 0) },
+            ERR_NULL_ARG
+        );
+    }
+
+    /// iOS never shows a login's notes, so every phone edit sends none.
+    /// Before v17 that erased them — recovery codes, security answers — and
+    /// sync carried the loss to every device. NULL keeps; "" clears.
+    #[test]
+    fn editing_without_the_notes_field_keeps_the_notes() {
+        let bytes = password_only_vault();
+        let handle = open_with_password(&bytes, "pw");
+        let mk = |s: &str| CString::new(s).unwrap();
+        let opt = |s: Option<&str>| s.map(|s| CString::new(s).unwrap());
+        let ptr_of = |c: &Option<CString>| c.as_ref().map_or(ptr::null(), |c| c.as_ptr());
+        let finish = |rc: i32, vb: *mut u8, vb_len: usize, idp: *mut u8, id_len: usize| {
+            assert_eq!(rc, OK);
+            let (bytes, id) = unsafe {
+                (
+                    slice::from_raw_parts(vb, vb_len).to_vec(),
+                    String::from_utf8(slice::from_raw_parts(idp, id_len).to_vec()).unwrap(),
+                )
+            };
+            unsafe {
+                vault_ffi_free(vb, vb_len);
+                vault_ffi_free(idp, id_len);
+            }
+            (id, bytes)
+        };
+        let notes_in = |bytes: &[u8], id: &str| -> String {
+            let mut vault = Vault::from_bytes(bytes).unwrap();
+            vault.unlock("pw").unwrap();
+            match &vault
+                .get_item(uuid::Uuid::parse_str(id).unwrap())
+                .unwrap()
+                .data
+            {
+                VaultItem::Login { notes, .. } | VaultItem::Wifi { notes, .. } => notes.clone(),
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        let login = |id: Option<&str>, notes: Option<&str>| {
+            let (id, notes) = (opt(id), opt(notes));
+            let (mut vb, mut vb_len, mut idp, mut id_len) =
+                (ptr::null_mut(), 0usize, ptr::null_mut(), 0usize);
+            let rc = unsafe {
+                vault_ffi_upsert_login(
+                    handle,
+                    ptr_of(&id),
+                    mk("Bank").as_ptr(),
+                    mk("me").as_ptr(),
+                    mk("pw").as_ptr(),
+                    mk("https://bank.example").as_ptr(),
+                    ptr::null(),
+                    ptr_of(&notes),
+                    1_000,
+                    &mut vb,
+                    &mut vb_len,
+                    &mut idp,
+                    &mut id_len,
+                )
+            };
+            finish(rc, vb, vb_len, idp, id_len)
+        };
+        let wifi = |id: Option<&str>, notes: Option<&str>| {
+            let (id, notes) = (opt(id), opt(notes));
+            let (mut vb, mut vb_len, mut idp, mut id_len) =
+                (ptr::null_mut(), 0usize, ptr::null_mut(), 0usize);
+            let rc = unsafe {
+                vault_ffi_upsert_wifi(
+                    handle,
+                    ptr_of(&id),
+                    mk("Home").as_ptr(),
+                    mk("home-5g").as_ptr(),
+                    mk("pw").as_ptr(),
+                    mk("WPA").as_ptr(),
+                    0,
+                    ptr_of(&notes),
+                    1_000,
+                    &mut vb,
+                    &mut vb_len,
+                    &mut idp,
+                    &mut id_len,
+                )
+            };
+            finish(rc, vb, vb_len, idp, id_len)
+        };
+
+        let (id, _) = login(None, Some("recovery codes: 1111 2222"));
+        let (_, bytes) = login(Some(&id), None);
+        assert_eq!(notes_in(&bytes, &id), "recovery codes: 1111 2222");
+        let (_, bytes) = login(Some(&id), Some(""));
+        assert_eq!(notes_in(&bytes, &id), "");
+
+        let (id, bytes) = wifi(None, None);
+        assert_eq!(notes_in(&bytes, &id), "");
+        let (_, _) = wifi(Some(&id), Some("router in the attic"));
+        let (_, bytes) = wifi(Some(&id), None);
+        assert_eq!(notes_in(&bytes, &id), "router in the attic");
+        let (_, bytes) = wifi(Some(&id), Some(""));
+        assert_eq!(notes_in(&bytes, &id), "");
         unsafe { vault_ffi_vault_free(handle) };
     }
 
@@ -4197,6 +4349,47 @@ mod tests {
         sec1.extend_from_slice(&x);
         sec1.extend_from_slice(&y);
         p256::ecdsa::VerifyingKey::from_sec1_bytes(&sec1).expect("P-256 key")
+    }
+
+    /// The shared file after the master password changed: a process that has
+    /// not taken the change on is told so, and a copy from before the change,
+    /// written by such a process, merges as nothing instead of failing.
+    #[test]
+    fn a_merge_reports_a_password_change_and_skips_what_it_replaced() {
+        let mut params = vault_core::KdfParams::new_default().unwrap();
+        params.m_cost_kib = 256;
+        params.t_cost = 1;
+        let mut vault = Vault::create("old", params).unwrap();
+        let before = vault.to_bytes().unwrap();
+        vault.change_master_password("new").unwrap();
+        let after = vault.to_bytes().unwrap();
+
+        let open = |bytes: &[u8], password: &str| {
+            let password = CString::new(password).unwrap();
+            let mut handle: *mut VaultHandle = ptr::null_mut();
+            let code = unsafe {
+                vault_ffi_vault_open_password(
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    password.as_ptr(),
+                    &mut handle,
+                )
+            };
+            assert_eq!(code, OK);
+            handle
+        };
+        let merge = |handle, bytes: &[u8]| unsafe {
+            vault_ffi_merge_remote(handle, bytes.as_ptr(), bytes.len())
+        };
+
+        let stale = open(&before, "old");
+        assert_eq!(merge(stale, &after), ERR_PASSWORD_CHANGED);
+        let current = open(&after, "new");
+        assert_eq!(merge(current, &before), OK);
+        unsafe {
+            vault_ffi_vault_free(stale);
+            vault_ffi_vault_free(current);
+        }
     }
 
     /// Tiny verifier so the test asserts real cryptographic validity of the

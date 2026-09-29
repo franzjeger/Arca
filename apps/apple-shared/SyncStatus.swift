@@ -10,9 +10,16 @@ struct SyncStatus: Decodable, Sendable, Equatable {
     var lastError: String?
     /// True when the last cycle pulled changes in from another device.
     var merged: Bool = false
+    /// The master password was changed on another device, and sync pushes
+    /// nothing until this one is given it (`VaultSync.adoptPassword`). Optional
+    /// so a status without the field still decodes.
+    var needsPassword: Bool?
+    /// Devices whose latest changes Google Drive had lost; the sync already
+    /// put them back. Kept until `VaultSync.acknowledgeRollback`.
+    var rolledBack: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case connected, account, merged
-        case lastSyncUnix, lastError
+        case lastSyncUnix, lastError, needsPassword, rolledBack
     }
 }

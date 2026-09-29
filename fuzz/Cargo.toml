@@ -1,0 +1,54 @@
+# Fuzz targets for everything in vault-core that parses input Arca does not
+# control: vault files (a synced copy is whatever the cloud holds), URLs and
+# password rules (from web pages), otpauth URIs (from QR codes).
+#
+# Run one with cargo-fuzz on a nightly toolchain:
+#
+#     cargo +nightly fuzz run vault_file
+#
+# Its own workspace, outside the main one: cargo-fuzz builds it with
+# sanitizer flags and a nightly compiler that the pinned toolchain must not
+# see.
+[package]
+name = "arca-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vault-core = { path = "../crates/vault-core" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "vault_file"
+path = "fuzz_targets/vault_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url"
+path = "fuzz_targets/url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "password_rules"
+path = "fuzz_targets/password_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otpauth"
+path = "fuzz_targets/otpauth.rs"
+test = false
+doc = false
+bench = false

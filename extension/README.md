@@ -9,8 +9,9 @@ through a small Rust **native messaging host**.
 > real credentials — but only while the vault is **unlocked** and only when the
 > page's host **matches** the stored login (origin binding). `match` returns
 > metadata only; the password crosses solely on an explicit `fill` for a
-> matched entry. The bridge is loopback-only (127.0.0.1) and authenticated with
-> a per-run token from a `0600` file. See `../THREAT_MODEL.md`.
+> matched entry. The bridge is loopback-only (127.0.0.1) and authenticated both
+> ways with a per-run token from a `0600` file, which never crosses the socket:
+> the app proves itself before the host sends anything. See `../THREAT_MODEL.md`.
 >
 > Verified at the bridge level (host binary ↔ live app). The browser-side
 > injection is straightforward content-script JS; load the extension + register
@@ -24,7 +25,7 @@ chromium/            MV3 extension source (shared by Chrome/Brave/Edge + Firefox
   manifest.firefox.json  Firefox manifest (background.scripts + gecko id)
   background.js          relays messages to the native host
   content.js             form detection + autofill picker
-  content.css            injected UI styles
+  picker-styles.js       styles for the picker and save prompt (shadow roots)
   popup.html / popup.js  connection-status popup
   icons/
 native-host/         Rust native-messaging host (see ../../crates + workspace)

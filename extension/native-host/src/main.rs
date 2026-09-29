@@ -16,23 +16,18 @@
 #![forbid(unsafe_code)]
 
 use std::io::{self, BufRead, BufReader, Read, Write};
-mod bridge_schema;
 mod launch;
 
 use std::net::TcpStream;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use vault_bridge::proto;
 
 const HOST_NAME: &str = "no.sybr.vault";
 const PROTOCOL_VERSION: u32 = 1;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Version of the desktop app's newline-JSON bridge protocol this host is
-/// written against. Must match `PROTOCOL_VERSION` in the app's `bridge.rs`;
-/// a mismatch means the two shipped out of step, and refusing the connection
-/// reads as itself rather than as garbled requests.
-const BRIDGE_PROTOCOL: u32 = 2;
 /// Reject absurd frame sizes (browsers cap extension->host at 1 MiB).
 const MAX_MESSAGE_BYTES: u32 = 8 * 1024 * 1024;
 
@@ -230,70 +225,29 @@ struct LoginMatch {
     /// "password" for a stored login, "passkey" for a WebAuthn credential.
     /// Defaults to "password" so an older desktop app (no `kind`) still lists
     /// its logins.
-    #[serde(default = "bridge_schema::default_kind")]
+    #[serde(default = "password_kind")]
     kind: String,
+}
+
+fn password_kind() -> String {
+    "password".into()
 }
 
 fn handle(request: Request) -> Response {
     match request {
-        Request::Hello { protocol, .. } => {
-            if protocol.unwrap_or(1) != PROTOCOL_VERSION {
-                return Response::Error {
-                    message: "unsupported_protocol".to_string(),
-                };
-            }
-            let app = desktop_app_info();
-            Response::Hello {
-                name: HOST_NAME.to_string(),
-                version: VERSION.to_string(),
-                protocol: PROTOCOL_VERSION,
-                app_connected: app.is_some(),
-                app_launchable: launch::available(),
-                app_version: app.as_ref().and_then(|a| a.version.clone()),
-                app_build: app.as_ref().and_then(|a| a.build.clone()),
-                app_commit: app.as_ref().and_then(|a| a.commit.clone()),
-                app_pid: app.as_ref().and_then(|a| a.pid),
-            }
-        }
+        Request::Hello { protocol, .. } => hello(protocol),
         Request::Ping => Response::Pong,
-        Request::DeleteBookmarks { url, folder } => {
-            match bridge_request(serde_json::json!({
-                "type": "delete_bookmarks", "url": url, "folder": folder,
-            })) {
-                Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("deleted_bookmarks") => {
-                    Response::DeletedBookmarks {
-                        removed: v.get("removed").and_then(|r| r.as_u64()).unwrap_or(0),
-                    }
-                }
-                _ => Response::Error {
-                    message: "Could not delete (app locked or not running).".to_string(),
-                },
-            }
-        }
         Request::Log { level, message } => {
             write_extension_log(&level, &message);
             Response::Pong
         }
-        Request::ListMatchingLogins { url } => match query_desktop_app(&url) {
-            Some(items) => Response::Logins {
-                url,
-                app_connected: true,
-                items,
-                note: None,
-            },
-            None => Response::Logins {
-                url,
-                app_connected: false,
-                items: Vec::new(),
-                note: Some("The Arca desktop app isn't running or is locked.".to_string()),
-            },
-        },
+        Request::ListMatchingLogins { url } => list_matching_logins(url),
         Request::Fill { id, url } => match fill_credential(&id, &url) {
             Ok((username, password)) => Response::Credentials { username, password },
             // The reason verbatim, for the extension to act on. It renders the
             // wording; a host that pre-writes prose forces the UI to string-match
             // its own sentences to tell "locked" from "wrong site".
-            Err(reason) => Response::Error { message: reason },
+            Err(reason) => error(reason),
         },
         Request::PasskeyCreate {
             origin,
@@ -312,7 +266,7 @@ fn handle(request: Request) -> Response {
                 credential_id,
                 attestation_object,
             },
-            Err(message) => Response::Error { message },
+            Err(message) => error(message),
         },
         Request::PasskeyGet {
             origin,
@@ -335,67 +289,18 @@ fn handle(request: Request) -> Response {
                     user_handle,
                 }
             }
-            Err(message) => Response::Error { message },
+            Err(message) => error(message),
         },
-        Request::ImportBookmarks { items } => {
-            match bridge_request(serde_json::json!({
-                "type": "import_bookmarks", "items": items,
-            })) {
-                Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("imported_bookmarks") => {
-                    Response::ImportedBookmarks {
-                        added: v.get("added").and_then(|a| a.as_u64()).unwrap_or(0),
-                    }
-                }
-                _ => Response::Error {
-                    message: "Could not import bookmarks (app locked or not running).".to_string(),
-                },
-            }
-        }
-        Request::ListBookmarks => {
-            match bridge_request(serde_json::json!({ "type": "list_bookmarks" })) {
-                Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("bookmarks") => {
-                    Response::Bookmarks {
-                        items: v
-                            .get("items")
-                            .and_then(|i| i.as_array())
-                            .cloned()
-                            .unwrap_or_default(),
-                    }
-                }
-                // The app ANSWERED, and what it said was not a bookmark list —
-                // in practice "locked". A known state, and the caller may act
-                // on it at once: bookmarks vanishing when the vault locks is
-                // the entire point of the feature.
-                Some(v) => Response::Error {
-                    message: v
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("locked")
-                        .to_string(),
-                },
-                // No answer at all. A quit app looks like this — and so does a
-                // blip: a host that failed to spawn, a bridge file being
-                // rewritten, a lost race at browser startup.
-                //
-                // These two used to share one message, "app locked or not
-                // running", and the caller deleted the user's bookmark folder
-                // on either. So a momentary miss destroyed the folder, which is
-                // what "saving bookmarks doesn't work" actually was. Say which
-                // one it is and let the caller decide.
-                None => Response::Error {
-                    message: "unreachable".to_string(),
-                },
-            }
-        }
+        Request::DeleteBookmarks { url, folder } => delete_bookmarks(url, folder),
+        Request::ImportBookmarks { items } => import_bookmarks(items),
+        Request::ListBookmarks => list_bookmarks(),
         Request::SaveProbe {
             url,
             username,
             password,
         } => match save_probe(&url, &username, &password) {
             Some((action, username)) => Response::SaveDecision { action, username },
-            None => Response::Error {
-                message: "Save probe failed (app locked or not running).".to_string(),
-            },
+            None => error("Save probe failed (app locked or not running)."),
         },
         Request::SaveLogin {
             url,
@@ -405,39 +310,128 @@ fn handle(request: Request) -> Response {
             if save_login(&url, &username, &password) {
                 Response::Saved
             } else {
-                Response::Error {
-                    message: "Could not save login (app locked or not running).".to_string(),
-                }
+                error("Could not save login (app locked or not running).")
             }
         }
-        Request::Unlock => {
-            if let Err(message) = launch::ensure_running(|| desktop_app_info().is_some()) {
-                return Response::Error { message };
-            }
-            // Send once only: a lost response must never replay a user prompt.
-            match bridge_request(serde_json::json!({ "type": "request_unlock" })) {
-                Some(response) if response["type"] == "unlock_requested" => {
-                    Response::UnlockRequested
-                }
-                Some(response) => Response::Error {
-                    message: response["message"]
-                        .as_str()
-                        .unwrap_or("invalid_response")
-                        .to_string(),
-                },
-                None => Response::Error {
-                    message: "Could not reach Arca after startup. Try again.".to_string(),
-                },
-            }
-        }
+        Request::Unlock => unlock(),
         Request::GeneratePassword { length, symbols } => match generate_password(length, symbols) {
             Some(password) => Response::GeneratedPassword { password },
             // Unlike the others this cannot mean "locked": the app generates
             // without an unlocked vault. If it failed, it is not running.
-            None => Response::Error {
-                message: "Could not generate a password (app not running).".to_string(),
-            },
+            None => error("Could not generate a password (app not running)."),
         },
+    }
+}
+
+fn error(message: impl Into<String>) -> Response {
+    Response::Error {
+        message: message.into(),
+    }
+}
+
+fn hello(protocol: Option<u32>) -> Response {
+    if protocol.unwrap_or(1) != PROTOCOL_VERSION {
+        return error("unsupported_protocol");
+    }
+    let app = desktop_app_info();
+    Response::Hello {
+        name: HOST_NAME.to_string(),
+        version: VERSION.to_string(),
+        protocol: PROTOCOL_VERSION,
+        app_connected: app.is_some(),
+        app_launchable: launch::available(),
+        app_version: app.as_ref().and_then(|a| a.version.clone()),
+        app_build: app.as_ref().and_then(|a| a.build.clone()),
+        app_commit: app.as_ref().and_then(|a| a.commit.clone()),
+        app_pid: app.as_ref().and_then(|a| a.pid),
+    }
+}
+
+fn list_matching_logins(url: String) -> Response {
+    match query_desktop_app(&url) {
+        Some(items) => Response::Logins {
+            url,
+            app_connected: true,
+            items,
+            note: None,
+        },
+        None => Response::Logins {
+            url,
+            app_connected: false,
+            items: Vec::new(),
+            note: Some("The Arca desktop app isn't running or is locked.".to_string()),
+        },
+    }
+}
+
+fn delete_bookmarks(url: String, folder: String) -> Response {
+    match bridge_request(serde_json::json!({
+        "type": "delete_bookmarks", "url": url, "folder": folder,
+    })) {
+        Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("deleted_bookmarks") => {
+            Response::DeletedBookmarks {
+                removed: v.get("removed").and_then(|r| r.as_u64()).unwrap_or(0),
+            }
+        }
+        _ => error("Could not delete (app locked or not running)."),
+    }
+}
+
+fn import_bookmarks(items: Vec<serde_json::Value>) -> Response {
+    match bridge_request(serde_json::json!({
+        "type": "import_bookmarks", "items": items,
+    })) {
+        Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("imported_bookmarks") => {
+            Response::ImportedBookmarks {
+                added: v.get("added").and_then(|a| a.as_u64()).unwrap_or(0),
+            }
+        }
+        _ => error("Could not import bookmarks (app locked or not running)."),
+    }
+}
+
+fn list_bookmarks() -> Response {
+    match bridge_request(serde_json::json!({ "type": "list_bookmarks" })) {
+        Some(v) if v.get("type").and_then(|t| t.as_str()) == Some("bookmarks") => {
+            Response::Bookmarks {
+                items: v
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+            }
+        }
+        // The app ANSWERED, and what it said was not a bookmark list — in
+        // practice "locked". A known state, and the caller may act on it at
+        // once: bookmarks vanishing when the vault locks is the entire point
+        // of the feature.
+        Some(v) => error(
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("locked"),
+        ),
+        // No answer at all. A quit app looks like this — and so does a blip: a
+        // host that failed to spawn, a bridge file being rewritten, a lost race
+        // at browser startup.
+        //
+        // These two used to share one message, "app locked or not running",
+        // and the caller deleted the user's bookmark folder on either. So a
+        // momentary miss destroyed the folder, which is what "saving bookmarks
+        // doesn't work" actually was. Say which one it is and let the caller
+        // decide.
+        None => error("unreachable"),
+    }
+}
+
+fn unlock() -> Response {
+    if let Err(message) = launch::ensure_running(|| desktop_app_info().is_some()) {
+        return error(message);
+    }
+    // Send once only: a lost response must never replay a user prompt.
+    match bridge_request(serde_json::json!({ "type": "request_unlock" })) {
+        Some(response) if response["type"] == "unlock_requested" => Response::UnlockRequested,
+        Some(response) => error(response["message"].as_str().unwrap_or("invalid_response")),
+        None => error("Could not reach Arca after startup. Try again."),
     }
 }
 
@@ -607,44 +601,97 @@ fn bridge_info_path() -> Option<std::path::PathBuf> {
     Some(dirs::data_dir()?.join(HOST_NAME).join("native-bridge.json"))
 }
 
-/// A fresh 128-bit challenge for the app to sign, hex-encoded.
-///
-/// From the OS CSPRNG, because a predictable nonce would let an impostor replay
-/// a proof it had captured from an earlier, genuine handshake.
-fn fresh_nonce() -> Option<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).ok()?;
-    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+/// An authenticated connection to the desktop app's loopback bridge.
+struct Bridge {
+    writer: TcpStream,
+    reader: BufReader<TcpStream>,
 }
 
-/// `HMAC-SHA256(token, nonce)`, hex. Must match `handshake_proof` in the app's
-/// `bridge.rs` — the protocol-version guard keeps the two in step.
-fn handshake_proof(token: &str, nonce: &str) -> String {
-    use hmac::Mac;
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(token.as_bytes())
-        .expect("HMAC accepts any key length");
-    mac.update(nonce.as_bytes());
-    mac.finalize()
-        .into_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && bool::from(subtle::ConstantTimeEq::ct_eq(a, b))
-}
-
-/// Open an authenticated connection to the desktop app's loopback bridge and
-/// send one request, returning the parsed JSON response.
-fn bridge_request_with_info(
-    payload: serde_json::Value,
-) -> Option<(serde_json::Value, DesktopBuild)> {
+/// Port and token from the app's connection-info file.
+fn bridge_info() -> Option<(u16, String)> {
     let info: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bridge_info_path()?).ok()?).ok()?;
     let port = u16::try_from(info.get("port")?.as_u64()?).ok()?;
-    let token = info.get("token")?.as_str()?;
-    bridge_request_at(payload, port, token)
+    Some((port, info.get("token")?.as_str()?.to_string()))
+}
+
+/// Connect and run the protocol-3 handshake (see `vault_bridge::auth`): the
+/// token never leaves this process, and the app must prove it holds it before
+/// we write anything else. Whoever holds the port after Arca exits gets a
+/// nonce and nothing more.
+fn open_bridge(port: u16, token: &str, read_timeout: Duration) -> Option<(Bridge, DesktopBuild)> {
+    let stream = TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_secs(5),
+    )
+    .ok()?;
+    stream.set_read_timeout(Some(read_timeout)).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .ok()?;
+    let mut bridge = Bridge {
+        writer: stream.try_clone().ok()?,
+        reader: BufReader::new(stream),
+    };
+
+    let nonce = vault_bridge::auth::nonce()?;
+    bridge.send(&proto::Request::Hello {
+        token: None,
+        protocol: Some(vault_bridge::PROTOCOL),
+        nonce: Some(nonce.clone()),
+    })?;
+    let proto::Response::Challenge {
+        nonce: app_nonce,
+        proof,
+    } = bridge.receive()?
+    else {
+        return None;
+    };
+    let expected = vault_bridge::auth::app_proof(token, &nonce, &app_nonce);
+    if !vault_bridge::auth::is_nonce(&app_nonce) || !vault_bridge::auth::same(&proof, &expected) {
+        return None;
+    }
+    bridge.send(&proto::Request::Auth {
+        proof: vault_bridge::auth::client_proof(token, &nonce, &app_nonce),
+    })?;
+    // Refuse an app that speaks a dialect we were not written against, rather
+    // than sending it requests it may read differently than we meant them.
+    let proto::Response::Ok {
+        protocol: vault_bridge::PROTOCOL,
+        version,
+        build,
+        commit,
+        pid,
+        ..
+    } = bridge.receive()?
+    else {
+        return None;
+    };
+    let app = DesktopBuild {
+        version: Some(version),
+        build: Some(build),
+        commit: Some(commit),
+        pid: Some(pid),
+    };
+    Some((bridge, app))
+}
+
+impl Bridge {
+    fn send(&mut self, request: &proto::Request) -> Option<()> {
+        writeln!(self.writer, "{}", serde_json::to_string(request).ok()?).ok()
+    }
+
+    fn receive(&mut self) -> Option<proto::Response> {
+        serde_json::from_value(read_bridge_response(&mut self.reader)?).ok()
+    }
+}
+
+/// Send one request to the desktop app, returning its parsed JSON response.
+fn bridge_request_with_info(
+    payload: serde_json::Value,
+) -> Option<(serde_json::Value, DesktopBuild)> {
+    let (port, token) = bridge_info()?;
+    bridge_request_at(payload, port, &token)
 }
 
 fn bridge_request_at(
@@ -654,87 +701,14 @@ fn bridge_request_at(
 ) -> Option<(serde_json::Value, DesktopBuild)> {
     // Invalid requests or incompatible replies must fail closed, never take
     // down the browser's long-lived native-messaging process.
-    let probe = payload.get("type").and_then(|v| v.as_str()) == Some("match");
-    let typed_req: bridge_schema::BridgeRequest = serde_json::from_value(payload).ok()?;
-    let payload = serde_json::to_value(typed_req).ok()?;
-
-    let stream = TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_secs(5),
-    )
-    .ok()?;
+    let request: proto::Request = serde_json::from_value(payload).ok()?;
     // Long enough to outlast an in-app autofill-consent prompt (the app blocks
     // the reply until the user answers, up to ~30s) without hanging forever.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(if probe { 2 } else { 90 })))
-        .ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .ok()?;
-    let mut writer = stream.try_clone().ok()?;
-    let mut reader = BufReader::new(stream);
-
-    // Authenticate, declaring the protocol we speak and challenging the app to
-    // prove it holds the same token. Authentication used to run one way: we
-    // proved ourselves to whatever was on the port, and it proved nothing back.
-    // Arca's port is released the moment it exits, so a process that grabbed it
-    // could collect every submitted password (`save_probe`) and answer `fill`
-    // with credentials of its choosing. Only the real app can compute the MAC.
-    let nonce = fresh_nonce()?;
-
-    let hello_req = bridge_schema::BridgeRequest::Hello {
-        token: token.to_string(),
-        protocol: Some(BRIDGE_PROTOCOL),
-        nonce: Some(nonce.clone()),
-    };
-    writeln!(writer, "{}", serde_json::to_string(&hello_req).ok()?).ok()?;
-
-    let hello = read_bridge_response(&mut reader)?;
-    if hello.get("type").and_then(|v| v.as_str()) != Some("ok") {
-        return None;
-    }
-    // Refuse an app that speaks a dialect we were not written against, rather
-    // than sending it requests it may read differently than we meant them.
-    let app_protocol = hello
-        .get("protocol")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(BRIDGE_PROTOCOL as u64);
-    if app_protocol != BRIDGE_PROTOCOL as u64 {
-        return None;
-    }
-    // The app's half of the handshake. Verified before a single byte of the
-    // real request — which may carry a password — is written.
-    let proof = hello.get("proof").and_then(|v| v.as_str())?;
-    if !constant_time_eq(proof.as_bytes(), handshake_proof(token, &nonce).as_bytes()) {
-        return None;
-    }
-    let app_version = DesktopBuild {
-        version: hello
-            .get("version")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
-        build: hello
-            .get("build")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
-        commit: hello
-            .get("commit")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
-        pid: hello
-            .get("pid")
-            .and_then(|v| v.as_u64())
-            .and_then(|v| u32::try_from(v).ok()),
-    };
-
-    // Send the actual request and read its response.
-    writeln!(writer, "{payload}").ok()?;
-
-    let response = read_bridge_response(&mut reader)?;
-    let _typed_resp: bridge_schema::BridgeResponse =
-        serde_json::from_value(response.clone()).ok()?;
-
-    Some((response, app_version))
+    let (mut bridge, app) = open_bridge(port, token, Duration::from_secs(90))?;
+    bridge.send(&request)?;
+    let response = read_bridge_response(&mut bridge.reader)?;
+    let _typed: proto::Response = serde_json::from_value(response.clone()).ok()?;
+    Some((response, app))
 }
 
 /// Bound allocation even if an incompatible endpoint never sends a newline.
@@ -762,9 +736,12 @@ struct DesktopBuild {
     pid: Option<u32>,
 }
 
+/// Whether the app is running, from the handshake alone. No request follows,
+/// so nothing reaches the vault: a liveness check used to be a `match`, which
+/// let any page's passkey probe unlock the vault while a USB key was inserted.
 fn desktop_app_info() -> Option<DesktopBuild> {
-    bridge_request_with_info(serde_json::json!({ "type": "match", "url": "" }))
-        .map(|(_, version)| version)
+    let (port, token) = bridge_info()?;
+    open_bridge(port, &token, Duration::from_secs(2)).map(|(_, app)| app)
 }
 
 /// Ask the app for logins matching `url` (metadata only, no passwords).
@@ -774,7 +751,7 @@ fn query_desktop_app(url: &str) -> Option<Vec<LoginMatch>> {
 }
 
 fn decode_login_matches(resp: serde_json::Value, url: &str) -> Option<Vec<LoginMatch>> {
-    let bridge_schema::BridgeResponse::Logins { items } = serde_json::from_value(resp).ok()? else {
+    let proto::Response::Logins { items } = serde_json::from_value(resp).ok()? else {
         return None;
     };
     Some(
@@ -986,11 +963,16 @@ mod tests {
     }
 
     /// A synthetic loopback server exercises the real authenticated transport;
-    /// no tests ever discover or contact the user's running vault.
-    fn synthetic_bridge(reply: &str, valid_proof: bool) -> Option<serde_json::Value> {
+    /// no tests ever discover or contact the user's running vault. It runs the
+    /// app's side of the handshake, holding the token only if `genuine`, and
+    /// then answers one request with `reply` if `reply` is set.
+    fn synthetic_app(
+        genuine: bool,
+        reply: Option<&str>,
+    ) -> (u16, std::thread::JoinHandle<Option<serde_json::Value>>) {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let reply = reply.to_owned();
+        let reply = reply.map(str::to_owned);
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             socket
@@ -998,32 +980,37 @@ mod tests {
                 .unwrap();
             let mut reader = BufReader::new(socket.try_clone().unwrap());
             let hello = read_bridge_response(&mut reader).unwrap();
-            assert_eq!(hello["token"], "synthetic-token");
-            let proof = if valid_proof {
-                handshake_proof("synthetic-token", hello["nonce"].as_str().unwrap())
+            assert!(hello.get("token").is_none(), "the token crossed the socket");
+            let client_nonce = hello["nonce"].as_str().unwrap().to_string();
+            let app_nonce = vault_bridge::auth::nonce().unwrap();
+            let token = if genuine {
+                "synthetic-token"
             } else {
-                "invalid-proof".into()
+                "a-guessed-token"
             };
-            writeln!(
-                socket,
-                "{}",
-                serde_json::json!({
-                    "type": "ok", "protocol": BRIDGE_PROTOCOL, "proof": proof,
-                    "version": VERSION, "build": "test", "commit": "test", "pid": 1
-                })
-            )
-            .unwrap();
+            let proof = vault_bridge::auth::app_proof(token, &client_nonce, &app_nonce);
+            let challenge =
+                serde_json::json!({"type": "challenge", "nonce": app_nonce, "proof": proof});
+            writeln!(socket, "{challenge}").unwrap();
+            let auth = read_bridge_response(&mut reader)?;
+            let expected = vault_bridge::auth::client_proof(token, &client_nonce, &app_nonce);
+            assert_eq!(auth["proof"], expected);
+            let ok = serde_json::json!({
+                "type": "ok", "protocol": vault_bridge::PROTOCOL,
+                "version": VERSION, "build": "test", "commit": "test", "pid": 1
+            });
+            writeln!(socket, "{ok}").unwrap();
             let request = read_bridge_response(&mut reader);
-            if valid_proof {
-                assert_eq!(request.unwrap()["password"], "synthetic-secret");
+            if let (Some(_), Some(reply)) = (&request, reply) {
                 writeln!(socket, "{reply}").unwrap();
-            } else {
-                assert!(
-                    request.is_none(),
-                    "secret request sent before authentication"
-                );
             }
+            request
         });
+        (port, server)
+    }
+
+    fn synthetic_bridge(reply: &str, genuine: bool) -> Option<serde_json::Value> {
+        let (port, server) = synthetic_app(genuine, Some(reply));
         let response = bridge_request_at(
             serde_json::json!({
                 "type": "save_login", "url": "https://example.test", "username": "alice",
@@ -1032,8 +1019,26 @@ mod tests {
             port,
             "synthetic-token",
         );
-        server.join().unwrap();
+        let request = server.join().unwrap();
+        if genuine {
+            assert_eq!(request.unwrap()["password"], "synthetic-secret");
+        } else {
+            assert!(
+                request.is_none(),
+                "secret request sent before authentication"
+            );
+        }
         response.map(|(response, _)| response)
+    }
+
+    /// Checking whether the app runs must not ask it anything: a request is
+    /// what a USB key used to unlock the vault for.
+    #[test]
+    fn a_liveness_check_authenticates_and_sends_nothing() {
+        let (port, server) = synthetic_app(true, None);
+        let app = open_bridge(port, "synthetic-token", Duration::from_secs(2)).map(|(_, a)| a);
+        assert_eq!(app.and_then(|a| a.version).as_deref(), Some(VERSION));
+        assert!(server.join().unwrap().is_none());
     }
 
     #[test]
@@ -1074,20 +1079,6 @@ mod tests {
         let mut out = (bytes.len() as u32).to_le_bytes().to_vec();
         out.extend_from_slice(bytes);
         out
-    }
-
-    /// Shared handshake test vector.
-    ///
-    /// The app, the native host and the CLI each compute this MAC in their own
-    /// crate, and a silent disagreement would break every bridge connection at
-    /// once. The same three assertions live in `bridge.rs`, the native host and
-    /// the CLI, so a change to one without the others fails here.
-    #[test]
-    fn handshake_proof_matches_the_shared_vector() {
-        assert_eq!(
-            handshake_proof("arca-test-token", "0123456789abcdef"),
-            "e7b61fca20478c27d56236c0e24e1fc97e29d2a3ed757d7a61d0cee09b66c1fc"
-        );
     }
 
     #[test]

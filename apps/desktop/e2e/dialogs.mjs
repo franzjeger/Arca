@@ -50,6 +50,8 @@ try {
         getSettings: async () => ({ autoLockSecs: 300, lockOnBlur: false, clipboardClearSecs: 30, confirmAutofill: false, savePrompt: true, handlePasskeys: true }),
         setSettings: async () => { throw new Error('Test disk failure'); },
         syncStatus: async () => window.testSync,
+        syncDevices: async () => [{ name: 'Test Mac', lastUpload: 1, thisDevice: true }],
+        syncAcknowledgeRollback: async () => {},
         appInfo: async () => ({ version: '0.5.0', build: 'synthetic-test', platform: 'linux', vaultFormat: 5 }),
         backupStatus: async () => ({ directory: null, lastSuccessUnix: null, lastError: null }),
         passwordHistory: async () => [{ id: 'previous', replacedAt: 1 }],

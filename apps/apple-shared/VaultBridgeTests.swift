@@ -27,6 +27,25 @@ final class VaultBridgeTests: XCTestCase {
         XCTAssertEqual(status.lastSyncUnix, 123456)
         XCTAssertEqual(status.lastError, "upload failed")
         XCTAssertFalse(status.merged)
+        XCTAssertNil(status.needsPassword)
+        XCTAssertNil(status.rolledBack)
+    }
+
+    func testSyncStatusCarriesAPasswordChangedElsewhere() throws {
+        let json = Data("""
+            {"connected":true,"account":null,"lastSyncUnix":null,            "lastError":"changed elsewhere","merged":false,"needsPassword":true}
+            """.utf8)
+        let status = try JSONDecoder().decode(SyncStatus.self, from: json)
+        XCTAssertEqual(status.needsPassword, true)
+    }
+
+    func testSyncStatusNamesTheDevicesDriveHadLost() throws {
+        let json = Data("""
+            {"connected":true,"account":null,"lastSyncUnix":1,"lastError":null,\
+            "merged":true,"needsPassword":false,"rolledBack":["MacBook Pro"]}
+            """.utf8)
+        let status = try JSONDecoder().decode(SyncStatus.self, from: json)
+        XCTAssertEqual(status.rolledBack, ["MacBook Pro"])
     }
 
     #if os(macOS)
@@ -84,6 +103,14 @@ final class VaultBridgeTests: XCTestCase {
         XCTAssertEqual(vault_ffi_has_device_unlock(nil), VaultFFICode.nullArgument)
     }
 
+    /// An import checks the picked file through the library before it may
+    /// replace the only vault on the phone; anything else is refused.
+    func testImportRefusesAFileThatIsNotAVault() {
+        XCTAssertFalse(VaultShared.isOpenableVault(Data()))
+        XCTAssertFalse(VaultShared.isOpenableVault(Data("not a vault".utf8)))
+        XCTAssertFalse(VaultShared.isOpenableVault(Data("SYBRVLT9 from a newer Arca".utf8)))
+    }
+
     /// Freeing null is documented as a no-op. If that stopped being true the
     /// `defer { vault_ffi_free(...) }` in every read path would be a crash.
     func testFreeingNullIsSafe() {
@@ -107,6 +134,24 @@ final class VaultBridgeTests: XCTestCase {
         XCTAssertEqual(identities.first?.user, "alice@example.test")
         XCTAssertEqual(identities.first?.domain, "github.com")
         XCTAssertEqual(identities.first?.label, "GitHub")
+    }
+
+    /// The shape `vault_ffi_devices` documents. Rust writes the id in lower
+    /// case; Swift's own `uuidString` is upper case.
+    func testDecodesTheDocumentedDeviceJSON() throws {
+        let json = """
+            [{"id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","name":"MacBook Pro",\
+            "uploads":12,"lastUpload":1759000000000}]
+            """
+        let devices = try JSONDecoder().decode([VaultDevice].self, from: Data(json.utf8))
+
+        XCTAssertEqual(devices.count, 1)
+        XCTAssertEqual(devices.first?.name, "MacBook Pro")
+        XCTAssertEqual(devices.first?.uploads, 12)
+        XCTAssertEqual(devices.first?.lastUpload, 1_759_000_000_000)
+        XCTAssertEqual(
+            devices.first.flatMap { UUID(uuidString: $0.id) },
+            UUID(uuidString: "3F2504E0-4F89-11D3-9A0C-0305E82C3301"))
     }
 
     // MARK: Errors stay secret-free

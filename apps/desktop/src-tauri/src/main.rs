@@ -15,6 +15,8 @@ mod keyfile_unlock;
 mod protected_unlock;
 mod reauth;
 mod related_origins;
+mod rotation;
+mod session;
 mod state;
 mod sync;
 
@@ -121,233 +123,9 @@ fn main() {
         // vault and any half-finished edit.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(|app| {
-            // Resolve a per-user data directory for the single vault file.
-            let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir).ok();
-            // On macOS this is the shared App Group container (migrated with a
-            // backup); elsewhere the app-data dir.
-            let vault_path = resolve_vault_path(app, &data_dir);
-
-            // One build shipped the AutoFill device key under the SAME
-            // service+account as the app's own login-keychain key, and the
-            // app's unlock started resolving to it: four Touch ID prompts and
-            // a master-password fallback every time. Machines that ran that
-            // build heal themselves here.
-            #[cfg(target_os = "macos")]
-            let _ = vault_sharedkey::purge_legacy();
-
-            let store = VaultStore::new(vault_path, KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
-            // The sandboxed AutoFill extension can only read the App Group
-            // container, so every save is mirrored there. Set on the store
-            // rather than at the save sites: a cloud-sync merge saved without
-            // touching the mirror once, and AutoFill spent the afternoon
-            // filling the password from before the merge.
-            #[cfg(target_os = "macos")]
-            let store = match vault_appgroup::container_path(APP_GROUP) {
-                Some(container) => store.with_mirror(container.join("default.vault")),
-                None => store,
-            };
-            // Eagerly load the locked vault if a file already exists.
-            let vault = if store.exists() {
-                store.load().ok()
-            } else {
-                None
-            };
-
-            // Long-lived clipboard owner thread (keeps the secret pasteable on
-            // Linux and auto-clears it on all platforms).
-            let clipboard = ClipboardManager::spawn(app.handle().clone());
-
-            let mut app_state = AppState::new(store, vault, clipboard);
-            // Restore persisted (non-secret) settings, if any.
-            app_state.settings = state::load_settings(app_state.store.path());
-            app.manage(Mutex::new(app_state));
-            // Shared map of in-flight autofill-consent prompts (used only when
-            // the confirm-autofill setting is on).
-            app.manage(bridge::PendingConsents::default());
-            app.manage(bridge::PendingVerifications::default());
-            app.manage(bridge::PendingPasskeyChoices::default());
-            // Google Drive sync: background pull-merge-push loop. State lives in
-            // the engine (vault-sync), not in Tauri's managed map.
-            sync::start_loop(app.handle().clone());
-
-            // Local autofill bridge for the browser extension (loopback + token;
-            // gated on unlock + origin match). Best-effort: failure to bind just
-            // means autofill is unavailable this session.
-            if let Err(e) = bridge::start(app.handle().clone(), &data_dir) {
-                eprintln!("autofill bridge unavailable: {e}");
-            }
-
-            // ssh-agent: expose vault SSH keys to ssh/git (Unix socket).
-            agent::start(app.handle().clone());
-
-            let backup_service = {
-                let state = app.state::<Mutex<AppState>>();
-                let state = state.lock().map_err(|_| "Vault state unavailable")?;
-                backups::Backups::load(state.store.path())
-            };
-            app.manage(Mutex::new(backup_service));
-            backups::start(app.handle().clone());
-
-            // Background idle-timeout auto-lock.
-            let handle = app.handle().clone();
-            std::thread::spawn(move || idle_watcher(handle));
-            // USB key file: lock on removal, unlock on insertion.
-            {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || keyfile_unlock::watch(handle));
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || autofill_importer(handle));
-            }
-
-            // Tray icon (top bar on GNOME via AppIndicator, system tray
-            // elsewhere). Menu-only on purpose: a password manager's tray
-            // must never *reveal* anything, so the items are the three verbs
-            // that need no window — open, lock, quit. Lock from here behaves
-            // exactly like the idle/blur locks: same state change, same
-            // "vault-locked" event, so the webview swaps to the lock screen
-            // even if the window is up. Best-effort: on desktops with no
-            // StatusNotifier host the app simply has no tray, not no launch.
-            {
-                use tauri::menu::{Menu, MenuItem};
-                use tauri::tray::TrayIconBuilder;
-                let open_i = MenuItem::with_id(app, "open", "Open Arca", true, None::<&str>)?;
-                let lock_i = MenuItem::with_id(app, "lock", "Lock Vault", true, None::<&str>)?;
-                let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&open_i, &lock_i, &quit_i])?;
-                let tray = TrayIconBuilder::with_id("main")
-                    .menu(&menu)
-                    .tooltip("Arca")
-                    .on_menu_event(|app, event| match event.id.as_ref() {
-                        "open" => {
-                            if let Some(w) = app.get_webview_window("main") {
-                                let _ = w.show();
-                                let _ = w.unminimize();
-                                let _ = w.set_focus();
-                            }
-                        }
-                        "lock" => {
-                            let mut locked = false;
-                            if let Some(state) = app.try_state::<Mutex<AppState>>() {
-                                if let Ok(mut st) = state.lock() {
-                                    locked = st.lock().is_ok();
-                                }
-                            }
-                            if locked {
-                                let _ = app.emit("vault-locked", "tray");
-                            }
-                        }
-                        "quit" => app.exit(0),
-                        _ => {}
-                    });
-                let tray = match app.default_window_icon() {
-                    Some(icon) => tray.icon(icon.clone()),
-                    None => tray,
-                };
-                if let Err(e) = tray.build(app) {
-                    eprintln!("tray unavailable: {e}");
-                }
-            }
-
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            // Auto-lock when the window loses focus (if enabled).
-            if let WindowEvent::Focused(false) = event {
-                let app = window.app_handle();
-                if let Some(state) = app.try_state::<Mutex<AppState>>() {
-                    if let Ok(mut st) = state.lock() {
-                        // Don't lock when our own native dialog (e.g. the import
-                        // file picker) stole focus — the user hasn't left the app.
-                        let lock_on_blur = st.settings.lock_on_blur && !st.blur_lock_suppressed();
-                        let mut locked = false;
-                        if lock_on_blur && st.vault.as_ref().is_some_and(|v| v.is_unlocked()) {
-                            locked = st.lock().is_ok();
-                        }
-                        if locked {
-                            let _ = app.emit("vault-locked", "blur");
-                        }
-                    }
-                }
-            }
-        })
-        .invoke_handler(tauri::generate_handler![
-            conflicts::compare_sync_conflict,
-            conflicts::reveal_conflict_field,
-            conflicts::resolve_sync_conflict,
-            conflicts::keep_sync_conflict_copy,
-            commands::vault_status,
-            commands::app_info,
-            commands::password_history,
-            commands::copy_password_history,
-            commands::restore_password_history,
-            commands::verify_vault_backup,
-            backups::backup_status,
-            backups::configure_backups,
-            backups::run_backup_now,
-            commands::create_vault,
-            commands::unlock,
-            commands::quick_unlock,
-            commands::enable_quick_unlock,
-            commands::disable_quick_unlock,
-            keyfile_unlock::keyfile_candidates,
-            keyfile_unlock::keyfile_enroll,
-            keyfile_unlock::keyfile_revoke,
-            keyfile_unlock::keyfile_configure,
-            keyfile_unlock::keyfile_unlock,
-            commands::change_master_password,
-            commands::sync_connect,
-            commands::sync_disconnect,
-            commands::sync_status,
-            commands::sync_now,
-            commands::sync_bootstrap,
-            commands::merge_duplicates,
-            commands::list_snapshots,
-            commands::restore_snapshot,
-            commands::export_vault_backup,
-            commands::restore_vault_backup,
-            commands::resolve_autofill_consent,
-            commands::resolve_passkey_choice,
-            commands::verify_passkey_approval,
-            commands::cancel_passkey_verification,
-            commands::confirm_passkey_approval,
-            commands::lock,
-            commands::touch,
-            commands::list_items,
-            commands::search_items,
-            commands::get_item,
-            commands::reveal_field,
-            commands::copy_field,
-            commands::copy_to_clipboard,
-            commands::upsert_item,
-            commands::upsert_wifi,
-            commands::upsert_secure_note,
-            commands::upsert_bookmark,
-            commands::move_bookmarks,
-            commands::list_bookmark_sources,
-            commands::import_bookmarks,
-            commands::wifi_qr,
-            commands::generate_ssh_key,
-            commands::ssh_public_key,
-            commands::ssh_agent_info,
-            commands::delete_item,
-            commands::restore_item,
-            commands::purge_item,
-            commands::current_totp,
-            commands::security_report,
-            commands::check_breaches,
-            commands::import_logins,
-            commands::export_logins_csv,
-            commands::open_passwords_app,
-            commands::generate,
-            commands::get_settings,
-            commands::set_settings,
-            commands::set_blur_lock_suppressed,
-        ])
+        .setup(setup)
+        .on_window_event(lock_on_blur)
+        .invoke_handler(commands())
         .build(tauri::generate_context!())
         .expect("error while running the Arca application")
         .run(|app, event| {
@@ -360,6 +138,248 @@ fn main() {
                 }
             }
         });
+}
+
+/// Everything the app starts with: the vault store and state, the sync loop,
+/// the browser bridge, the ssh-agent, backups, the idle and USB-key watchers,
+/// and the tray.
+fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve a per-user data directory for the single vault file.
+    let data_dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&data_dir).ok();
+    // On macOS this is the shared App Group container (migrated with a
+    // backup); elsewhere the app-data dir.
+    let vault_path = resolve_vault_path(app, &data_dir);
+
+    // One build shipped the AutoFill device key under the SAME
+    // service+account as the app's own login-keychain key, and the
+    // app's unlock started resolving to it: four Touch ID prompts and
+    // a master-password fallback every time. Machines that ran that
+    // build heal themselves here.
+    #[cfg(target_os = "macos")]
+    let _ = vault_sharedkey::purge_legacy();
+
+    let store = VaultStore::new(vault_path, KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+    // The sandboxed AutoFill extension can only read the App Group
+    // container, so every save is mirrored there. Set on the store
+    // rather than at the save sites: a cloud-sync merge saved without
+    // touching the mirror once, and AutoFill spent the afternoon
+    // filling the password from before the merge.
+    #[cfg(target_os = "macos")]
+    let store = match vault_appgroup::container_path(APP_GROUP) {
+        Some(container) => store.with_mirror(container.join("default.vault")),
+        None => store,
+    };
+    // Eagerly load the locked vault if a file already exists.
+    let vault = if store.exists() {
+        store.load().ok()
+    } else {
+        None
+    };
+
+    // Long-lived clipboard owner thread (keeps the secret pasteable on
+    // Linux and auto-clears it on all platforms).
+    let clipboard = ClipboardManager::spawn(app.handle().clone());
+
+    let mut app_state = AppState::new(store, vault, clipboard);
+    // Restore persisted (non-secret) settings, if any.
+    app_state.settings = state::load_settings(app_state.store.path());
+    app.manage(Mutex::new(app_state));
+    // Shared map of in-flight autofill-consent prompts (used only when
+    // the confirm-autofill setting is on).
+    app.manage(bridge::PendingConsents::default());
+    app.manage(bridge::PendingVerifications::default());
+    app.manage(bridge::PendingPasskeyChoices::default());
+    // Google Drive sync: background pull-merge-push loop. State lives in
+    // the engine (vault-sync), not in Tauri's managed map.
+    sync::start_loop(app.handle().clone());
+
+    // Local autofill bridge for the browser extension (loopback + token;
+    // gated on unlock + origin match). Best-effort: failure to bind just
+    // means autofill is unavailable this session.
+    if let Err(e) = bridge::start(app.handle().clone(), &data_dir) {
+        eprintln!("autofill bridge unavailable: {e}");
+    }
+
+    // ssh-agent: expose vault SSH keys to ssh/git (Unix socket).
+    agent::start(app.handle().clone());
+
+    let backup_service = {
+        let state = app.state::<Mutex<AppState>>();
+        let state = state.lock().map_err(|_| "Vault state unavailable")?;
+        backups::Backups::load(state.store.path())
+    };
+    app.manage(Mutex::new(backup_service));
+    backups::start(app.handle().clone());
+
+    // Background idle-timeout auto-lock.
+    let handle = app.handle().clone();
+    std::thread::spawn(move || idle_watcher(handle));
+    // USB key file: lock on removal, unlock on insertion.
+    {
+        let handle = app.handle().clone();
+        std::thread::spawn(move || keyfile_unlock::watch(handle));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let handle = app.handle().clone();
+        std::thread::spawn(move || autofill_importer(handle));
+    }
+
+    // Tray icon (top bar on GNOME via AppIndicator, system tray
+    // elsewhere). Menu-only on purpose: a password manager's tray
+    // must never *reveal* anything, so the items are the three verbs
+    // that need no window — open, lock, quit. Lock from here behaves
+    // exactly like the idle/blur locks: same state change, same
+    // "vault-locked" event, so the webview swaps to the lock screen
+    // even if the window is up. Best-effort: on desktops with no
+    // StatusNotifier host the app simply has no tray, not no launch.
+    if let Err(e) = tray(app) {
+        eprintln!("tray unavailable: {e}");
+    }
+    Ok(())
+}
+
+fn tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::TrayIconBuilder;
+    let open_i = MenuItem::with_id(app, "open", "Open Arca", true, None::<&str>)?;
+    let lock_i = MenuItem::with_id(app, "lock", "Lock Vault", true, None::<&str>)?;
+    let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open_i, &lock_i, &quit_i])?;
+    let tray = TrayIconBuilder::with_id("main")
+        .menu(&menu)
+        .tooltip("Arca")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
+            "lock" => {
+                let mut locked = false;
+                if let Some(state) = app.try_state::<Mutex<AppState>>() {
+                    if let Ok(mut st) = state.lock() {
+                        locked = st.lock().is_ok();
+                    }
+                }
+                if locked {
+                    let _ = app.emit("vault-locked", "tray");
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        });
+    let tray = match app.default_window_icon() {
+        Some(icon) => tray.icon(icon.clone()),
+        None => tray,
+    };
+    tray.build(app)?;
+    Ok(())
+}
+
+/// Auto-lock when the window loses focus (if enabled).
+fn lock_on_blur(window: &tauri::Window, event: &WindowEvent) {
+    if let WindowEvent::Focused(false) = event {
+        let app = window.app_handle();
+        if let Some(state) = app.try_state::<Mutex<AppState>>() {
+            if let Ok(mut st) = state.lock() {
+                // Don't lock when our own native dialog (e.g. the import
+                // file picker) stole focus — the user hasn't left the app.
+                let lock_on_blur = st.settings.lock_on_blur && !st.blur_lock_suppressed();
+                let mut locked = false;
+                if lock_on_blur && st.vault.as_ref().is_some_and(|v| v.is_unlocked()) {
+                    locked = st.lock().is_ok();
+                }
+                if locked {
+                    let _ = app.emit("vault-locked", "blur");
+                }
+            }
+        }
+    }
+}
+
+/// Every command the webview may invoke.
+#[allow(clippy::too_many_lines)] // One line per command; nothing to split.
+fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        conflicts::compare_sync_conflict,
+        conflicts::reveal_conflict_field,
+        conflicts::resolve_sync_conflict,
+        conflicts::keep_sync_conflict_copy,
+        commands::vault_status,
+        commands::app_info,
+        commands::password_history,
+        commands::copy_password_history,
+        commands::restore_password_history,
+        commands::verify_vault_backup,
+        backups::backup_status,
+        backups::configure_backups,
+        backups::run_backup_now,
+        commands::create_vault,
+        commands::unlock,
+        commands::quick_unlock,
+        commands::enable_quick_unlock,
+        commands::disable_quick_unlock,
+        keyfile_unlock::keyfile_candidates,
+        keyfile_unlock::keyfile_enroll,
+        keyfile_unlock::keyfile_revoke,
+        keyfile_unlock::keyfile_configure,
+        keyfile_unlock::keyfile_unlock,
+        commands::change_master_password,
+        commands::sync_adopt_password,
+        commands::sync_connect,
+        commands::sync_disconnect,
+        commands::sync_status,
+        commands::sync_devices,
+        commands::sync_acknowledge_rollback,
+        commands::sync_now,
+        commands::sync_bootstrap,
+        commands::merge_duplicates,
+        commands::list_snapshots,
+        commands::restore_snapshot,
+        commands::export_vault_backup,
+        commands::restore_vault_backup,
+        commands::resolve_autofill_consent,
+        commands::resolve_passkey_choice,
+        commands::verify_passkey_approval,
+        commands::cancel_passkey_verification,
+        commands::confirm_passkey_approval,
+        commands::lock,
+        commands::touch,
+        commands::list_items,
+        commands::search_items,
+        commands::get_item,
+        commands::reveal_field,
+        commands::copy_field,
+        commands::copy_to_clipboard,
+        commands::upsert_item,
+        commands::upsert_wifi,
+        commands::upsert_secure_note,
+        commands::upsert_bookmark,
+        commands::move_bookmarks,
+        commands::list_bookmark_sources,
+        commands::import_bookmarks,
+        commands::wifi_qr,
+        commands::generate_ssh_key,
+        commands::ssh_public_key,
+        commands::ssh_agent_info,
+        commands::delete_item,
+        commands::restore_item,
+        commands::purge_item,
+        commands::current_totp,
+        commands::security_report,
+        commands::check_breaches,
+        commands::import_logins,
+        commands::export_logins_csv,
+        commands::open_passwords_app,
+        commands::generate,
+        commands::get_settings,
+        commands::set_settings,
+        commands::set_blur_lock_suppressed,
+    ]
 }
 
 /// Polls once per second; locks the vault after the configured idle timeout.

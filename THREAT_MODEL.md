@@ -46,8 +46,9 @@ disk at rest, the browser/extension context.
   laptop drive) but not the running process or master password.
 - **A2 — Remote network attacker or cloud file holder.** Optional Drive sync,
   update checks, breach-prefix lookups and related-origin checks cross the
-  network boundary. TLS protects transport; V5 container authentication protects
-  vault contents. Replay of an older authentic vault remains a residual risk.
+  network boundary. TLS protects transport; container authentication protects
+  vault contents. Showing an older authentic vault is detected once a device
+  has seen a newer one (T2b).
 - **A3 — Same-user malware.** Code running with the user's privileges.
 - **A4 — Privileged/physical attacker.** Root, kernel, or live-memory access.
 - **A5 — Malicious web page.** Relevant to extension autofill.
@@ -59,7 +60,9 @@ disk at rest, the browser/extension context.
 | # | Threat | Adversary | Status | Mitigation / note |
 |---|--------|-----------|--------|-------------------|
 | T1 | Offline brute force of the vault file | A1 | **Mitigated** | Argon2id (m=64 MiB, t=3, p=4) + 256-bit keys. Strength ultimately bounded by master-password entropy. |
-| T2 | Tampering with vault bytes | A1/A3 | **Mitigated** | V5 whole-container HMAC plus per-item/key-wrap XChaCha20-Poly1305; authentication precedes unlock/merge. Legacy containers have weaker integrity guarantees. |
+| T2 | Tampering with vault bytes | A1/A3 | **Mitigated** | Whole-container HMAC plus per-item/key-wrap XChaCha20-Poly1305; authentication precedes unlock/merge. The master wrap names the authenticated container and device keys only open authenticated files, so relabelling a file as a legacy format does not open it. Residual: a vault not yet unlocked with its master password on a V6 or later build still has an unbound wrap, and an entire older file can be shown to a device that never saw a newer one (T2b). |
+| T2a | A leaked old master password plus an old copy of the file | A1/A2 | **Mitigated** | A password change replaces the vault key, so the old password opens nothing written since. Devices with the new key merge nothing sealed with the old one, and take a change on only from a copy that carries their current key, so a "change" forged with the old password is refused (`DifferentVault`). Residual: a device that has not synced since the change still trusts the old key until it does. |
+| T2b | Sync storage showing an older copy and hiding newer ones | A2 | **Partial (detected, repaired)** | Every copy records, sealed, how many copies each device has pushed. A device that pulls the whole remote and finds it accounts for fewer of another device's uploads than it has already seen names that device in the sync status until the user has seen it, and its next push restores the lost changes. Residual: uploads withheld from the other devices from the start look like a device that has not synced, which each app's device list shows as an old "last synced"; a device does not report its own lost uploads, which look like a failed upload; uploads sealed with a key a password change replaced are not judged, since the change leaves them out on purpose. |
 | T3 | Format/variant confusion to mis-decode data | A1 | **Mitigated** | Name-tagged CBOR item payloads + versioned header; id bound as AEAD AAD. |
 | T4 | Wrong-password oracle / timing side channel | A1/A6 | **Mitigated** | Poly1305 verification is constant-time; errors are indistinct ("wrong password or tampered"). |
 | T5 | Secrets written to swap/hibernation | A1/A4 | **Partial** | Symmetric **key material** (master + vault keys) is held in `mlock`/`VirtualLock`-locked memory (`vault-secmem`) so it can't page to swap/hibernation; locking is best-effort (may be refused by `RLIMIT_MEMLOCK`). Residual: item **plaintext** (passwords, revealed values) still transits non-locked heap / the webview (see T8). |
@@ -68,7 +71,7 @@ disk at rest, the browser/extension context.
 | T8 | Secret exposure via the webview heap | A3/A4 | **Partial** | Secrets sent to the UI only on explicit reveal; copy stays in Rust. Revealed values and live TOTP codes transit the JS heap; CSP restricts the webview. |
 | T9 | Same-user malware reading memory/keychain/file | A3 | **Out of scope** | No local password manager defends against code running as the same user; documented, not claimed. |
 | T10 | Theft of the keychain device key (quick unlock) | A3/A4 | **OS-gated after migration on macOS** | Protected desktop enrollments use a SecAccessControl item in the data-protection keychain (current biometric set, or user presence on Macs without biometrics). Existing installations retain the legacy app-level gate until upgraded in Settings. Migration verifies the protected replacement before retiring the legacy copy. Host compromise and old copies remain residual risks; see docs/KEYCHAIN-HARDENING.md. |
-| T11 | Autofill into a phishing origin | A5 | **Mitigated (default consent)** | The autofill bridge enforces origin binding: a credential is released only when the page host matches the stored login's host, and only while unlocked. That host comes from `vault_core::host_of`, the single implementation shared by the bridge, the AutoFill FFI and the duplicate finder — it used to exist three times and the copies disagreed, so a stored URL carrying an `@` in its query or fragment (from CSV import, say) resolved to a host the user never visited. The bridge is loopback-only + token-authed. A per-fill in-app Allow/Deny prompt (`confirm_autofill` setting, **on by default**) makes the desktop app the final approver, defending even a compromised extension. Residual: a same-user process (A3/T9) could read the token file. |
+| T11 | Autofill into a phishing origin | A5 | **Mitigated (default consent)** | The autofill bridge enforces origin binding: a credential is released only when the page host matches the stored login's host, and only while unlocked. That host comes from `vault_core::host_of`, the single implementation shared by the bridge, the AutoFill FFI and the duplicate finder — it used to exist three times and the copies disagreed, so a stored URL carrying an `@` in its query or fragment (from CSV import, say) resolved to a host the user never visited. The bridge is loopback-only and authenticated both ways by a per-run token that never crosses the socket, so a process that binds the port after Arca exits is never sent a request. A per-fill in-app Allow/Deny prompt (`confirm_autofill` setting, **on by default**) makes the desktop app the final approver, defending even a compromised extension. Residual: a same-user process (A3/T9) could read the token file. |
 | T12 | Telemetry / data exfiltration | A2 | **Mitigated** | No analytics. Optional network features disclose connection metadata; Drive receives ciphertext, breach lookups disclose hash prefixes. |
 | T13 | Secrets leaked through logs/errors | A3 | **Mitigated** | Error types carry no secret material; nothing logs plaintext. |
 | T14 | Metadata/length leakage from the file | A1 | **Accepted** | Items encrypted individually; CBOR is self-describing (field names present inside the AEAD); sizes are not padded. See SECURITY.md. |
@@ -87,6 +90,8 @@ disk at rest, the browser/extension context.
 - vault-core crypto, model, TOTP, password gen, audit: unit-tested.
 - Cross-platform build + full test suite: CI on Linux, Windows, macOS.
 - Atomic persistence + AEAD tamper detection: tested.
+- Parsers of input Arca does not control — vault files, URLs, password rules,
+  otpauth URIs — are fuzzed (`fuzz/`) on every pull request.
 - Clipboard ownership (the X11 "serves after copy returns" path): executed in CI
   under Xvfb. The Wayland path is a required CI check under isolated headless
   `sway`; the final **interactive cross-application paste on a real Wayland

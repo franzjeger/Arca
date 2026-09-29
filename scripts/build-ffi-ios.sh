@@ -44,17 +44,17 @@ rustup target add "$DEVICE_TARGET" "$SIM_ARM_TARGET" "$SIM_X86_TARGET"
 echo "==> cargo build"
 cd "$ROOT"
 for target in "$DEVICE_TARGET" "$SIM_ARM_TARGET" "$SIM_X86_TARGET"; do
-    cargo build -p vault-ffi --release --target "$target"
+    cargo build -p vault-ffi --profile release-ffi --target "$target"
 done
 
 # Separate directories, not separate filenames: the linker gets one search path
 # per SDK and asks for -lvault_ffi in both.
 echo "==> staging into $OUT"
 mkdir -p "$OUT/device" "$OUT/simulator"
-cp -f "$CARGO_OUTPUT/$DEVICE_TARGET/release/libvault_ffi.a" "$OUT/device/libvault_ffi.a"
+cp -f "$CARGO_OUTPUT/$DEVICE_TARGET/release-ffi/libvault_ffi.a" "$OUT/device/libvault_ffi.a"
 lipo -create \
-    "$CARGO_OUTPUT/$SIM_ARM_TARGET/release/libvault_ffi.a" \
-    "$CARGO_OUTPUT/$SIM_X86_TARGET/release/libvault_ffi.a" \
+    "$CARGO_OUTPUT/$SIM_ARM_TARGET/release-ffi/libvault_ffi.a" \
+    "$CARGO_OUTPUT/$SIM_X86_TARGET/release-ffi/libvault_ffi.a" \
     -output "$OUT/simulator/libvault_ffi.a"
 
 echo "==> device:    $(lipo -archs "$OUT/device/libvault_ffi.a")"

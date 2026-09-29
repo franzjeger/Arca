@@ -29,6 +29,8 @@ pub mod breach;
 pub mod conflicts;
 pub mod crypto;
 pub mod dedupe;
+pub mod devices;
+pub mod edit;
 pub mod error;
 pub mod header;
 pub mod item;
@@ -42,6 +44,8 @@ pub mod totp;
 pub mod url;
 pub mod vault;
 
+pub use devices::Device;
+pub use edit::{Change, LoginEdit, NoteEdit, WifiEdit};
 pub use error::{Error, Result};
 pub use header::{KdfAlgorithm, KdfParams, VaultHeader};
 pub use item::{wifi_qr_payload, Item, ItemKind, ItemSummary, VaultItem};

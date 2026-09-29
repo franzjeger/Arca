@@ -30,11 +30,21 @@ by this project.
 
 ## Cryptography
 
-New unlocked saves use `SYBRVLT5`: a domain-separated HMAC-SHA256 under the
-vault key authenticates the complete container body, including purge records,
-password wrapping and the encrypted item list. Unlock and sync verify it before
-accepting that state. Legacy files remain readable but lack this protection;
-see [migration and concurrent sync](docs/SYNC.md#authenticated-files-and-concurrent-writes).
+New unlocked saves use `SYBRVLT7`: a domain-separated HMAC-SHA256 under a key
+derived from the vault key authenticates the complete container body, including
+purge records, password wrapping and the encrypted item list. Unlock and sync
+verify it before accepting that state. The master-password wrap names the
+authenticated container in its AAD, and device keys only open authenticated
+files, so a file relabelled as an older format does not open. Legacy files
+remain readable with the master password but lack this protection; see
+[migration and concurrent sync](docs/SYNC.md#authenticated-files-and-concurrent-writes).
+
+A master password change replaces the vault key, not only its wrap: an old
+password together with an old copy of the file opens nothing written since. The
+replaced keys stay in the header, sealed under the current one, so a device that
+missed the change opens its own copy with the new password; nothing sealed with
+a replaced key is merged. See
+[master password changes](docs/SYNC.md#master-password-changes).
 
 Composed entirely from [RustCrypto](https://github.com/RustCrypto) crates — no
 custom primitives are implemented.
@@ -44,6 +54,7 @@ custom primitives are implemented.
 | KDF                | **Argon2id** (`argon2`), default m=64 MiB, t=3, p=4       |
 | Master key         | 256-bit, derived from master password + 32-byte random salt |
 | Vault key          | random 256-bit, **wrapped** with the master key           |
+| Subkeys            | **HKDF-SHA256** of the vault key: one seals items, one tags the container, one seals the replaced keys |
 | Wrapping / items   | **XChaCha20-Poly1305** AEAD (`chacha20poly1305`)          |
 | Per-item encryption| each item sealed individually; its UUID bound as **AAD**  |
 | Randomness         | OS CSPRNG (`getrandom`)                                   |
@@ -55,13 +66,13 @@ custom primitives are implemented.
   substitute weaker parameters and still authenticate.
 - **Wrong password / tampering** are caught by AEAD authentication (Poly1305 tag
   verification is constant-time). The vault never "partially" unlocks.
-- **At-rest format** = `"SYBRVLT5"` magic + cleartext header (public KDF params +
-  wrapped keys) + a list of individually-sealed items. The header carries a
-  `format_version` so the layout can evolve. Each encrypted **item payload** is
-  serialized with **CBOR** (self-describing, variant-tagged by name), so the
-  `VaultItem` schema can gain or reorder variants without misreading existing
-  data — a positional codec such as bincode could not guarantee this. (The thin
-  outer container framing remains bincode.)
+- **At-rest format** = `"SYBRVLT7"` magic + cleartext header (public KDF
+  params + wrapped keys + key epoch) + a list of individually-sealed items. The
+  header carries a `format_version` so the layout can evolve. Each encrypted
+  **item payload** is serialized with **CBOR** (self-describing, variant-tagged
+  by name), so the `VaultItem` schema can gain or reorder variants without
+  misreading existing data — a positional codec such as bincode could not
+  guarantee this. (The thin outer container framing remains bincode.)
 
 ## Persistence & keychain
 

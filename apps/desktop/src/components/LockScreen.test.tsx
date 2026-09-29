@@ -3,7 +3,12 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { LockScreen } from "./LockScreen";
-import { api, type VaultStatus } from "../lib/api";
+import { api, type SyncStatus, type VaultStatus } from "../lib/api";
+
+const sync = vi.hoisted(() => ({ status: null as SyncStatus | null }));
+vi.mock("../hooks/useSyncStatus", () => ({
+  useSyncStatus: () => ({ status: sync.status, error: null }),
+}));
 
 vi.mock("../lib/api", async () => {
   const actual =
@@ -51,9 +56,15 @@ const apiError = (code: string, message: string) => ({ code, message });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sync.status = null;
 });
 
 describe("LockScreen", () => {
+  it("says when the master password was changed on another device", () => {
+    sync.status = { pending: true, syncing: false, connected: true, account: null, lastSyncUnix: null, lastError: null, needsPassword: true };
+    render(<LockScreen status={status({ quickUnlockAvailable: false })} onUnlocked={vi.fn()} />);
+    expect(screen.getByText(/changed on another device\. Enter the new one/)).toBeInTheDocument();
+  });
 
   describe("USB key", () => {
     it("lets a present key pre-empt the automatic Touch ID prompt", async () => {

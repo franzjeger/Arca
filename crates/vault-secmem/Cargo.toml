@@ -7,7 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 region.workspace = true
 zeroize.workspace = true
+
+[lints]
+workspace = true

@@ -16,6 +16,12 @@ struct VaultListView: View {
     @State private var editing: VaultItemMeta?
     @State private var creating: VaultCreateKind?
     @State private var generatingPassword = false
+    @State private var showingDevices = false
+    /// Asking for a master password changed on another device: once when sync
+    /// finds the change, then from the banner after "Not now".
+    @State private var askingNewPassword = false
+    @State private var newPassword = ""
+    @State private var newPasswordError: String?
 
     var body: some View {
         @Bindable var store = store
@@ -117,6 +123,9 @@ struct VaultListView: View {
                                 Task { await store.runSync() }
                             }
                             .disabled(store.syncing)
+                            Button("Synced devices", systemImage: "laptopcomputer.and.iphone") {
+                                showingDevices = true
+                            }
                             Button("Stop syncing", systemImage: "icloud.slash", role: .destructive) {
                                 Task { await store.disconnectSync() }
                             }
@@ -178,6 +187,21 @@ struct VaultListView: View {
             // No `onUse`: opened on its own there is no field to fill, so
             // Copy is the only thing that would make sense.
             .sheet(isPresented: $generatingPassword) { PasswordGeneratorView() }
+            .sheet(isPresented: $showingDevices) { SyncDevicesView() }
+            .onChange(of: store.needsNewPassword, initial: true) { _, needed in
+                askingNewPassword = needed
+            }
+            .alert("Master password changed", isPresented: $askingNewPassword) {
+                SecureField("New master password", text: $newPassword)
+                Button("Continue") { Task { await adoptNewPassword() } }
+                Button("Not now", role: .cancel) {
+                    newPassword = ""
+                    newPasswordError = nil
+                }
+            } message: {
+                Text(newPasswordError
+                    ?? "It was changed on another device. Enter the new one to keep this iPhone in sync.")
+            }
             // Only after an unlock has actually asked the store — `nil` means
             // we don't know yet, and guessing would nag people who are set up.
             .safeAreaInset(edge: .bottom) {
@@ -188,6 +212,27 @@ struct VaultListView: View {
                         Banner(text: "Syncing with Google Drive…", bad: false)
                     }
                     if let failure = store.failure { Banner(text: failure, bad: true) }
+                    if store.needsNewPassword, !askingNewPassword {
+                        Button { askingNewPassword = true } label: {
+                            Banner(text: "Master password changed on another device. Tap to enter it.", bad: true)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    // Nothing is lost by the time this shows: the cycle that
+                    // noticed put the changes back. It stays until dismissed,
+                    // because a second time is worth a look at who else can
+                    // get into the Google account.
+                    if !store.driveLostChanges.isEmpty {
+                        Button { Task { await store.acknowledgeLostChanges() } } label: {
+                            Banner(text: """
+                                Google Drive had lost the latest changes from \
+                                \(Self.listed(store.driveLostChanges)). Arca has put them \
+                                back. If this happens again, someone else may have access \
+                                to your Google account. Tap to dismiss.
+                                """, bad: true)
+                        }
+                        .buttonStyle(.plain)
+                    }
                     if store.autoFillEnabled == false { AutoFillHint() }
                     // The toggle also lives in the Options menu, but that menu
                     // is a "..." in the top-LEFT corner above a full-screen
@@ -199,6 +244,22 @@ struct VaultListView: View {
                 }
             }
         }
+    }
+
+    /// The alert closes on its own when a button is pressed, so a wrong
+    /// password reopens it with the reason.
+    private func adoptNewPassword() async {
+        let password = newPassword
+        newPassword = ""
+        newPasswordError = await store.adoptNewPassword(password)
+        if newPasswordError != nil { askingNewPassword = true }
+    }
+
+    /// "A", "A and B", "A, B and C".
+    private static func listed(_ names: [String]) -> String {
+        guard let last = names.last else { return "" }
+        guard names.count > 1 else { return last }
+        return names.dropLast().joined(separator: ", ") + " and " + last
     }
 
     private func row(_ item: VaultItemMeta) -> some View {
@@ -266,6 +327,54 @@ private struct QuickUnlockOffer: View {
         .padding(12)
         .frame(maxWidth: .infinity)
         .background(.thinMaterial)
+    }
+}
+
+/// Every device that syncs this vault and when it last did. Drive can hold a
+/// device's changes back without anything failing; this is where that shows,
+/// as a laptop that "synced 3 days ago" when it was used this morning.
+private struct SyncDevicesView: View {
+    @Environment(VaultStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var devices: [SyncedDevice]?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let devices, devices.isEmpty {
+                    ContentUnavailableView(
+                        "No devices yet", systemImage: "laptopcomputer.and.iphone",
+                        description: Text("A device shows here once it has synced this vault."))
+                } else if let devices {
+                    List(devices) { entry in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.isThisDevice ? "\(entry.device.name) (this device)" : entry.device.name)
+                            Text("Synced \(Self.when(entry.device.lastUpload))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                } else {
+                    ProgressView()
+                }
+            }
+            .navigationTitle("Synced devices")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task { devices = await store.syncDevices() }
+        }
+    }
+
+    /// "5 minutes ago", "yesterday". By the device's own clock, so only for
+    /// reading.
+    private static func when(_ unixMillis: Int64) -> String {
+        Date(timeIntervalSince1970: Double(unixMillis) / 1000)
+            .formatted(.relative(presentation: .named))
     }
 }
 

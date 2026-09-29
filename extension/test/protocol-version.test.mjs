@@ -13,21 +13,32 @@ const constant = (source, name) => {
   return Number(match[1]);
 };
 
+const bridgeCrate = read("crates/vault-bridge/src/lib.rs");
 const appBridge = read("apps/desktop/src-tauri/src/bridge.rs");
 const cli = read("apps/cli/src/main.rs");
 const nativeHost = read("extension/native-host/src/main.rs");
 const background = read("extension/chromium/background.js");
 
-assert.equal(
-  constant(appBridge, "PROTOCOL_VERSION"),
-  constant(nativeHost, "BRIDGE_PROTOCOL"),
-  "desktop app and native host bridge protocols drifted",
+// The bridge protocol has one definition, in vault-bridge, which the app
+// and both clients compile against; a local copy is what could drift.
+const bridgeProtocol = Number(
+  bridgeCrate.match(/pub const PROTOCOL: u32 = (\d+);/)?.[1],
 );
-assert.equal(
-  constant(appBridge, "PROTOCOL_VERSION"),
-  constant(cli, "BRIDGE_PROTOCOL"),
-  "desktop app and CLI bridge protocols drifted",
-);
+assert.ok(bridgeProtocol, "the bridge protocol is declared once");
+for (const [name, source, local] of [
+  ["app", appBridge, "PROTOCOL_VERSION"],
+  ["CLI", cli, "BRIDGE_PROTOCOL"],
+  ["native host", nativeHost, "BRIDGE_PROTOCOL"],
+]) {
+  assert.ok(
+    source.includes("vault_bridge::PROTOCOL"),
+    `${name} uses the shared bridge protocol`,
+  );
+  assert.ok(
+    !new RegExp(`const ${local}(?:: u32)? = \\d+;`).test(source),
+    `${name} declares its own bridge protocol number`,
+  );
+}
 assert.equal(
   constant(nativeHost, "PROTOCOL_VERSION"),
   constant(background, "NATIVE_PROTOCOL"),
@@ -51,5 +62,5 @@ assert.deepEqual(
 );
 
 console.log(
-  `protocol/version guard: bridge v${constant(appBridge, "PROTOCOL_VERSION")}, native v${constant(nativeHost, "PROTOCOL_VERSION")}, release ${cargoVersion}`,
+  `protocol/version guard: bridge v${bridgeProtocol}, native v${constant(nativeHost, "PROTOCOL_VERSION")}, release ${cargoVersion}`,
 );

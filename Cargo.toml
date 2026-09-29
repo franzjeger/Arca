@@ -10,10 +10,13 @@ members = [
     "crates/vault-credstore",
     "crates/vault-sharedkey",
     "crates/vault-sync",
+    "crates/vault-bridge",
     "apps/desktop/src-tauri",
     "apps/cli",
     "extension/native-host",
 ]
+# Its own workspace, built by cargo-fuzz on nightly.
+exclude = ["fuzz"]
 
 # Keep the heavy Tauri desktop build out of the default `cargo build`/`test` at
 # the workspace root; build it explicitly with `-p vault-desktop` (or via the
@@ -24,6 +27,7 @@ default-members = [
     "crates/vault-ffi",
     "crates/vault-secmem",
     "crates/vault-sync",
+    "crates/vault-bridge",
     "apps/cli",
     "extension/native-host",
 ]
@@ -35,6 +39,19 @@ rust-version = "1.80"
 license = "MIT OR Apache-2.0"
 authors = ["SYBR AS <support@sybr.no>"]
 repository = "https://github.com/franzjeger/Arca"
+# Arca's parts, not libraries for others: nothing here goes to crates.io.
+publish = false
+
+[workspace.lints.rust]
+# Safe by default. The crates that wrap an OS or C interface opt out in their
+# own manifests, where it shows.
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# A function longer than a screen hides its structure. This is what keeps the
+# next thousand-line match out; a test that reads as one scenario is exempted
+# where it is written.
+too_many_lines = "warn"
 
 [workspace.dependencies]
 # --- internal ---
@@ -43,6 +60,7 @@ vault-store = { path = "crates/vault-store" }
 vault-secmem = { path = "crates/vault-secmem" }
 vault-appgroup = { path = "crates/vault-appgroup" }
 vault-sync = { path = "crates/vault-sync" }
+vault-bridge = { path = "crates/vault-bridge" }
 
 # --- crypto (audited RustCrypto crates only; no custom primitives) ---
 argon2 = "0.5"
@@ -50,6 +68,8 @@ chacha20poly1305 = "0.10"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 subtle = "2.6"
 hmac = "0.12"
+# Keys derived from the vault key, one per job (V7).
+hkdf = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
 getrandom = "0.2"
@@ -91,8 +111,17 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 
-# Release profile: keep symbols light, no debug info leaking secrets via panics.
+# Release: stripped and LTO'd. A panicking desktop process stops instead of
+# carrying on in a state nobody tested.
 [profile.release]
 panic = "abort"
 strip = true
 lto = true
+
+# The Apple apps' static library. vault-ffi turns a panic into an error code
+# with `catch_unwind`, which only works when panics unwind; under `abort` a
+# panic kills the app or AutoFill extension instead. vault-ffi refuses to
+# compile any other way, so build it with `--profile release-ffi`.
+[profile.release-ffi]
+inherits = "release"
+panic = "unwind"

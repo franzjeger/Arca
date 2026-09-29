@@ -1,0 +1,41 @@
+# What may enter the build, checked in CI by `cargo deny check`.
+#
+# Advisories are left to the audit job's cargo-audit; this file is about the
+# rest of the supply chain: which licenses Arca can ship under MIT OR
+# Apache-2.0, and where code may come from. A password manager that pulls a
+# crate from an arbitrary git repository has handed that repository its users'
+# vaults, so only crates.io is allowed.
+
+[graph]
+all-features = false
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Tauri alone brings several versions of some crates; duplicates are reported,
+# not refused.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -15,6 +15,10 @@ const DIGITS: &[u8] = b"0123456789";
 // Avoids ambiguous/quoting-hostile characters while staying strong.
 const SYMBOLS: &[u8] = b"!@#$%^&*()-_=+[]{};:,.?";
 
+/// Longest password generated. Lengths reach us from websites' password rules
+/// and over IPC, and one allocation per requested character is ours to bound.
+pub const MAX_LENGTH: usize = 128;
+
 /// Which character classes to include and how long the password should be.
 #[derive(Clone, Copy, Debug)]
 pub struct PasswordOptions {
@@ -59,8 +63,8 @@ impl PasswordOptions {
 /// Generate a password per `opts`. The result is held in a zeroizing buffer so
 /// it is wiped when dropped; copy it out only when handing to the caller.
 pub fn generate_password(opts: &PasswordOptions) -> Result<Zeroizing<String>> {
-    if opts.length == 0 {
-        return Err(Error::InvalidArgument("password length must be > 0"));
+    if opts.length == 0 || opts.length > MAX_LENGTH {
+        return Err(Error::InvalidArgument("password length must be 1..=128"));
     }
     let classes = opts.classes();
     if classes.is_empty() {
@@ -147,10 +151,14 @@ pub fn options_from_rules(rules: &str, default_length: usize) -> PasswordOptions
     // Required characters are allowed by definition, whatever `allowed` says.
     let mut permitted = allowed.unwrap_or(Classes::all());
     permitted.merge(required);
+    // `required: special` still wins over an explicit set: the site insists,
+    // so the risk of an unaccepted character is one it has taken on itself.
+    permitted.special &= !explicit_set_seen || required.special;
 
-    // An `allowed:` clause naming only things we do not recognise leaves an
-    // empty alphabet, and generation would fail outright — on real input, since
-    // websites write this string by hand. Fall back to alphanumeric: accepted
+    // Nothing left that we know the site accepts: an `allowed:` naming only
+    // things we do not recognise, or only an explicit set of symbols. Websites
+    // write this string by hand, so this is real input, and failing it would
+    // leave the user with nothing. Fall back to alphanumeric: accepted
     // everywhere, and still far more entropy at this length than any site needs.
     if permitted == Classes::default() {
         permitted = Classes {
@@ -171,15 +179,15 @@ pub fn options_from_rules(rules: &str, default_length: usize) -> PasswordOptions
         // the account, and no way to tell why.
         length = length.min(max.max(1));
     }
+    // A site can write any number here; no real form needs more.
+    let length = length.clamp(1, MAX_LENGTH);
 
     PasswordOptions {
         length,
         lowercase: permitted.lower,
         uppercase: permitted.upper,
         digits: permitted.digit,
-        // `required: special` still wins: the site insists, so the risk of an
-        // unaccepted character is one it has taken on itself.
-        symbols: permitted.special && (!explicit_set_seen || required.special),
+        symbols: permitted.special,
     }
 }
 
@@ -357,6 +365,22 @@ mod tests {
     }
 
     #[test]
+    fn refuses_lengths_it_should_not_allocate() {
+        for length in [MAX_LENGTH + 1, 4_000_000_000, usize::MAX] {
+            let opts = PasswordOptions {
+                length,
+                ..Default::default()
+            };
+            assert!(generate_password(&opts).is_err());
+        }
+        let longest = PasswordOptions {
+            length: MAX_LENGTH,
+            ..Default::default()
+        };
+        assert_eq!(generate_password(&longest).unwrap().len(), MAX_LENGTH);
+    }
+
+    #[test]
     fn random_below_stays_in_range() {
         for n in 1..50usize {
             for _ in 0..20 {
@@ -398,6 +422,17 @@ mod rules_tests {
         // Contradictory: max wins, so we never exceed what the site accepts.
         assert_eq!(opts("minlength: 40; maxlength: 10;").length, 10);
         assert_eq!(generated("maxlength: 12;").len(), 12);
+    }
+
+    #[test]
+    fn a_hostile_minlength_is_capped_not_obeyed() {
+        // `usize::MAX` used to overflow `Vec::with_capacity`, and a panic
+        // aborts the AutoFill extension that asked.
+        for rules in ["minlength: 18446744073709551615;", "minlength: 4000000000;"] {
+            assert_eq!(opts(rules).length, MAX_LENGTH);
+            assert_eq!(generated(rules).len(), MAX_LENGTH);
+        }
+        assert_eq!(options_from_rules("", usize::MAX).length, MAX_LENGTH);
     }
 
     #[test]
@@ -464,6 +499,9 @@ mod rules_tests {
             "nonsense",
             "minlength: banana;",
             "allowed: fuchsia;",
+            // An explicit set of symbols alone: symbols are off for explicit
+            // sets, which used to leave no characters at all.
+            "allowed: [-];",
         ] {
             let o = options_from_rules(junk, 20);
             assert!(o.length > 0, "{junk:?} produced a zero length");

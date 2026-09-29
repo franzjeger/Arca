@@ -2,6 +2,73 @@
 
 ## Unreleased
 
+- Sync: whoever controls the Google account could show an older copy of the
+  vault and hide the newer ones, and every device would quietly carry on from
+  it. Every copy now records, sealed, how many copies each device has pushed.
+  A device that has seen newer changes than Drive still accounts for says
+  whose they were (desktop status bar, iPhone banner) and puts them back.
+  Settings on the desktop and Options → Synced devices on iOS list every
+  device that syncs the vault and when each last did. iOS needs C ABI v20.
+- Security: changing the master password now replaces the vault key. It used
+  to rewrap the same key, so an old password plus an old copy of the file
+  opened everything written afterwards, forever. Other devices ask for the new
+  password once on their next sync (a locked desktop or iPhone opens with it
+  directly), and never merge anything sealed with the old key; a "change"
+  forged with an old password is refused. Touch ID, Windows Hello and a
+  plugged-in USB key come back by themselves (one Touch ID prompt on macOS).
+  Vault files are now `SYBRVLT7`, with items and the container tag under keys
+  derived from the vault key (HKDF); V6 files open and are rewritten as V7.
+  Update every device before syncing: earlier builds refuse V7, and iOS needs
+  C ABI v19.
+- Security: vault files are now `SYBRVLT6`. Relabelling a V5 file as the
+  unauthenticated V4 format took two bytes and no key, and the result unlocked
+  and was re-signed on the next save — so whoever could write the file could
+  drop items, bring back purged ones or restore an old password's header.
+  The master-password wrap now names the authenticated container, and quick
+  unlock or a USB key only opens authenticated files. A vault upgrades the
+  next time it is unlocked with the master password. Earlier builds refuse V6
+  files as newer: update every device before syncing.
+- AutoFill generates a password for a field whose rules allow only an
+  explicit set of symbols, such as `allowed: [-]`. It used to end up with no
+  characters to choose from and offer nothing.
+- Security: a website's password rules can no longer crash the AutoFill
+  extension. A `minlength` of 2^64-1 overflowed the generator's allocation,
+  and release builds abort on panic. Rule lengths are capped at 128 and the
+  generator refuses anything longer.
+- The Apple apps' Rust library is built with its own `release-ffi` profile
+  that unwinds on panic. Under the release profile's `abort`, every
+  `catch_unwind` guard in vault-ffi was dead code and a panic killed the app
+  or AutoFill extension; vault-ffi now refuses to compile that way.
+- iOS: editing a login or Wi-Fi network no longer erases its notes. The
+  phone's editors never show notes, so every save sent none and the FFI
+  stored that as empty; sync then carried the loss to every device. An edit
+  that leaves notes out now keeps them (C ABI v17, as v11 did for TOTP codes).
+- Security: the browser bridge's handshake no longer sends its token. The
+  native host and `arca` put the token in their first message and then
+  checked the app's proof, which anyone holding the port could compute from
+  that very message — so a process that bound the port after Arca exited
+  was sent the next submitted password. Protocol 3 proves both sides over
+  two nonces without the token crossing, from one shared crate
+  (`vault-bridge`) instead of three copies. Checking whether the app
+  runs is now the handshake alone; it used to be a `match`, which unlocked
+  the vault whenever a USB key was inserted.
+- Settings described "Confirm before autofill" as off by default. It is on,
+  deliberately (THREAT_MODEL T11), and now says so.
+- Security (browser extension): which page is asking now comes from the
+  browser, not from the message. A content script, which a compromised
+  renderer controls, could name any site in a login lookup, fill, passkey
+  request or save; each is now answered only for the top-level page that sent
+  it, and the popup's bookmark commands only for the popup. The save prompt,
+  which names the stored account, moved out of page DOM into a closed shadow
+  root. Only the user's own submit, Enter or click captures a login, and only
+  a real click dismisses the prompt. After a navigation, the landing page no
+  longer receives the submitted password: the worker keeps it and sends it
+  when that page saves.
+- iOS: "Import a different vault" on the lock screen replaced the phone's
+  vault with any non-empty file, without asking. It now refuses a file that is
+  not a vault this version can open, asks before replacing a vault, keeps the
+  replaced file beside the new one, and writes under the vault lock like every
+  other writer.
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native

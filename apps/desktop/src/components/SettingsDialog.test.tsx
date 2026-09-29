@@ -18,7 +18,7 @@ vi.mock("../lib/api", async () => {
   };
 });
 const original: Settings = { autoLockSecs: 300, lockOnBlur: false, clipboardClearSecs: 30,
-  confirmAutofill: false, savePrompt: true, handlePasskeys: true, passkeyReprompt: false };
+  confirmAutofill: true, savePrompt: true, handlePasskeys: true, passkeyReprompt: false };
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(api.getSettings).mockResolvedValue(original); });
 function show() { render(<SettingsDialog status={{ hasQuickUnlock: false } as VaultStatus}
   onClose={vi.fn()} onStatusChanged={vi.fn()} onToast={vi.fn()} />); }

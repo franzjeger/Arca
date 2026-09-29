@@ -594,19 +594,13 @@ fn decide(
     }
 }
 
+/// The same lock as every other: it also clears a password Arca copied.
 fn lock_vault(state: &Mutex<AppState>) -> bool {
-    let Ok(mut st) = state.lock() else {
-        return false;
-    };
-    let locked = st
-        .vault
-        .as_mut()
-        .filter(|v| v.is_unlocked())
-        .is_some_and(|v| v.lock().is_ok());
-    if locked {
-        st.unlock_generation = st.unlock_generation.wrapping_add(1);
-    }
-    locked
+    state
+        .lock()
+        .ok()
+        .and_then(|mut st| st.lock().ok())
+        .unwrap_or(false)
 }
 
 /// Polls for the key file once a second. Locks on removal, unlocks on
@@ -637,10 +631,7 @@ pub fn watch(app: AppHandle) {
                 }
             }
             Action::Unlock => match try_unlock(&state) {
-                Ok(true) => {
-                    let _ = app.emit("vault-unlocked", ());
-                    crate::commands::publish_identities(&app);
-                }
+                Ok(true) => crate::session::unlocked(&app),
                 Ok(false) => {}
                 Err(_) if retries < INSERT_RETRIES => {
                     // Not present yet as far as the policy is concerned, so the
@@ -743,8 +734,7 @@ pub async fn keyfile_unlock(app: AppHandle) -> Result<(), CmdError> {
     .await
     .map_err(|_| failure("The unlock task failed."))??;
     if opened {
-        crate::commands::publish_identities(&app);
-        crate::commands::kick_sync(&app);
+        crate::session::unlocked(&app);
     }
     Ok(())
 }
@@ -1179,11 +1169,39 @@ mod tests {
     }
 
     fn unlocked_state(dir: &Path) -> Mutex<AppState> {
+        unlocked_state_with_clipboard(dir).0
+    }
+
+    fn unlocked_state_with_clipboard(
+        dir: &Path,
+    ) -> (Mutex<AppState>, crate::clipboard::ClipboardProbe) {
         let store = VaultStore::new(dir.join("vault"), "test", "keyfile");
-        let (clipboard, _) = crate::clipboard::ClipboardManager::memory();
+        let (clipboard, probe) = crate::clipboard::ClipboardManager::memory();
         let vault = Vault::create("correct-password", fast_params()).unwrap();
         store.save(&vault).unwrap();
-        Mutex::new(AppState::new(store, Some(vault), clipboard))
+        (
+            Mutex::new(AppState::new(store, Some(vault), clipboard)),
+            probe,
+        )
+    }
+
+    /// Pulling the stick is a lock like any other, so it must also take back
+    /// a password Arca copied. It went around `AppState::lock` and did not.
+    #[test]
+    fn removing_the_key_clears_a_copied_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, probe) = unlocked_state_with_clipboard(dir.path());
+        {
+            let st = state.lock().unwrap();
+            st.clipboard.copy("copied-secret".into(), 60);
+            st.clipboard.sync();
+        }
+        assert_eq!(probe.current().as_deref(), Some("copied-secret"));
+
+        assert!(lock_vault(&state));
+        state.lock().unwrap().clipboard.sync();
+        assert!(!is_unlocked(&state));
+        assert_eq!(probe.current().as_deref(), Some(""));
     }
 
     fn lock(state: &Mutex<AppState>) {

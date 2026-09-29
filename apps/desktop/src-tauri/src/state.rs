@@ -30,8 +30,8 @@ pub struct Settings {
     /// disables auto-clear.
     pub clipboard_clear_secs: u64,
     /// Require an explicit in-app Allow/Deny prompt before releasing a
-    /// credential to the browser extension. Off by default (origin binding +
-    /// unlock already gate autofill); on makes the app the final approver.
+    /// credential to the browser extension. On by default (THREAT_MODEL T11):
+    /// the app is the final approver even if the extension is compromised.
     pub confirm_autofill: bool,
     /// Offer to save a new (or changed) login when you submit a form the vault
     /// doesn't already know. On by default.
@@ -216,10 +216,26 @@ impl From<vault_core::Error> for CmdError {
                 "Incorrect password, or the vault data is corrupt.",
             ),
             E::NotFound => CmdError::new("not_found", "Item not found."),
+            E::WrongKind => CmdError::new(
+                "item_kind_mismatch",
+                "This editor cannot change the item's type.",
+            ),
             E::Format => CmdError::new("format", "Unrecognized or unsupported vault format."),
             E::UnsupportedVersion => CmdError::new(
                 "unsupported_version",
                 "This vault was written by a newer version of Arca. Update the app.",
+            ),
+            E::KeyRotated => CmdError::new(
+                "password_changed",
+                "The master password was changed on another device. Enter the new one.",
+            ),
+            E::StaleKey => CmdError::new(
+                "stale_copy",
+                "That copy of the vault is from before a master password change.",
+            ),
+            E::DifferentVault => CmdError::new(
+                "different_vault",
+                "That password opens a different vault, not a newer copy of this one.",
             ),
             E::InvalidTotpSecret => CmdError::new(
                 "invalid_totp",

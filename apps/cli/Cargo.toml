@@ -13,6 +13,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "arca"
@@ -21,7 +22,7 @@ path = "src/main.rs"
 [dependencies]
 serde_json.workspace = true
 dirs = "5"
-hmac.workspace = true
-sha2.workspace = true
-subtle.workspace = true
-getrandom.workspace = true
+vault-bridge.workspace = true
+
+[lints]
+workspace = true
