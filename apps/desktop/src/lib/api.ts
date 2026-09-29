@@ -353,13 +353,27 @@ export interface UpdateInfo {
   notes: string;
 }
 
+/** What the updater says when every update address answered with an HTTP
+ * error: for Arca's, that no release has been published there. */
+const NO_RELEASE = "Could not fetch a valid release JSON from the remote";
+
 /**
  * Ask the update endpoint whether a newer signed build exists. Returns null
  * when up to date. Errors propagate so offline never looks like up to date.
  */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
   const { check } = await import("@tauri-apps/plugin-updater");
-  const update = await check();
+  let update;
+  try {
+    update = await check();
+  } catch (e) {
+    const message = errorMessage(e);
+    throw new Error(
+      message.includes(NO_RELEASE)
+        ? "No release has been published at the update address."
+        : message,
+    );
+  }
   if (!update) return null;
   return { version: update.version, notes: update.body ?? "" };
 }

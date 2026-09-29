@@ -46,11 +46,11 @@ it("prevents overlapping writes and applies changes only after persistence", asy
   expect(toggle).toHaveAttribute("aria-checked", "true");
 });
 
-it("does not announce up to date after an update check fails", async () => {
+it("says in the Updates row why an update check failed, not that it is up to date", async () => {
   vi.mocked(checkForUpdate).mockRejectedValue(new Error("Offline"));
   show();
   await userEvent.click(await screen.findByRole("button", { name: "Check…" }));
-  await waitFor(() => expect(checkForUpdate).toHaveBeenCalledOnce());
+  expect(await screen.findByText("Could not check for updates: Offline")).toBeInTheDocument();
   expect(screen.queryByText("Arca is up to date.")).not.toBeInTheDocument();
 });
 

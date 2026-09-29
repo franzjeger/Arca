@@ -60,6 +60,7 @@ export function SettingsDialog({
   // null = not checked yet / up to date; set once an update is actually offered.
   const [update, setUpdate] = useState<{ version: string } | null>(null);
   const [updateChecked, setUpdateChecked] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -617,9 +618,11 @@ export function SettingsDialog({
               hint={
                 update
                   ? `Version ${update.version} is available. Installing restarts Arca, so the vault locks and any unsaved edit is lost.`
-                  : updateChecked
-                    ? "Arca is up to date."
-                    : "Check whether a newer signed build is available. Nothing installs without your say-so."
+                  : updateError
+                    ? `Could not check for updates: ${updateError}`
+                    : updateChecked
+                      ? "Arca is up to date."
+                      : "Check whether a newer signed build is available. Nothing installs without your say-so."
               }
             >
               <button
@@ -635,13 +638,17 @@ export function SettingsDialog({
                     return; // on success the app relaunches
                   }
                   setUpdateChecked(false);
+                  setUpdateError(null);
                   checkForUpdate()
                     .then((u) => {
                       setUpdate(u);
                       setUpdateChecked(true);
                       if (!u) onToast("Arca is up to date");
                     })
-                    .catch((e) => onToast(toastError(errorMessage(e))))
+                    .catch((e) => {
+                      setUpdateError(errorMessage(e));
+                      onToast(toastError(errorMessage(e)));
+                    })
                     .finally(() => setBusy(false));
                 }}
                 className="rounded-lg border border-hairline px-3 py-1.5 text-[13px] text-neutral-200 hover:bg-fill/5 disabled:opacity-50"
