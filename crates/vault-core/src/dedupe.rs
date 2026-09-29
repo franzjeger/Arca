@@ -11,14 +11,17 @@
 //!   most recently modified overall).
 //! * Password/TOTP: the winner's; if the winner lacks a TOTP but a duplicate
 //!   has one, it is adopted (never dropped).
+//! * Other passwords: every different password the duplicates held, and their
+//!   own history, go into the winner's password history.
 //! * Notes: distinct non-empty notes from losers are appended to the winner.
 //! * `created_at`: the earliest across the group (true age of the account).
 //! * Losers are **soft-deleted** (moved to Trash), so nothing is destroyed and
 //!   the merge propagates to synced peers as ordinary tombstones.
 
-use crate::item::{Item, VaultItem};
+use crate::item::{Item, PasswordRevision, VaultItem, MAX_PASSWORD_HISTORY};
 use crate::url::host_of;
 use std::collections::HashMap;
+use zeroize::Zeroizing;
 
 /// What two logins must share to be one account, or `None` when a login has
 /// too little to tell. With a site that is the host and the username. Without
@@ -80,12 +83,21 @@ pub fn merge_duplicate_logins(items: &mut [Item], now_unix_millis: i64) -> usize
         // Collect what the losers contribute, then apply to the winner.
         let mut adopt_totp: Option<String> = None;
         let mut extra_notes: Vec<String> = Vec::new();
+        let mut earlier_passwords: Vec<PasswordRevision> = Vec::new();
         let mut earliest_created = items[winner_idx].created_at;
         for &i in &idxs {
             if i == winner_idx {
                 continue;
             }
             earliest_created = earliest_created.min(items[i].created_at);
+            if let Some(password) = items[i].password().filter(|p| !p.is_empty()) {
+                earlier_passwords.push(PasswordRevision {
+                    id: items[i].revision,
+                    replaced_at: items[i].modified_at,
+                    password: password.to_owned(),
+                });
+            }
+            earlier_passwords.extend(items[i].password_history.iter().cloned());
             if let VaultItem::Login {
                 totp_secret, notes, ..
             } = &items[i].data
@@ -108,6 +120,7 @@ pub fn merge_duplicate_logins(items: &mut [Item], now_unix_millis: i64) -> usize
         }
 
         let winner = &mut items[winner_idx];
+        keep_passwords(winner, earlier_passwords);
         winner.created_at = earliest_created;
         winner.modified_at = now_unix_millis;
         if let VaultItem::Login {
@@ -130,6 +143,29 @@ pub fn merge_duplicate_logins(items: &mut [Item], now_unix_millis: i64) -> usize
         }
     }
     merged
+}
+
+/// Put the passwords the merged-away logins held into the survivor's history.
+/// A duplicate's older password can be the one that still works somewhere,
+/// and in the Trash it is only found by someone who knows to look, and gone
+/// once the Trash is emptied.
+fn keep_passwords(winner: &mut Item, earlier: Vec<PasswordRevision>) {
+    let current = Zeroizing::new(winner.password().unwrap_or_default().to_owned());
+    for entry in earlier {
+        let known = entry.password.is_empty()
+            || entry.password == *current
+            || winner
+                .password_history
+                .iter()
+                .any(|kept| kept.id == entry.id || kept.password == entry.password);
+        if !known {
+            winner.password_history.push(entry);
+        }
+    }
+    winner
+        .password_history
+        .sort_by_key(|entry| std::cmp::Reverse(entry.replaced_at));
+    winner.password_history.truncate(MAX_PASSWORD_HISTORY);
 }
 
 #[cfg(test)]
@@ -258,6 +294,42 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn the_other_passwords_stay_in_the_history_of_the_one_kept() {
+        let mut older = login("frank", "https://x.com", "old-pw", 10);
+        older.password_history.push(PasswordRevision {
+            id: uuid::Uuid::new_v4(),
+            replaced_at: 5,
+            password: "oldest-pw".into(),
+        });
+        let same_as_kept = login("frank", "https://x.com", "new-pw", 15);
+        let newer = login("frank", "https://x.com", "new-pw", 20);
+        let mut items = vec![older, same_as_kept, newer];
+        let mut on_other_device = items.clone();
+        assert_eq!(merge_duplicate_logins(&mut items, 100), 2);
+
+        let survivor = items.iter().find(|i| !i.is_deleted()).unwrap();
+        assert_eq!(survivor.password(), Some("new-pw"));
+        // Newest first; the copy of the current password adds nothing.
+        let history: Vec<(&str, i64)> = survivor
+            .password_history
+            .iter()
+            .map(|h| (h.password.as_str(), h.replaced_at))
+            .collect();
+        assert_eq!(history, [("old-pw", 10), ("oldest-pw", 5)]);
+
+        // The same merge on another device keeps the same entries, so the
+        // two histories agree when they sync.
+        merge_duplicate_logins(&mut on_other_device, 300);
+        let there = on_other_device.iter().find(|i| !i.is_deleted()).unwrap();
+        assert_eq!(there.password_history, survivor.password_history);
+
+        // Handing the same passwords over again adds nothing.
+        let mut kept = survivor.clone();
+        keep_passwords(&mut kept, survivor.password_history.clone());
+        assert_eq!(kept.password_history, survivor.password_history);
     }
 
     #[test]
