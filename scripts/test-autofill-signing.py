@@ -82,6 +82,33 @@ class SelectionTests(unittest.TestCase):
                                     [hashlib.sha1(b'current').hexdigest()],
                                     ['app', 'extension'], 'TEAM', 'this-mac')
 
+    def developer_id(self, bundle, certificate=b'current'):
+        profile = self.profile(bundle, certificate)
+        del profile['ProvisionedDevices']
+        profile['ProvisionsAllDevices'] = True
+        return profile
+
+    def test_a_release_takes_only_profiles_for_every_mac(self):
+        # A release runs on Macs it has never seen: a profile that names this
+        # one is a development profile, and signing a release with it would
+        # make an app that opens here and nowhere else.
+        current = hashlib.sha1(b'current').hexdigest()
+        self.assertTrue(signing.eligible(self.developer_id('app'), 'app', 'TEAM', current, None, True))
+        self.assertFalse(signing.eligible(self.profile('app'), 'app', 'TEAM', current, None, True))
+        # And the everyday install does not take a release profile by accident.
+        self.assertFalse(signing.eligible(self.developer_id('app'), 'app', 'TEAM', current, 'this-mac'))
+
+    def test_a_release_plan_needs_developer_id_profiles_for_both_bundles(self):
+        current = hashlib.sha1(b'current').hexdigest()
+        profiles = [('app', self.developer_id('app')), ('extension', self.developer_id('extension')),
+                    ('development app', self.profile('app', days=10))]
+        plan = signing.select_profiles(profiles, [current], ['app', 'extension'], 'TEAM', None, True)
+        self.assertEqual(plan['profiles'], {'app': 'app', 'extension': 'extension'})
+        self.assertTrue(plan['distribution'])
+        with self.assertRaisesRegex(ValueError, 'setup-macos-signing'):
+            signing.select_profiles([('development app', self.profile('app'))], [current],
+                                    ['app'], 'TEAM', None, True)
+
     def test_provisioning_udid_takes_precedence_over_hardware_uuid(self):
         from unittest.mock import patch
         with patch.object(signing.subprocess, 'check_output', return_value=

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Select local development profiles and prepare/verify both signed bundles."""
+"""Select signing profiles and prepare/verify both signed bundles.
+
+Development signing (the everyday install) uses an Apple Development identity
+and profiles that name this Mac. Distribution (--distribution, the published
+release) uses a Developer ID Application identity and Developer ID profiles,
+which name no Mac: they provision every one.
+"""
 import argparse
 import datetime
 import fnmatch
@@ -17,7 +23,7 @@ EXTENSION_ID = 'no.sybr.vault.autofill-host.autofill'
 CAPABILITY = 'com.apple.developer.authentication-services.autofill-credential-provider'
 
 
-def eligible(profile, bundle_id, team, certificate=None, device=None):
+def eligible(profile, bundle_id, team, certificate=None, device=None, distribution=False):
     ent = profile.get('Entitlements', {})
     return (
         profile.get('ExpirationDate', datetime.datetime.min) > datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -29,7 +35,8 @@ def eligible(profile, bundle_id, team, certificate=None, device=None):
                 for group in ent.get('keychain-access-groups', []))
         and (certificate is None or certificate.upper() in {
             hashlib.sha1(cert).hexdigest().upper() for cert in profile.get('DeveloperCertificates', [])})
-        and (device is None or device in profile.get('ProvisionedDevices', []))
+        and (profile.get('ProvisionsAllDevices') is True if distribution
+             else device is None or device in profile.get('ProvisionedDevices', []))
     )
 
 
@@ -45,25 +52,30 @@ def local_device():
     return record.get('provisioning_UDID') or record['platform_UUID']
 
 
-def select_profiles(profiles, identities, bundle_ids, team, device):
+def select_profiles(profiles, identities, bundle_ids, team, device, distribution=False):
     for identity in identities:
         selected = {}
         for bundle_id in bundle_ids:
             matches = [(profile['ExpirationDate'], str(path)) for path, profile in profiles
-                       if eligible(profile, bundle_id, team, identity, device)]
+                       if eligible(profile, bundle_id, team, identity, device, distribution)]
             if not matches:
                 break
             selected[bundle_id] = max(matches)[1]
         if len(selected) == len(bundle_ids):
-            return {'identity': identity, 'team': team, 'device': device, 'profiles': selected}
+            return {'identity': identity, 'team': team, 'device': device,
+                    'distribution': distribution, 'profiles': selected}
+    if distribution:
+        raise ValueError('No Developer ID Application identity with Developer ID profiles for '
+                         + ', '.join(bundle_ids) + '. Run scripts/setup-macos-signing.sh.')
     raise ValueError('No matching local Apple Development identity and profiles for ' + ', '.join(bundle_ids)
                      + '. In Xcode, sign in to Apple Accounts and provision ArcaSign and ArcaHost '
                      '(including ArcaAutoFill) for this Mac. Restore missing private keys before retrying.')
 
 
-def make_plan(team, desktop_only=False):
+def make_plan(team, desktop_only=False, distribution=False):
     output = subprocess.check_output(['security', 'find-identity', '-v', '-p', 'codesigning'], text=True)
-    identities = re.findall(r'\b([A-Fa-f0-9]{40})\s+"Apple Development[^\"]*"', output)
+    kind = 'Developer ID Application' if distribution else 'Apple Development'
+    identities = re.findall(r'\b([A-Fa-f0-9]{40})\s+"' + kind + r'[^\"]*"', output)
     candidates = [Path('/Applications/Arca.app/Contents/embedded.provisionprofile'),
                   Path('/Applications/Arca.app/Contents/PlugIns/ArcaAutoFill.appex/Contents/embedded.provisionprofile')]
     for root in [Path.home() / 'Library/Developer/Xcode/UserData/Provisioning Profiles',
@@ -77,7 +89,8 @@ def make_plan(team, desktop_only=False):
             except (subprocess.CalledProcessError, plistlib.InvalidFileException, ValueError):
                 continue
     ids = [DESKTOP_ID] if desktop_only else [DESKTOP_ID, EXTENSION_ID]
-    return select_profiles(profiles, identities, ids, team, local_device())
+    device = None if distribution else local_device()
+    return select_profiles(profiles, identities, ids, team, device, distribution)
 
 
 def prepare(bundle, template, output, plan):
@@ -87,7 +100,8 @@ def prepare(bundle, template, output, plan):
     bundle_id = info['CFBundleIdentifier']
     team = plan['team']
     source = Path(plan['profiles'][bundle_id])
-    if not eligible(decode_profile(source), bundle_id, team, plan['identity'], plan['device']):
+    if not eligible(decode_profile(source), bundle_id, team, plan['identity'], plan['device'],
+                    plan.get('distribution', False)):
         raise ValueError('Selected profile no longer authorizes this bundle, certificate and Mac')
     destination = contents / 'embedded.provisionprofile'
     if source != destination:
@@ -102,7 +116,7 @@ def prepare(bundle, template, output, plan):
     print(f'Prepared {bundle_id} with {source.name}')
 
 
-def verify(bundle):
+def verify(bundle, distribution=False):
     contents = Path(bundle) / 'Contents'
     info = plistlib.loads((contents / 'Info.plist').read_bytes())
     profile = decode_profile(contents / 'embedded.provisionprofile')
@@ -114,7 +128,8 @@ def verify(bundle):
         subprocess.run(['codesign', '-d', '--extract-certificates=' + prefix, str(bundle)],
                        check=True, capture_output=True)
         certificate = hashlib.sha1(Path(prefix + '0').read_bytes()).hexdigest()
-    if not eligible(profile, info['CFBundleIdentifier'], team, certificate, local_device()):
+    device = None if distribution else local_device()
+    if not eligible(profile, info['CFBundleIdentifier'], team, certificate, device, distribution):
         raise ValueError('Profile does not authorize this bundle, signing certificate and Mac')
     if sealed.get('com.apple.application-identifier') != team + '.' + info['CFBundleIdentifier']:
         raise ValueError('Signed application identifier mismatch')
@@ -138,15 +153,18 @@ def main():
     actions.add_argument('--verify', metavar='BUNDLE')
     parser.add_argument('--team', default='LY6LJ395B8')
     parser.add_argument('--desktop-only', action='store_true')
+    parser.add_argument('--distribution', action='store_true',
+                        help='Developer ID identity and profiles, for a published release')
     args = parser.parse_args()
     try:
         if args.plan:
-            Path(args.plan).write_text(json.dumps(make_plan(args.team, args.desktop_only), indent=2) + '\n')
+            plan = make_plan(args.team, args.desktop_only, args.distribution)
+            Path(args.plan).write_text(json.dumps(plan, indent=2) + '\n')
         elif args.prepare:
             bundle, template, output, plan = args.prepare
             prepare(bundle, template, output, json.loads(Path(plan).read_text()))
         else:
-            verify(args.verify)
+            verify(args.verify, args.distribution)
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'Signing failed: {error}\n')
 
