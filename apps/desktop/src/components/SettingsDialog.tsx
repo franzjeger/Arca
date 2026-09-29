@@ -1,6 +1,7 @@
 import { AutomaticBackupSettings } from "./AutomaticBackupSettings";
 import { useReauthentication } from "../hooks/useReauthentication";
 import { syncLabel, useSyncStatus } from "../hooks/useSyncStatus";
+import { SyncDevices } from "./SyncDevices";
 import { Dialog } from "./Dialog";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -472,6 +473,7 @@ export function SettingsDialog({
                 </button>
               )}
             </Row>
+            {sync?.connected && <SyncDevices refreshKey={sync.lastSyncUnix} />}
             <Row
               label="Change master password"
               hint="Requires your current master password or system verification. The vault gets a new key: quick unlock and a plugged-in USB key come back by themselves (macOS asks for Touch ID once), and other devices ask for the new password on their next sync."

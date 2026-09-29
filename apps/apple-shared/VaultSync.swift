@@ -12,12 +12,29 @@
 
 import Foundation
 import os
+#if canImport(UIKit)
+import UIKit
+#endif
 
 #if canImport(AuthenticationServices)
 import AuthenticationServices
 #endif
 
 private let syncLog = Logger(subsystem: "no.sybr.vault", category: "sync")
+
+/// Why a password that does not open this phone's vault was not tried as one
+/// changed on another device.
+enum ChangedPasswordError: LocalizedError {
+    /// Sync could not say whether the password changed: offline, or signed out.
+    case unchecked(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unchecked(let reason):
+            "Wrong master password — or it was changed on another device, and Arca couldn't check (\(reason))."
+        }
+    }
+}
 
 enum SyncError: Error {
     case ffi(code: Int32, operation: String)
@@ -76,6 +93,24 @@ final class VaultSync: @unchecked Sendable {
                 throw SyncError.ffi(code: code, operation: "sync_disconnect")
             }
         }
+    }
+
+    /// Name this device, so every copy it pushes records the upload: that is
+    /// how other devices tell a current copy from an old one.
+    func setDevice(id: UUID, name: String) async throws {
+        try await VaultSession.runSync {
+            let code = id.uuidString.withCString { id in
+                name.withCString { vault_ffi_sync_set_device(self.handle, id, $0) }
+            }
+            guard code == VaultFFICode.ok else {
+                throw SyncError.ffi(code: code, operation: "sync_set_device")
+            }
+        }
+    }
+
+    /// The user has seen that Google Drive went back in time.
+    func acknowledgeRollback() async {
+        try? await VaultSession.runSync { vault_ffi_sync_acknowledge_rollback(self.handle) }
     }
 
     /// Local changes exist and should be pushed on the next cycle.
@@ -189,6 +224,35 @@ final class VaultSync: @unchecked Sendable {
 }
 
 extension VaultSession {
+    /// Open the vault with a master password changed on another device.
+    ///
+    /// A locked phone cannot know of the change: sync finds it, and sync needs
+    /// a vault to run over. So load the vault without opening it, run one
+    /// cycle, and if sync found a copy sealed under a new password, take it on
+    /// with `password`. That copy carries the key this vault is sealed with,
+    /// so the new password alone opens both. Face ID wrapped the old key; if it
+    /// was on, a new device key wraps the new one, which needs no prompt.
+    ///
+    /// Network-bound. Returns nil when sync finds no such change, which means
+    /// the password is simply wrong; throws `ChangedPasswordError.unchecked`
+    /// when the cycle could not tell.
+    static func openWithChangedPassword(
+        _ password: String, refreshToken: String
+    ) async throws -> VaultSession? {
+        let session = try await loadLocked()
+        let hadQuickUnlock = await session.hasDeviceUnlock()
+        let sync = try await session.makeSync()
+        try await sync.connect(refreshToken: refreshToken, account: nil)
+        let status = try await sync.syncNow()
+        guard status.needsPassword == true else {
+            if let reason = status.lastError { throw ChangedPasswordError.unchecked(reason) }
+            return nil
+        }
+        try await sync.adoptPassword(password)
+        if hadQuickUnlock { try? await session.enableDeviceUnlock() }
+        return session
+    }
+
     /// A sync engine over this session's vault.
     func makeSync() async throws -> VaultSync {
         try await Self.runSync {
@@ -199,6 +263,32 @@ extension VaultSession {
             }
             return VaultSync(handle: out, session: self)
         }
+    }
+}
+
+// MARK: - This device
+
+/// This installation, as the copies it pushes name it: an id kept in this
+/// app's defaults, which never sync and do not survive a reinstall (a
+/// reinstall simply counts as a new device), and the device's name.
+enum SyncDeviceIdentity {
+    private static let key = "arca.syncDeviceId"
+
+    static var id: UUID {
+        if let stored = UserDefaults.standard.string(forKey: key), let id = UUID(uuidString: stored) {
+            return id
+        }
+        let id = UUID()
+        UserDefaults.standard.set(id.uuidString, forKey: key)
+        return id
+    }
+
+    @MainActor static var name: String {
+        #if canImport(UIKit)
+        UIDevice.current.name
+        #else
+        Host.current().localizedName ?? "Mac"
+        #endif
     }
 }
 

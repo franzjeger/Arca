@@ -14,9 +14,12 @@ struct SyncStatus: Decodable, Sendable, Equatable {
     /// nothing until this one is given it (`VaultSync.adoptPassword`). Optional
     /// so a status without the field still decodes.
     var needsPassword: Bool?
+    /// Devices whose latest changes Google Drive had lost; the sync already
+    /// put them back. Kept until `VaultSync.acknowledgeRollback`.
+    var rolledBack: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case connected, account, merged
-        case lastSyncUnix, lastError, needsPassword
+        case lastSyncUnix, lastError, needsPassword, rolledBack
     }
 }

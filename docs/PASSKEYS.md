@@ -75,7 +75,7 @@ through AuthenticationServices. The OS supplies the relying party and request
 parameters; the Swift provider selects an account and calls `vault-ffi` for the
 cryptographic operation. Both advertise passkey support.
 
-The bridge uses ABI v18, checked against the linked Rust library by the Swift
+The bridge uses ABI v20, checked against the linked Rust library by the Swift
 tests. The cryptographic core creates ES256/P-256 credentials, encodes COSE
 public keys and attestation objects, and signs assertions. Credential private
 keys remain in the encrypted vault.

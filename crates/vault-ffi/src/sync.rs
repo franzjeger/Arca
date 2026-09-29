@@ -39,7 +39,9 @@ use std::sync::{Arc, Mutex};
 use vault_core::Vault;
 use vault_sync::drive::{arca_credentials, DriveStore, RefreshTokenStore};
 use vault_sync::oauth::{OAuthClient, Pkce};
-use vault_sync::{LocalError, LocalVault, RemoteStore, SilentObserver, SyncEngine};
+use vault_sync::{
+    LocalError, LocalVault, Push, RemoteStore, SilentObserver, SyncEngine, ThisDevice,
+};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -91,12 +93,15 @@ impl RefreshTokenStore for Credential {
 struct SharedVault {
     vault: Arc<Mutex<Vault>>,
     /// Vault bytes the caller still has to write, set only when a cycle
-    /// actually integrated something from the remote.
+    /// changed what belongs on disk.
     pending: Mutex<Option<Vec<u8>>>,
+    /// This device, once the caller has named it; its uploads go unrecorded
+    /// until then.
+    device: Mutex<Option<ThisDevice>>,
 }
 
 impl LocalVault for SharedVault {
-    fn merge_and_serialize(&self, remotes: &[Vec<u8>]) -> Result<Vec<u8>, LocalError> {
+    fn merge_and_serialize(&self, remotes: &[Vec<u8>], whole: bool) -> Result<Push, LocalError> {
         // Not recovered from on purpose — see `lock_vault` in lib.rs. A merge
         // interrupted by a panic can leave the vault holding no items, and this
         // is the one path that would serialize that and push it to the user's
@@ -110,24 +115,29 @@ impl LocalVault for SharedVault {
             // unless the password changed elsewhere.
             return Err(vault_sync::locked(&vault, remotes));
         }
-        vault_sync::merge_remotes(&mut vault, remotes)?;
+        let device = self
+            .device
+            .lock()
+            .map_err(|_| LocalError::Save("device poisoned".into()))?
+            .clone();
+        let behind = vault_sync::prepare_push(&mut vault, remotes, whole, device.as_ref())?;
         let bytes = vault
             .to_bytes()
             .map_err(|e| LocalError::Save(e.to_string()))?;
 
-        // Only remote content changes what belongs on disk. Serializing
-        // re-encrypts with fresh nonces, so bytes from a push of unchanged
-        // state differ from the file while meaning exactly the same thing —
-        // handing those back would rewrite the user's vault every cycle for
-        // nothing.
-        if !remotes.is_empty() {
+        // Remote content, or this device's upload count, changes what belongs
+        // on disk. Nothing else does: serializing re-encrypts with fresh
+        // nonces, so bytes from a push of unchanged state differ from the file
+        // while meaning exactly the same thing, and handing those back would
+        // rewrite the user's vault every cycle for nothing.
+        if !remotes.is_empty() || device.is_some() {
             *self
                 .pending
                 .lock()
                 .map_err(|_| LocalError::Save("pending buffer poisoned".into()))? =
                 Some(bytes.clone());
         }
-        Ok(bytes)
+        Ok(Push { bytes, behind })
     }
 }
 
@@ -173,6 +183,9 @@ struct StatusJson {
     /// The master password was changed on another device; sync waits for it
     /// (see [`vault_ffi_sync_adopt_password`]).
     needs_password: bool,
+    /// Devices whose latest changes the remote had lost (ABI v20), until
+    /// [`vault_ffi_sync_acknowledge_rollback`].
+    rolled_back: Vec<String>,
 }
 
 fn status_json(handle: &SyncHandle, merged: bool) -> Vec<u8> {
@@ -184,9 +197,10 @@ fn status_json(handle: &SyncHandle, merged: bool) -> Vec<u8> {
         last_error: status.last_error,
         merged,
         needs_password: status.needs_password,
+        rolled_back: status.rolled_back,
     };
-    // A status object of four scalars and two strings cannot fail to serialize;
-    // an empty object still parses on the far side if it somehow did.
+    // Scalars, strings and a list of strings cannot fail to serialize; an
+    // empty object still parses on the far side if it somehow did.
     serde_json::to_vec(&json).unwrap_or_else(|_| b"{}".to_vec())
 }
 
@@ -194,15 +208,17 @@ fn status_json(handle: &SyncHandle, merged: bool) -> Vec<u8> {
 // Engine lifecycle
 // ---------------------------------------------------------------------------
 
-/// Create a sync engine over an already-open vault.
+/// Create a sync engine over a vault handle: an open one, or one only loaded
+/// (`vault_ffi_vault_load`), whose cycles push nothing and report
+/// `needsPassword` when the master password was changed on another device.
 ///
 /// Starts **disconnected**: call [`vault_ffi_sync_set_credential`] with a
 /// refresh token before [`vault_ffi_sync_now`] will do anything. The vault
 /// handle may be freed while this handle lives — they share the vault.
 ///
 /// # Safety
-/// `vault` must be a live handle from `vault_ffi_vault_open*`; `out_handle`
-/// must be writable.
+/// `vault` must be a live handle from `vault_ffi_vault_open*` or
+/// `vault_ffi_vault_load`; `out_handle` must be writable.
 #[no_mangle]
 pub unsafe extern "C" fn vault_ffi_sync_new(
     vault: *mut VaultHandle,
@@ -220,6 +236,7 @@ pub unsafe extern "C" fn vault_ffi_sync_new(
         let local = Arc::new(SharedVault {
             vault: shared,
             pending: Mutex::new(None),
+            device: Mutex::new(None),
         });
         let engine = SyncEngine::new(drive.clone(), local.clone(), Arc::new(SilentObserver));
         SyncHandle {
@@ -307,6 +324,56 @@ pub unsafe extern "C" fn vault_ffi_sync_set_credential(
         handle.engine.forget_account();
     }
     OK
+}
+
+/// Name this device (ABI v20): the id the caller keeps for this installation
+/// (a UUID string, stable across launches) and the name the user knows it by.
+/// From then on every copy it pushes records the upload, which is how other
+/// devices tell a current copy from an old one. Until it is called, uploads go
+/// unrecorded.
+///
+/// # Safety
+/// `handle` must be valid; both strings NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_sync_set_device(
+    handle: *mut SyncHandle,
+    device_id: *const c_char,
+    name: *const c_char,
+) -> i32 {
+    if handle.is_null() || device_id.is_null() || name.is_null() {
+        return ERR_NULL_ARG;
+    }
+    let (Some(device_id), Some(name)) = (cstr(device_id), cstr(name)) else {
+        return ERR_UTF8;
+    };
+    let Ok(id) = uuid::Uuid::parse_str(device_id) else {
+        return ERR_OP_FAILED;
+    };
+    let handle = &*handle;
+    match handle.local.device.lock() {
+        Ok(mut slot) => {
+            *slot = Some(ThisDevice {
+                id,
+                name: name.to_string(),
+            });
+            OK
+        }
+        Err(_) => ERR_OP_FAILED,
+    }
+}
+
+/// The user has seen that the remote went back in time (ABI v20): clears
+/// `rolledBack` from the status.
+///
+/// # Safety
+/// `handle` must be valid or null.
+#[no_mangle]
+pub unsafe extern "C" fn vault_ffi_sync_acknowledge_rollback(handle: *mut SyncHandle) {
+    if handle.is_null() {
+        return;
+    }
+    let handle = &*handle;
+    let _ = catch_unwind(AssertUnwindSafe(|| handle.engine.acknowledge_rollback()));
 }
 
 /// Tell the engine local vault state changed and must be pushed next cycle.
@@ -419,9 +486,11 @@ pub unsafe extern "C" fn vault_ffi_sync_now(
 /// answer to a status with `needsPassword`, where `password` is the new one.
 ///
 /// The shared vault switches to the changed key and merges the copy sync
-/// found. Persist it as after any other change: `vault_ffi_merge_and_serialize`
-/// under the vault lock. Quick unlock wrapped the old key and is gone, so a
-/// client that had it re-enables it with `vault_ffi_enable_device_unlock`.
+/// found. A vault only loaded (`vault_ffi_vault_load`) is opened by it: the
+/// copy carries the key the vault is sealed with. Persist the result as after
+/// any other change: `vault_ffi_merge_and_serialize` under the vault lock.
+/// Quick unlock wrapped the old key and is gone, so a client that had it
+/// re-enables it with `vault_ffi_enable_device_unlock`.
 ///
 /// Returns `OK`; `ERR_DECRYPT` when the password does not open the changed
 /// copy; `ERR_DIFFERENT_VAULT` when it opens one that is not this vault's (a
@@ -653,6 +722,7 @@ mod tests {
         let local = Arc::new(SharedVault {
             vault: arc.clone(),
             pending: Mutex::new(None),
+            device: Mutex::new(None),
         });
         (arc, local)
     }
@@ -685,7 +755,7 @@ mod tests {
             peer.to_bytes().unwrap()
         };
 
-        local.merge_and_serialize(&[peer_bytes]).unwrap();
+        local.merge_and_serialize(&[peer_bytes], true).unwrap();
         assert_eq!(titles(&arc), vec!["mine", "theirs"]);
     }
 
@@ -696,7 +766,7 @@ mod tests {
     fn nothing_is_handed_back_to_persist_when_nothing_was_merged() {
         let (_arc, local) = shared(vault_with("mine", 1));
 
-        let bytes = local.merge_and_serialize(&[]).unwrap();
+        let bytes = local.merge_and_serialize(&[], true).unwrap().bytes;
         assert!(!bytes.is_empty(), "the push still needs bytes to upload");
         assert!(
             local.pending.lock().unwrap().is_none(),
@@ -709,7 +779,7 @@ mod tests {
         let (arc, local) = shared(vault_with("mine", 1));
         let peer_bytes = arc.lock().unwrap().to_bytes().unwrap();
 
-        local.merge_and_serialize(&[peer_bytes]).unwrap();
+        local.merge_and_serialize(&[peer_bytes], true).unwrap();
         let pending = local.pending.lock().unwrap().clone();
         let pending = pending.expect("a merge must produce bytes to write");
 
@@ -729,7 +799,7 @@ mod tests {
         let (_arc, local) = shared(vault);
 
         assert!(matches!(
-            local.merge_and_serialize(&[]),
+            local.merge_and_serialize(&[], true),
             Err(LocalError::Locked)
         ));
     }
@@ -752,7 +822,7 @@ mod tests {
         };
 
         assert!(matches!(
-            local.merge_and_serialize(&[foreign]),
+            local.merge_and_serialize(&[foreign], true),
             Err(LocalError::Refused(_))
         ));
         assert_eq!(titles(&arc), vec!["mine"], "a refusal must change nothing");
@@ -773,18 +843,39 @@ mod tests {
 
         let (arc, local) = shared(base);
         assert_eq!(
-            local.merge_and_serialize(std::slice::from_ref(&rotated)),
+            local.merge_and_serialize(std::slice::from_ref(&rotated), true),
             Err(LocalError::KeyRotated(rotated.clone()))
         );
         arc.lock().unwrap().lock().unwrap();
         assert_eq!(
-            local.merge_and_serialize(std::slice::from_ref(&rotated)),
+            local.merge_and_serialize(std::slice::from_ref(&rotated), true),
             Err(LocalError::KeyRotated(rotated.clone()))
         );
 
         arc.lock().unwrap().adopt_rotation(&rotated, "new").unwrap();
-        assert!(local.merge_and_serialize(&[before]).is_ok());
+        assert!(local.merge_and_serialize(&[before], true).is_ok());
         assert_eq!(titles(&arc), vec!["mine"]);
+    }
+
+    /// A named device records its upload in the copy it pushes, and hands
+    /// the result back to be written: the count has to survive a restart.
+    #[test]
+    fn a_named_device_records_its_uploads() {
+        let (arc, local) = shared(vault_with("mine", 1));
+        let id = uuid::Uuid::new_v4();
+        *local.device.lock().unwrap() = Some(ThisDevice {
+            id,
+            name: "iPhone".into(),
+        });
+        let push = local.merge_and_serialize(&[], true).unwrap();
+        assert!(push.behind.is_empty());
+        assert!(
+            local.pending.lock().unwrap().is_some(),
+            "the count is written"
+        );
+        let devices = arc.lock().unwrap().devices().unwrap().to_vec();
+        assert_eq!(devices.len(), 1);
+        assert_eq!((devices[0].id, devices[0].uploads), (id, 1));
     }
 
     #[test]

@@ -2,16 +2,24 @@
 
 ## Unreleased
 
+- Sync: whoever controls the Google account could show an older copy of the
+  vault and hide the newer ones, and every device would quietly carry on from
+  it. Every copy now records, sealed, how many copies each device has pushed.
+  A device that has seen newer changes than Drive still accounts for says
+  whose they were (desktop status bar, iPhone banner) and puts them back.
+  Settings on the desktop and Options → Synced devices on iOS list every
+  device that syncs the vault and when each last did. iOS needs C ABI v20.
 - Security: changing the master password now replaces the vault key. It used
   to rewrap the same key, so an old password plus an old copy of the file
   opened everything written afterwards, forever. Other devices ask for the new
-  password once on their next sync (a locked desktop opens with it directly),
-  and never merge anything sealed with the old key; a "change" forged with an
-  old password is refused. Touch ID, Windows Hello and a plugged-in USB key
-  come back by themselves (one Touch ID prompt on macOS). Vault files are now
-  `SYBRVLT7`, with items and the container tag under keys derived from the
-  vault key (HKDF); V6 files open and are rewritten as V7. Update every device
-  before syncing: earlier builds refuse V7, and iOS needs C ABI v18.
+  password once on their next sync (a locked desktop or iPhone opens with it
+  directly), and never merge anything sealed with the old key; a "change"
+  forged with an old password is refused. Touch ID, Windows Hello and a
+  plugged-in USB key come back by themselves (one Touch ID prompt on macOS).
+  Vault files are now `SYBRVLT7`, with items and the container tag under keys
+  derived from the vault key (HKDF); V6 files open and are rewritten as V7.
+  Update every device before syncing: earlier builds refuse V7, and iOS needs
+  C ABI v19.
 - Security: vault files are now `SYBRVLT6`. Relabelling a V5 file as the
   unauthenticated V4 format took two bytes and no key, and the result unlocked
   and was re-signed on the next save — so whoever could write the file could
