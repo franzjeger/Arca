@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.8.0 — 2026-09-29
+
+**The first published Mac release.** It is signed with Developer ID and
+notarized by Apple, so it opens without warnings on any Mac with Apple silicon,
+and Settings ▸ Updates installs the releases after it. Vault files are
+unchanged (`SYBRVLT7`): devices on 0.7.0 and 0.8.0 sync with each other. The
+iPhone app carries this release's library (C ABI v22).
+
+- Mac: the published app carries the AutoFill extension and the browser
+  extension's native host inside it. Arca registers that host with Chrome,
+  Brave, Edge, Chromium and Firefox each time it starts from Applications, so
+  installing or updating Arca replaces both halves of the browser bridge at
+  once. The host used to be installed by a script beside the app, where no
+  update could reach it, and could fall behind the app it talks to.
+- Browser: choosing a login in Arca's list while Arca is locked takes one
+  Touch ID, which names the site, and then fills; a passkey sign-in takes one
+  too. It took four steps: pick the login, unlock, pick it again, approve again.
+- Duplicates: Find and merge duplicates shows every group before anything is
+  merged, and lets you choose which login to keep. Logins without a website are
+  no longer merged just because their usernames match, and logins on different
+  addresses of one site, a subdomain say, are offered as possible duplicates
+  instead of being merged unasked. The passwords of merged logins go into the
+  kept login's password history, and a login edited meanwhile is left alone.
+- iPhone: Options → Find duplicates, with the same review.
+- Desktop: confirmations and errors after an action appeared behind the open
+  dialog, ever since the first release, so buttons seemed to do nothing. They
+  now show on top. Checking for a new version says why a check failed.
+- Backups: a failed automatic backup names the folder, says whether its drive
+  is disconnected, and when the last good backup was made.
+- SSH: Settings has an Import SSH keys row. The import from `~/.ssh` was only
+  reachable from New SSH key.
+- Security: the cryptography libraries moved to their current generation. The
+  memory Argon2 works in while it derives the key from the master password is
+  now wiped afterwards, and so is the internal state of SHA-1 and SHA-2.
+  Unlocking takes about 20 ms longer.
+- Security: an installed copy accepts an update only if its signature names
+  the version the update server announces. That answer is not signed itself,
+  so otherwise whoever could change it could offer an older, validly signed
+  release as the newest.
+
 ## 0.7.0 — 2026-09-29
 
 **Update every device together.** Vault files are now `SYBRVLT7`, which 0.6.x
