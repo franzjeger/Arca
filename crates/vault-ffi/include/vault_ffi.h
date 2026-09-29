@@ -1,6 +1,6 @@
 /* vault-ffi — C ABI over vault-core for native platform integrations.
  *
- * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 19). All
+ * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 20). All
  * out-buffers are heap-allocated by the library and must be released with
  * vault_ffi_free(ptr, len), which also zeroes them.
  *
@@ -75,6 +75,13 @@ int32_t vault_ffi_vault_check(const uint8_t *vault_bytes, size_t vault_len);
 int32_t vault_ffi_vault_open(const uint8_t *vault_bytes, size_t vault_len,
                              const uint8_t *device_key, size_t device_key_len,
                              VaultHandle **out_handle);
+
+/* ADDED IN ABI v20. The devices that push this vault, as a UTF-8 JSON array:
+ *   [{"id":string,"name":string,"uploads":number,"lastUpload":number}]
+ * lastUpload in Unix ms by that device's clock. -4 until the vault is open.
+ * Free the buffer with vault_ffi_free. */
+int32_t vault_ffi_devices(VaultHandle *handle, uint8_t **out_json,
+                          size_t *out_json_len);
 
 /* ADDED IN ABI v19. Load a vault WITHOUT opening it. Nothing can be read
  * through the handle (every read returns -4) until vault_ffi_sync_adopt_password
@@ -293,12 +300,26 @@ int32_t vault_ffi_sync_set_credential(SyncHandle *handle,
 /* Local vault state changed and should be pushed on the next cycle. */
 void vault_ffi_sync_mark_dirty(SyncHandle *handle);
 
+/* ADDED IN ABI v20. Name this device: an id the caller keeps for this
+ * installation (a UUID string, stable across launches) and the name the user
+ * knows it by. Every copy it pushes then records the upload, which is how other
+ * devices tell a current copy from an old one. -5 never; -3 for an id that is
+ * not a UUID. */
+int32_t vault_ffi_sync_set_device(SyncHandle *handle, const char *device_id,
+                                  const char *name);
+
+/* ADDED IN ABI v20. The user has seen that the remote went back in time:
+ * clears rolledBack from the status. Null-safe. */
+void vault_ffi_sync_acknowledge_rollback(SyncHandle *handle);
+
 /* Status as UTF-8 JSON, no network:
  *   {"connected":bool,"account":string|null,"lastSyncUnix":number|null,
  *    "lastError":string|null,"merged":false,"needsPassword":bool}
  * merged is always false here; only vault_ffi_sync_now can merge.
  * needsPassword (v18): the master password was changed on another device, and
- * sync pushes nothing until vault_ffi_sync_adopt_password is given it. */
+ * sync pushes nothing until vault_ffi_sync_adopt_password is given it.
+ * rolledBack (v20): names of devices whose latest changes the remote had lost;
+ * the push already put it right. Kept until vault_ffi_sync_acknowledge_rollback. */
 int32_t vault_ffi_sync_status(SyncHandle *handle, uint8_t **out_json,
                               size_t *out_json_len);
 

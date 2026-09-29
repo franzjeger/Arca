@@ -2,7 +2,7 @@
 
 SwiftUI app and AutoFill Credential Provider over the shared Rust vault core.
 The project has run on an iPhone since 2026-07-28. Current source is **0.6.2**,
-with **C ABI v17**; that is separate from the version installed on a device.
+with **C ABI v20**; that is separate from the version installed on a device.
 
 ## Implemented
 
@@ -12,7 +12,7 @@ with **C ABI v17**; that is separate from the version installed on a device.
 | Items | Search and browse logins, passkeys, Wi-Fi, SSH metadata and secure notes. Create/edit logins, Wi-Fi and notes; delete items. |
 | AutoFill | Passwords and passkey registration/assertion through the system credential provider. |
 | TOTP | Verification codes, QR setup and Live Activity support. |
-| Sync | Google Drive through the shared Rust engine, OAuth sign-in and OS credential storage. Every successful edit marks the vault dirty. |
+| Sync | Google Drive through the shared Rust engine, OAuth sign-in and OS credential storage. Every successful edit marks the vault dirty. A master password changed elsewhere is asked for once, also on the lock screen; a banner says when Drive had lost another device's changes (they are put back); Options → Synced devices lists every device and when it last synced. |
 | Password history | Last 20 password changes, encrypted and synced; copy or restore one login/Wi-Fi password. |
 | Locking | Configurable background grace period; an unfinished unlock is invalidated on backgrounding. Late async results cannot reactivate a locked session. |
 | Clipboard | Local-only copies with expiry; no Universal Clipboard transfer. |

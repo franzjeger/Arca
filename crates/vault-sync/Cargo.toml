@@ -22,6 +22,8 @@ getrandom.workspace = true
 data-encoding.workspace = true
 # Tokens are wiped when they go out of scope; they are never written to disk.
 zeroize.workspace = true
+# This device's id in the copies it pushes.
+uuid.workspace = true
 
 [lints]
 workspace = true

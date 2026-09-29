@@ -1197,6 +1197,18 @@ pub fn sync_status(app: tauri::AppHandle) -> crate::sync::SyncStatusDto {
     crate::sync::status(&app)
 }
 
+/// The devices that push this vault, for Settings.
+#[tauri::command]
+pub fn sync_devices(app: tauri::AppHandle) -> Vec<crate::sync::DeviceDto> {
+    crate::sync::devices(&app)
+}
+
+/// The user has seen that Drive went back in time.
+#[tauri::command]
+pub fn sync_acknowledge_rollback(app: tauri::AppHandle) {
+    crate::sync::acknowledge_rollback(&app);
+}
+
 /// One manual sync cycle; returns true if remote changes were merged in.
 #[tauri::command]
 pub async fn sync_now(app: tauri::AppHandle) -> Result<bool, CmdError> {
