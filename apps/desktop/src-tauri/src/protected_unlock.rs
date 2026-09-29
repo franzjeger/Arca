@@ -124,14 +124,15 @@ fn current(st: &AppState, generation: u64, vault_path: &Path) -> Result<(), CmdE
 /// Runs on a worker, including when invoked by the browser bridge.
 pub fn unlock(state: &Mutex<AppState>, app: Option<&tauri::AppHandle>) -> Result<(), CmdError> {
     let _prompt = claim_authentication(&AUTHENTICATION)?;
-    if state
-        .lock()
-        .map_err(|_| failure("Vault unavailable."))?
-        .vault
-        .as_ref()
-        .is_some_and(|v| v.is_unlocked())
     {
-        return Ok(());
+        let st = state.lock().map_err(|_| failure("Vault unavailable."))?;
+        if st.vault.as_ref().is_some_and(|v| v.is_unlocked()) {
+            return Ok(());
+        }
+        // Touch ID wrapped the key a change made elsewhere replaced.
+        if crate::pending_change::pending(&st).is_some() {
+            return Err(vault_core::Error::KeyRotated.into());
+        }
     }
     let (generation, vault_path, config) = begin(state, false)?;
     let key = match &config {

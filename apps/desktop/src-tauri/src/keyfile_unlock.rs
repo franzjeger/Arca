@@ -339,6 +339,10 @@ pub fn try_unlock(state: &Mutex<AppState>) -> Result<bool, CmdError> {
         if st.vault.as_ref().is_some_and(|v| v.is_unlocked()) {
             return Ok(false);
         }
+        // The stick wraps the key a change made elsewhere replaced.
+        if crate::pending_change::pending(&st).is_some() {
+            return Err(vault_core::Error::KeyRotated.into());
+        }
         load(&st.store)?.ok_or_else(|| {
             CmdError::new(
                 "keyfile_not_enrolled",

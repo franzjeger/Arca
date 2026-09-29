@@ -46,6 +46,9 @@ pub struct VaultStatus {
     pub quick_unlock_protected: bool,
     /// A USB key file is enrolled for this vault (Linux). `None` otherwise.
     pub key_file: Option<crate::keyfile_unlock::KeyFileStatus>,
+    /// The master password was changed on another device and this computer
+    /// knows it: only the new one opens the vault (see `pending_change`).
+    pub password_change_pending: bool,
 }
 
 #[derive(Serialize)]
@@ -492,6 +495,7 @@ pub fn vault_status(state: St<'_>) -> Result<VaultStatus, CmdError> {
             }
         },
         biometric_available: crate::biometric::available(),
+        password_change_pending: crate::pending_change::pending(&st).is_some(),
     })
 }
 
@@ -697,6 +701,13 @@ fn do_unlock(state: &Mutex<AppState>, master_password: &str) -> Result<bool, Cmd
     if st.vault.is_none() && st.store.exists() {
         st.vault = Some(st.store.load()?);
     }
+    // A password changed on another device that this computer knows of: only
+    // the new one opens the vault, and opening takes the change on.
+    if let Some(copy) = crate::pending_change::pending(&st) {
+        drop(st);
+        return crate::rotation::adopt(state, &copy, master_password)
+            .map_err(|e| previous_or(state, master_password, e));
+    }
     match st.vault_mut()?.unlock(master_password) {
         Ok(()) => {}
         // Perhaps the password was changed on another device: sync keeps the
@@ -738,6 +749,28 @@ fn do_unlock(state: &Mutex<AppState>, master_password: &str) -> Result<bool, Cmd
     Ok(false)
 }
 
+/// A password the change replaced is not simply wrong. Saying so is what lets
+/// the lock screen offer the way out when the change was not the user's
+/// (`deny_password_change`).
+fn previous_or(state: &Mutex<AppState>, password: &str, error: CmdError) -> CmdError {
+    if error.code != "invalid_credentials" {
+        return error;
+    }
+    let previous = guard(state).ok().is_some_and(|st| {
+        st.vault
+            .as_ref()
+            .is_some_and(|v| v.header().check_master_password(password))
+    });
+    if previous {
+        CmdError::new(
+            "previous_password",
+            "That is your previous master password. It was changed on another device: enter the new one.",
+        )
+    } else {
+        error
+    }
+}
+
 /// Run the blocking biometric prompt on a WORKER thread, with the app handle
 /// the Windows implementation needs for window parenting.
 ///
@@ -770,6 +803,10 @@ pub async fn quick_unlock(app: tauri::AppHandle, state: St<'_>) -> Result<(), Cm
     // biometric is enforced here rather than by a per-item keychain access
     // control (that macOS variant broke unlock under dev signing — see
     // vault-store::keychain). No-op on platforms without a biometric provider.
+    // Quick unlock wrapped the key a change made elsewhere replaced.
+    if crate::pending_change::pending(&guard(state.inner())?).is_some() {
+        return Err(vault_core::Error::KeyRotated.into());
+    }
     authenticate_off_main(app.clone(), "unlock your password vault").await?;
 
     let mut st = guard(state.inner())?;
@@ -1265,7 +1302,7 @@ pub async fn change_master_password(
     // A change made on another device comes first. Another one made from the
     // old key would carry neither device's new key, so neither could take
     // the other's on.
-    if crate::sync::rotated_copy().is_some() {
+    if changed_copy(state.inner()).is_some() {
         return Err(vault_core::Error::KeyRotated.into());
     }
     // Re-auth BEFORE taking the state lock (the prompt blocks on the user).
@@ -1294,7 +1331,7 @@ pub async fn sync_adopt_password(
     password: String,
 ) -> Result<crate::rotation::Rekeyed, CmdError> {
     let password = zeroize::Zeroizing::new(password);
-    let copy = crate::sync::rotated_copy().ok_or_else(|| {
+    let copy = changed_copy(app.state::<Mutex<AppState>>().inner()).ok_or_else(|| {
         CmdError::new(
             "no_password_change",
             "This vault already has the newest master password.",
@@ -1304,6 +1341,48 @@ pub async fn sync_adopt_password(
     let touch_id = tauri::async_runtime::spawn_blocking(move || {
         let state = worker.state::<Mutex<AppState>>();
         crate::rotation::adopt(state.inner(), &copy, &password)
+    })
+    .await
+    .map_err(|_| CmdError::new("internal", "The password task failed."))??;
+    crate::session::unlocked(&app);
+    Ok(crate::rotation::finish(&app, touch_id).await)
+}
+
+/// The copy that carries a master password change made on another device: the
+/// one kept beside the vault, or the one sync has just found.
+fn changed_copy(state: &Mutex<AppState>) -> Option<Vec<u8>> {
+    guard(state)
+        .ok()
+        .and_then(|st| crate::pending_change::pending(&st))
+        .or_else(crate::sync::rotated_copy)
+}
+
+/// The user did not change the master password, whatever the copy sync kept
+/// says (see `pending_change`). The previous password opens the vault as
+/// before, confirmed by this computer's own verification (Touch ID, Windows
+/// Hello), so knowing an old password is not enough; and that copy is set
+/// aside for good. Linux has no such verification to ask for, and there the
+/// previous password alone decides.
+#[tauri::command]
+pub async fn deny_password_change(
+    app: tauri::AppHandle,
+    master_password: String,
+) -> Result<crate::rotation::Rekeyed, CmdError> {
+    let password = zeroize::Zeroizing::new(master_password);
+    let worker = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::biometric::authenticate(
+            Some(&worker),
+            "confirm you did not change your master password",
+        )
+    })
+    .await
+    .map_err(|_| CmdError::new("internal", "The verification task failed."))?
+    .map_err(|m| CmdError::new("biometric_failed", &m))?;
+    let worker = app.clone();
+    let touch_id = tauri::async_runtime::spawn_blocking(move || {
+        let state = worker.state::<Mutex<AppState>>();
+        crate::rotation::deny(state.inner(), &password)
     })
     .await
     .map_err(|_| CmdError::new("internal", "The password task failed."))??;
