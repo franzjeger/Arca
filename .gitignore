@@ -13,6 +13,10 @@ apps/desktop/src-tauri/gen/
 # Local vault data / secrets (never commit)
 *.vault
 *.vault.tmp.*
+# ...except the format fixtures: test vaults written by released code under
+# test passwords, which later builds must keep opening
+# (crates/vault-core/tests/format_fixtures.rs).
+!crates/vault-core/tests/fixtures/*.vault
 
 # Signing and API credentials. These all live OUTSIDE the repository by design
 # (~/.arca and ~/.appstoreconnect), so these patterns are a backstop for the day
