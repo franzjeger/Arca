@@ -283,6 +283,91 @@ pub(super) struct Ctx<'a> {
     pub(super) state: &'a Mutex<AppState>,
     pub(super) app: Option<&'a AppHandle>,
     pub(super) consent: &'a mut dyn FnMut(&ConsentContext) -> bool,
+    /// Open the vault for a request, with a prompt that ends "Arca is trying
+    /// to <reason>". [`unlock_for_request`] in the app; tests stand in for the
+    /// person at the fingerprint reader.
+    pub(super) unlock: &'a mut dyn FnMut(&str) -> RequestUnlock,
+}
+
+/// What asking to open the vault for one request came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RequestUnlock {
+    /// It was open already; nothing was asked.
+    AlreadyOpen,
+    /// The user's Touch ID (or Windows Hello) just opened it, behind a prompt
+    /// that named this request: that is the user approving it. Linux has no
+    /// biometric to ask, so it never gets here there.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    Verified,
+    /// A USB key that was plugged in opened it. No person was asked.
+    Unattended,
+    /// The user said no to the prompt. Only Touch ID tells a refusal from a
+    /// prompt that could not be shown; elsewhere both fall back to the window.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Declined,
+    /// Nothing here opens it, so our window now asks for the master password.
+    Window,
+}
+
+/// Open the vault for one request the user made in the browser, the way
+/// Apple's Passwords does: one prompt that says what it is for, and the request
+/// goes on. The Touch ID that opens the vault is then the approval of the act
+/// it named, so the caller does not ask again.
+///
+/// Before this, a pick with the vault locked came back "locked", the user
+/// unlocked, chose the same account again, and gave a second fingerprint for
+/// the sign-in: four steps for one.
+pub(super) fn unlock_for_request(
+    state: &Mutex<AppState>,
+    app: Option<&AppHandle>,
+    reason: &str,
+) -> RequestUnlock {
+    let open = state
+        .lock()
+        .ok()
+        .and_then(|st| st.vault.as_ref().map(|v| v.is_unlocked()))
+        .unwrap_or(false);
+    if open {
+        return RequestUnlock::AlreadyOpen;
+    }
+    // Headless (tests, a client with no app behind it): there is no one to
+    // ask and no window to ask in.
+    let Some(app) = app else {
+        return RequestUnlock::Window;
+    };
+    // The prompt pulls focus from the browser, which is the flow, not the
+    // user leaving: hold off blur-locking while they answer it.
+    if let Ok(mut st) = state.lock() {
+        st.blur_grace_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+    }
+    if crate::keyfile_unlock::unlock_if_locked(state) {
+        crate::session::unlocked(app);
+        return RequestUnlock::Unattended;
+    }
+    #[cfg(target_os = "macos")]
+    match crate::protected_unlock::unlock_because(state, Some(app), Some(reason)) {
+        Ok(()) => {
+            crate::session::unlocked(app);
+            return RequestUnlock::Verified;
+        }
+        Err(failure)
+            if failure.code == "biometric_failed" || failure.code == "unlock_cancelled" =>
+        {
+            return RequestUnlock::Declined;
+        }
+        // No quick unlock, a key that no longer fits, a password changed
+        // elsewhere, or another prompt already up: the window can say which.
+        Err(_) => {}
+    }
+    #[cfg(target_os = "windows")]
+    if crate::biometric::authenticate(Some(app), reason).is_ok() && try_device_unlock(state) {
+        crate::session::unlocked(app);
+        return RequestUnlock::Verified;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = reason;
+    ask_window_to_unlock(Some(app));
+    RequestUnlock::Window
 }
 
 pub(super) fn dispatch(
@@ -293,10 +378,26 @@ pub(super) fn dispatch(
     app: Option<&AppHandle>,
     consent: &mut dyn FnMut(&ConsentContext) -> bool,
 ) -> Response {
+    let mut unlock = |reason: &str| unlock_for_request(state, app, reason);
+    dispatch_with(req, state, token, session, app, consent, &mut unlock)
+}
+
+/// [`dispatch`], with who answers a request's unlock prompt passed in: in the
+/// app, the person at the Mac; in a test, the test.
+pub(super) fn dispatch_with(
+    req: Request,
+    state: &Mutex<AppState>,
+    token: &str,
+    session: &mut Session,
+    app: Option<&AppHandle>,
+    consent: &mut dyn FnMut(&ConsentContext) -> bool,
+    unlock: &mut dyn FnMut(&str) -> RequestUnlock,
+) -> Response {
     let mut ctx = Ctx {
         state,
         app,
         consent,
+        unlock,
     };
     match req {
         Request::Hello {
@@ -321,7 +422,7 @@ pub(super) fn dispatch(
         }
         _ if !session.is_authed() => unauthorized(),
         Request::Match { url } => list_matches(&mut ctx, url),
-        Request::Fill { id, url } => fill(&mut ctx, id, url),
+        Request::Fill { id, url, picked } => fill(&mut ctx, id, url, picked),
         Request::PasskeyCreate {
             origin,
             rp_id,

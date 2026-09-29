@@ -147,7 +147,8 @@ const swChrome = {
       const answer = _msg.type === 'list_matching_logins'
         ? { type: 'logins', app_connected: PROVIDER_CONNECTED, items: NATIVE_ANSWER.type === 'passkey_assertion' ? [{kind:'passkey'}] : [] }
         : _msg.type === "hello" ? { type: "hello", app_connected: PROVIDER_CONNECTED, app_launchable: APP_LAUNCHABLE }
-        : _msg.type === "request_unlock" ? UNLOCK_HANDLER() : NATIVE_ANSWER;
+        : _msg.type === "request_unlock" ? UNLOCK_HANDLER()
+        : typeof NATIVE_ANSWER === "function" ? NATIVE_ANSWER(_msg) : NATIVE_ANSWER;
       if (typeof cb === "function") {
         Promise.resolve(answer).then(cb);
         return undefined;
@@ -1036,13 +1037,18 @@ console.log("PASS provider capability probes: first key, disconnected, native fa
   assert.equal(NATIVE_CALLS.filter(x => x === "passkey_create").length, 1);
   assert.ok(NATIVE_CALLS.indexOf("request_unlock") < NATIVE_CALLS.indexOf("passkey_create"));
 
+  // A sign-in goes to Arca first, which opens the vault itself. An Arca from
+  // before that answers "locked"; the relay then unlocks and asks again, as it
+  // always did, and a cancelled unlock ends it there: no second request.
   PROVIDER_CONNECTED = false;
   UNLOCK_HANDLER = () => ({ type: "error", message: "unlock_cancelled" });
   NATIVE_CALLS.length = 0;
   const cancelled = makeDocument({ host: "cancel-startup.example", tabId: 951 });
   cancelled.gesture();
   assert.equal(await cancelled.get().catch(e => e.name), "NotAllowedError");
-  assert.equal(NATIVE_CALLS.includes("passkey_get"), false);
+  assert.deepEqual(
+    NATIVE_CALLS.filter(x => x === "passkey_get" || x === "request_unlock"),
+    ["passkey_get", "request_unlock"]);
   assert.equal(cancelled.realGetCalls(), 0);
 
   // Abort while the native prompt is open: its eventual success cannot sign.
@@ -1060,7 +1066,58 @@ console.log("PASS provider capability probes: first key, disconnected, native fa
   PROVIDER_CONNECTED = true;
   releaseUnlock({ type: "unlock_requested" });
   await tick();
-  assert.equal(NATIVE_CALLS.includes("passkey_get"), false);
+  assert.equal(NATIVE_CALLS.filter(x => x === "passkey_get").length, 1);
   APP_LAUNCHABLE = false;
 }
 console.log("PASS startup: passive discovery, gesture gate, one unlock, one ceremony, cancel/abort without signing");
+
+// A sign-in while Arca is locked is one prompt, not two. The relay used to
+// open the vault as a step of its own and the sign-in then asked again; now
+// the request goes straight to Arca, which opens the vault behind a prompt
+// that names the site and takes it as the sign-in's verification.
+{
+  PROVIDER_CONNECTED = false;
+  NATIVE_ANSWER = ASSERTION;
+  UNLOCK_HANDLER = () => { throw new Error("no separate unlock for a sign-in"); };
+  NATIVE_CALLS.length = 0;
+  const locked = makeDocument({ host: "one-prompt.example", tabId: 960 });
+  locked.gesture();
+  const signed = await locked.get().catch(e => e.name);
+  assert.equal(typeof signed, "object", `expected a credential, got ${signed}`);
+  assert.deepEqual(NATIVE_CALLS.filter(x => x !== "list_matching_logins"), ["passkey_get"]);
+
+  // No Touch ID: Arca's window asks for the master password. The relay waits
+  // for it and sends the same sign-in once more; nobody picks twice.
+  let asked = 0;
+  NATIVE_ANSWER = (msg) => {
+    if (msg.type !== "passkey_get") return { type: "error", message: "locked" };
+    asked += 1;
+    if (asked === 1) {
+      setTimeout(() => { PROVIDER_CONNECTED = true; }, 20);
+      return { type: "error", message: "unlocking" };
+    }
+    return ASSERTION;
+  };
+  PROVIDER_CONNECTED = false;
+  NATIVE_CALLS.length = 0;
+  const windowed = makeDocument({ host: "window-unlock.example", tabId: 961 });
+  windowed.gesture();
+  const again = await windowed.get().catch(e => e.name);
+  assert.equal(typeof again, "object", `expected a credential, got ${again}`);
+  assert.equal(asked, 2);
+  assert.equal(NATIVE_CALLS.includes("request_unlock"), false);
+
+  // Declined at the prompt: nothing signed, nothing sent again.
+  NATIVE_ANSWER = { type: "error", message: "unlock_cancelled" };
+  PROVIDER_CONNECTED = false;
+  NATIVE_CALLS.length = 0;
+  const declined = makeDocument({ host: "declined-unlock.example", tabId: 962 });
+  declined.gesture();
+  assert.equal(await declined.get().catch(e => e.name), "NotAllowedError");
+  assert.equal(NATIVE_CALLS.filter(x => x === "passkey_get").length, 1);
+  assert.equal(declined.realGetCalls(), 0);
+  NATIVE_ANSWER = { type: "error", message: "locked" };
+  UNLOCK_HANDLER = () => ({ type: "error", message: "unlock_cancelled" });
+  PROVIDER_CONNECTED = true;
+}
+console.log("PASS a locked sign-in: one request and no separate unlock, the window's unlock finishes the same sign-in, a decline ends it");

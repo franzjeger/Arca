@@ -169,23 +169,30 @@
   }
 
   const activeCeremonies = new Map();
+  const probe = () => api.runtime.sendMessage({ cmd: "listLogins", url: location.href || location.origin });
+  const connected = result => result?.ok && result.response?.app_connected;
+
+  /// Whether Arca comes to answer as unlocked within `ms`, polling metadata
+  /// for as long as the ceremony is live. Never replays one by itself.
+  async function waitForUnlock(active, ms) {
+    const deadline = Date.now() + ms;
+    while (active() && contextAlive() && Date.now() < deadline) {
+      if (connected(await probe())) return true;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return false;
+  }
+
   // Only called after spending a real gate approval. Poll metadata, never
   // replay create/get. The credential operation starts in this document only.
-  async function ensureUnlocked(active) {
-    const probe = () => api.runtime.sendMessage({ cmd: "listLogins", url: location.href || location.origin });
-    const connected = result => result?.ok && result.response?.app_connected;
-    const initial = await probe();
+  async function ensureUnlocked(active, initial) {
+    initial = initial ?? await probe();
     if (!initial?.ok) return "provider_unavailable";
     if (connected(initial)) return null;
     if (!active() || !contextAlive()) return "unlock_cancelled";
     const unlock = await api.runtime.sendMessage({ cmd: "requestUnlock" });
     if (!unlock?.ok || unlock.response?.type !== "unlock_requested") return "unlock_cancelled";
-    const deadline = Date.now() + 30000;
-    while (active() && contextAlive() && Date.now() < deadline) {
-      if (connected(await probe())) return null;
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    return "unlock_cancelled";
+    return (await waitForUnlock(active, 30000)) ? null : "unlock_cancelled";
   }
 
   window.addEventListener("message", async (e) => {
@@ -331,10 +338,20 @@
     activeCeremonies.set(d.id, operation);
     const active = () => !operation.cancelled && contextAlive();
     let result;
+    const failed = message => ({ ok: true, response: { type: "error", message } });
+    const reasonOf = r => (r?.ok && r.response?.type === "error" ? r.response.message : null);
     try {
-      const error = await ensureUnlocked(active);
+      // A sign-in goes straight to Arca, which opens a locked vault itself
+      // behind one prompt that names the site and takes that fingerprint as
+      // the sign-in's verification too. Opening it here first, as a step of
+      // its own, made one sign-in two prompts. Registering a passkey still
+      // opens the vault first.
+      const initial = await probe();
+      const error = d.kind === "create"
+        ? await ensureUnlocked(active, initial)
+        : initial?.ok ? null : "provider_unavailable";
       if (error || !active()) {
-        result = { ok: true, response: { type: "error", message: error || "unlock_cancelled" } };
+        result = failed(error || "unlock_cancelled");
       } else {
         // Every field named. The page's payload is a request, not a message to
         // pass on: the origin, the client data hash and `picked` are ours.
@@ -359,6 +376,19 @@
                 picked,
               };
         if (active()) result = await api.runtime.sendMessage(message);
+        const reason = d.kind === "get" && active() ? reasonOf(result) : null;
+        if (reason === "unlocking") {
+          // No Touch ID: Arca's window asks for the master password. Once it
+          // is open, this same sign-in goes again; nobody picks twice.
+          result = (await waitForUnlock(active, 120000))
+            ? await api.runtime.sendMessage(message)
+            : failed("unlock_cancelled");
+        } else if ((reason === "locked" || reason === "not_running") && !connected(initial)) {
+          // Arca not running yet, or one from before it could open the vault
+          // for a sign-in: open it first and ask again, as it always went.
+          const again = await ensureUnlocked(active);
+          result = again ? failed(again) : await api.runtime.sendMessage(message);
+        }
       }
     } catch (_e) {
       result = { ok: true, response: { type: "error", message: "unlock_cancelled" } };

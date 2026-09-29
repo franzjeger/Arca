@@ -839,7 +839,10 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // only if the desktop app authorized it (unlocked + origin match), and
       // only for the page that asked.
       if (!fromPage(sender, msg.url)) return refused(sendResponse);
-      sendNative({ type: "fill", id: msg.id, url: msg.url }).then(sendResponse);
+      // `picked` is the content script's own word that a person clicked this
+      // row; a page cannot message this worker to claim it.
+      sendNative({ type: "fill", id: msg.id, url: msg.url, picked: msg.picked === true })
+        .then(sendResponse);
       return true;
 
     case "passkeyCreate":

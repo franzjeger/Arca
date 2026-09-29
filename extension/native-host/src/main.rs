@@ -73,7 +73,14 @@ enum Request {
     /// Ask for logins whose site matches `url` (the active tab's URL).
     ListMatchingLogins { url: String },
     /// Fetch the credential for a chosen login id, to fill into `url`.
-    Fill { id: String, url: String },
+    Fill {
+        id: String,
+        url: String,
+        /// Picked in Arca's own list with a trusted click: the app may open a
+        /// locked vault for this fill (see the bridge's `Fill`).
+        #[serde(default)]
+        picked: bool,
+    },
     /// Register a WebAuthn passkey (navigator.credentials.create).
     PasskeyCreate {
         origin: String,
@@ -242,7 +249,7 @@ fn handle(request: Request) -> Response {
             Response::Pong
         }
         Request::ListMatchingLogins { url } => list_matching_logins(url),
-        Request::Fill { id, url } => match fill_credential(&id, &url) {
+        Request::Fill { id, url, picked } => match fill_credential(&id, &url, picked) {
             Ok((username, password)) => Response::Credentials { username, password },
             // The reason verbatim, for the extension to act on. It renders the
             // wording; a host that pre-writes prose forces the UI to string-match
@@ -771,9 +778,10 @@ fn decode_login_matches(resp: serde_json::Value, url: &str) -> Option<Vec<LoginM
 
 /// Ask the app for the credential of `id` to fill into `url`. The app enforces
 /// unlock + origin matching before returning anything.
-fn fill_credential(id: &str, url: &str) -> Result<(String, String), String> {
-    let Some(resp) = bridge_request(serde_json::json!({ "type": "fill", "id": id, "url": url }))
-    else {
+fn fill_credential(id: &str, url: &str, picked: bool) -> Result<(String, String), String> {
+    let Some(resp) = bridge_request(
+        serde_json::json!({ "type": "fill", "id": id, "url": url, "picked": picked }),
+    ) else {
         return Err("not_running".to_string());
     };
     if resp.get("type").and_then(|v| v.as_str()) != Some("credentials") {
@@ -1217,6 +1225,7 @@ mod tests {
         let resp = handle(Request::Fill {
             id: "00000000-0000-0000-0000-000000000000".to_string(),
             url: "https://github.com".to_string(),
+            picked: false,
         });
         assert!(matches!(
             resp,
