@@ -937,6 +937,14 @@ impl Vault {
         Ok(crate::dedupe::find_duplicate_logins(self.unlocked_items()?))
     }
 
+    /// The duplicate logins, as a review shows them. See
+    /// [`crate::dedupe::review_duplicate_logins`].
+    pub fn review_duplicate_logins(&self) -> Result<Vec<crate::dedupe::DuplicateReview>> {
+        Ok(crate::dedupe::review_duplicate_logins(
+            self.unlocked_items()?,
+        ))
+    }
+
     /// Merge the groups someone chose, in order, exactly as they were shown.
     ///
     /// `reviewed` holds the revision of every login that was shown. If any of

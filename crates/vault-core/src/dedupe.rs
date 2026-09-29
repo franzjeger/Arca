@@ -52,6 +52,36 @@ pub struct DuplicateGroup {
     pub ids: Vec<Uuid>,
 }
 
+/// A login in a group, as a review shows it. No secret: `password` only says
+/// which logins in the group share one.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewedLogin {
+    pub id: Uuid,
+    pub revision: Uuid,
+    pub title: String,
+    pub site: String,
+    pub username: String,
+    pub modified_at: i64,
+    /// Logins with the same number have the same password.
+    pub password: usize,
+    pub has_password: bool,
+    pub has_totp: bool,
+    pub has_notes: bool,
+}
+
+/// A group of duplicates, as a review shows it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateReview {
+    /// One username on different sites of one domain, rather than one site.
+    pub possible: bool,
+    /// The login a merge keeps unless someone picks another.
+    pub keep: Uuid,
+    /// Newest first.
+    pub logins: Vec<ReviewedLogin>,
+}
+
 /// One group to merge, as someone chose it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MergeChoice {
@@ -172,6 +202,63 @@ pub fn find_duplicate_logins(items: &[Item]) -> Vec<DuplicateGroup> {
                 likeness,
                 keep: items[keep].id,
                 ids: idxs.iter().map(|&i| items[i].id).collect(),
+            }
+        })
+        .collect()
+}
+
+/// The groups [`find_duplicate_logins`] finds, with what a review shows of each
+/// login. Built here, once, so every app shows the same and none shows a
+/// secret another does not.
+pub fn review_duplicate_logins(items: &[Item]) -> Vec<DuplicateReview> {
+    find_duplicate_logins(items)
+        .into_iter()
+        .map(|group| {
+            let mut passwords: Vec<Zeroizing<String>> = Vec::new();
+            let mut logins = Vec::with_capacity(group.ids.len());
+            for item in group
+                .ids
+                .iter()
+                .filter_map(|id| items.iter().find(|item| item.id == *id))
+            {
+                let VaultItem::Login {
+                    title,
+                    username,
+                    password,
+                    url,
+                    totp_secret,
+                    notes,
+                } = &item.data
+                else {
+                    continue;
+                };
+                let index = match passwords
+                    .iter()
+                    .position(|known| known.as_str() == password)
+                {
+                    Some(index) => index,
+                    None => {
+                        passwords.push(Zeroizing::new(password.clone()));
+                        passwords.len() - 1
+                    }
+                };
+                logins.push(ReviewedLogin {
+                    id: item.id,
+                    revision: item.revision,
+                    title: title.clone(),
+                    site: host_of(url),
+                    username: username.clone(),
+                    modified_at: item.modified_at,
+                    password: index,
+                    has_password: !password.is_empty(),
+                    has_totp: totp_secret.as_deref().is_some_and(|t| !t.is_empty()),
+                    has_notes: !notes.trim().is_empty(),
+                });
+            }
+            DuplicateReview {
+                possible: group.likeness == Likeness::Possible,
+                keep: group.keep,
+                logins,
             }
         })
         .collect()
@@ -520,6 +607,45 @@ mod tests {
             login("admin", "http://[::1]:3000/", "f", 6),
         ];
         assert_eq!(find_duplicate_logins(&items), []);
+    }
+
+    #[test]
+    fn the_review_tells_which_passwords_match_without_showing_any() {
+        let mut first = titled("Site", "me", "https://example.test", "first-secret", 10);
+        if let VaultItem::Login {
+            totp_secret, notes, ..
+        } = &mut first.data
+        {
+            *totp_secret = Some("JBSWY3DPSECRETTOTP".into());
+            *notes = "secret note".into();
+        }
+        let items = vec![
+            first,
+            titled(
+                "Site",
+                "me",
+                "https://example.test/login",
+                "first-secret",
+                20,
+            ),
+            titled("Site", "me", "https://www.example.test", "other-secret", 30),
+        ];
+        let review = review_duplicate_logins(&items);
+        let json = serde_json::to_string(&review).unwrap();
+        assert!(!json.to_lowercase().contains("secret"), "{json}");
+        assert_eq!(review.len(), 1);
+        assert!(!review[0].possible);
+        assert_eq!(review[0].keep, items[2].id);
+        let shown: Vec<(usize, bool, bool)> = review[0]
+            .logins
+            .iter()
+            .map(|l| (l.password, l.has_totp, l.has_notes))
+            .collect();
+        assert_eq!(
+            shown,
+            [(0, false, false), (1, false, false), (1, true, true)]
+        );
+        assert!(json.contains("\"modifiedAt\":30"), "{json}");
     }
 
     #[test]
