@@ -69,7 +69,7 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 subtle = "2.6"
 hmac = "0.12"
 # Keys derived from the vault key, one per job (V7).
-hkdf = "0.12"
+hkdf = "0.13"
 sha1 = "0.10"
 sha2 = "0.10"
 getrandom = "0.2"
