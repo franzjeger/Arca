@@ -63,7 +63,9 @@ vault-sync = { path = "crates/vault-sync" }
 vault-bridge = { path = "crates/vault-bridge" }
 
 # --- crypto (audited RustCrypto crates only; no custom primitives) ---
-argon2 = "0.6"
+# `zeroize` wipes the hashes Argon2 starts and ends with, either of which
+# gives the key without the password; its memory is ours (crypto.rs).
+argon2 = { version = "0.6", features = ["zeroize"] }
 # 0.10 always wiped the cipher's copy of the key when dropped; since 0.11
 # that takes `zeroize`.
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
@@ -72,8 +74,10 @@ subtle = "2.6"
 hmac = "0.13"
 # Keys derived from the vault key, one per job (V7).
 hkdf = "0.13"
-sha1 = "0.11"
-sha2 = "0.11"
+# `zeroize` wipes hash state when dropped. HMAC and HKDF keep their keyed
+# state in these hashes' cores, so it covers them too.
+sha1 = { version = "0.11", features = ["zeroize"] }
+sha2 = { version = "0.11", features = ["zeroize"] }
 getrandom = "0.4"
 data-encoding = "2.6"
 # Cross-platform mlock/VirtualLock so secret memory can't be paged to swap.

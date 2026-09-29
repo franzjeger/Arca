@@ -41,7 +41,7 @@ pub fn fill_random(buf: &mut [u8]) -> Result<()> {
 /// Derive the 256-bit master key from the master password and the vault's
 /// stored Argon2id parameters. Deterministic for a given (password, params).
 pub fn derive_master_key(master_password: &str, params: &KdfParams) -> Result<SymmetricKey> {
-    use argon2::{Algorithm, Argon2, Params, Version};
+    use argon2::{Algorithm, Argon2, Block, Params, Version};
 
     params.validate()?;
     let a2params = Params::new(
@@ -54,10 +54,20 @@ pub fn derive_master_key(master_password: &str, params: &KdfParams) -> Result<Sy
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, a2params);
 
+    // Argon2 fills m_cost KiB with blocks computed from the password, and the
+    // last of them give the key. The buffer it allocates itself is freed
+    // without being wiped, so it works in this one, which is.
+    let mut memory = Zeroizing::new(vec![Block::new(); argon2.params().block_count()]);
+
     // Derive into a zeroizing buffer, then move into the key newtype.
     let mut out = Zeroizing::new([0u8; KEY_LEN]);
     argon2
-        .hash_password_into(master_password.as_bytes(), &params.salt, out.as_mut_slice())
+        .hash_password_into_with_memory(
+            master_password.as_bytes(),
+            &params.salt,
+            out.as_mut_slice(),
+            memory.as_mut_slice(),
+        )
         .map_err(|_| Error::KeyDerivation)?;
 
     Ok(SymmetricKey::from_bytes(*out))
@@ -143,5 +153,8 @@ mod tests {
         wiped_when_dropped::<chacha20poly1305::XChaCha20Poly1305>();
         wiped_when_dropped::<p256::ecdsa::SigningKey>();
         wiped_when_dropped::<ed25519_dalek::SigningKey>();
+        // HMAC and HKDF keep their keyed state in these hashes' cores.
+        wiped_when_dropped::<sha2::Sha256>();
+        wiped_when_dropped::<sha1::Sha1>();
     }
 }
