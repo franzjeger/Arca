@@ -151,6 +151,111 @@ pub fn authorized_key_from_blob(public_blob: &[u8], comment: &str) -> Result<Str
     authorized_key_line(public_blob, comment)
 }
 
+// ---------------------------------------------------------------------------
+// Keys people already have
+// ---------------------------------------------------------------------------
+
+/// Why a key file could not be taken into the vault.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyFileError {
+    /// Not an OpenSSH private-key file this can read, or a damaged one.
+    Unreadable,
+    /// A key type the agent does not sign with yet, as it appears on the wire
+    /// (for example `ssh-rsa`).
+    Unsupported(String),
+    /// Encrypted, and the passphrase was missing or wrong.
+    Passphrase,
+}
+
+/// A private-key file in OpenSSH's own format (what `ssh-keygen` writes), as
+/// far as it reads without its passphrase: the public half, which is all it
+/// takes to tell whether the vault holds the key already.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyFile {
+    /// The key type on the wire, e.g. `ssh-ed25519`.
+    pub key_type: String,
+    /// OpenSSH SHA-256 fingerprint, as `ssh-keygen -l` shows it.
+    pub fingerprint: String,
+    /// The key's comment. Empty for an encrypted file, which keeps it in the
+    /// encrypted part.
+    pub comment: String,
+    /// It needs a passphrase to import.
+    pub encrypted: bool,
+}
+
+impl KeyFile {
+    /// Whether the agent can sign with it: Ed25519 only, as for keys Arca
+    /// generates.
+    pub fn supported(&self) -> bool {
+        self.key_type == ALGORITHM
+    }
+}
+
+/// A private key taken out of a key file, in the shape a generated one has.
+pub struct ImportedKey {
+    /// Ed25519 seed (32 bytes): the secret. Store this in the vault.
+    pub private_key: Zeroizing<Vec<u8>>,
+    /// OpenSSH public-key blob, as for a generated key.
+    pub public_blob: Vec<u8>,
+    /// OpenSSH SHA-256 fingerprint.
+    pub fingerprint: String,
+    /// The key's comment, from inside the file.
+    pub comment: String,
+}
+
+/// Read the public half of an OpenSSH private-key file. Needs no passphrase.
+pub fn read_key_file(text: &str) -> std::result::Result<KeyFile, KeyFileError> {
+    let key = ssh_key::PrivateKey::from_openssh(text).map_err(|_| KeyFileError::Unreadable)?;
+    Ok(KeyFile {
+        key_type: key.algorithm().as_str().to_owned(),
+        fingerprint: key
+            .public_key()
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string(),
+        comment: key.comment().to_owned(),
+        encrypted: key.is_encrypted(),
+    })
+}
+
+/// Take the private key out of an OpenSSH private-key file, decrypting it with
+/// `passphrase` when it is encrypted. Ed25519 only; the key the file holds must
+/// be the one its public half names.
+pub fn import_key_file(
+    text: &str,
+    passphrase: Option<&str>,
+) -> std::result::Result<ImportedKey, KeyFileError> {
+    let key = ssh_key::PrivateKey::from_openssh(text).map_err(|_| KeyFileError::Unreadable)?;
+    if key.algorithm().as_str() != ALGORITHM {
+        return Err(KeyFileError::Unsupported(
+            key.algorithm().as_str().to_owned(),
+        ));
+    }
+    let key = if key.is_encrypted() {
+        let passphrase = passphrase.ok_or(KeyFileError::Passphrase)?;
+        key.decrypt(passphrase)
+            .map_err(|_| KeyFileError::Passphrase)?
+    } else {
+        key
+    };
+    let ssh_key::private::KeypairData::Ed25519(pair) = key.key_data() else {
+        return Err(KeyFileError::Unreadable);
+    };
+    let seed = Zeroizing::new(pair.private.to_bytes());
+    let private_key = Zeroizing::new(seed.to_vec());
+    let public_blob = public_blob(&private_key).map_err(|_| KeyFileError::Unreadable)?;
+    // A file whose private half does not give its public half was not written
+    // by ssh-keygen; nothing it holds is trusted.
+    if public_blob != encode_public_blob(&pair.public.0) {
+        return Err(KeyFileError::Unreadable);
+    }
+    Ok(ImportedKey {
+        fingerprint: fingerprint(&public_blob),
+        comment: key.comment().to_owned(),
+        private_key,
+        public_blob,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

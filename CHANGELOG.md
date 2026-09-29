@@ -24,6 +24,12 @@ a device still on 0.6.x cannot sync with the others until it is updated.
 - Import: a Bitwarden CSV export keeps its authenticator codes. The importer
   did not know Bitwarden's `login_totp` column, so every login came in without
   its 2FA code, and nothing said so.
+- SSH: import the keys already in `~/.ssh` (New SSH key → Import from
+  ~/.ssh). Every key is matched by its fingerprint, the one `ssh-keygen -l`
+  shows, so a key Arca already holds, or two copies of one key, is never
+  stored twice; a passphrase-protected key asks for its passphrase once.
+  Ed25519 only, like the agent: other types are listed and left alone. The
+  files stay where they are.
 - Sync: whoever controls the Google account could show an older copy of the
   vault and hide the newer ones, and every device would quietly carry on from
   it. Every copy now records, sealed, how many copies each device has pushed.

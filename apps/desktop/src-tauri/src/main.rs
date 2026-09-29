@@ -18,6 +18,7 @@ mod reauth;
 mod related_origins;
 mod rotation;
 mod session;
+mod ssh_import;
 mod state;
 mod sync;
 
@@ -307,6 +308,8 @@ fn lock_on_blur(window: &tauri::Window, event: &WindowEvent) {
 fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         conflicts::compare_sync_conflict,
+        ssh_import::ssh_import_scan,
+        ssh_import::ssh_import,
         conflicts::reveal_conflict_field,
         conflicts::resolve_sync_conflict,
         conflicts::keep_sync_conflict_copy,

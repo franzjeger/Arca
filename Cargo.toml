@@ -84,6 +84,10 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # ssh CLI; signing stays internal so the private key never leaves the vault.
 # Seeds come from `getrandom` (not dalek's RNG helper), so no `rand_core` feature.
 ed25519-dalek = { version = "2", features = ["zeroize"] }
+# Reading keys people already have in ~/.ssh: the OpenSSH private-key container
+# and its passphrase encryption (bcrypt-pbkdf + AES), RustCrypto. Only parsing;
+# every key it yields is signed with dalek above, like one Arca generated.
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "encryption"] }
 
 # --- serde / data ---
 serde = { version = "1", features = ["derive"] }
