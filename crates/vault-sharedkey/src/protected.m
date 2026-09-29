@@ -37,13 +37,18 @@ int arca_protected_create(const char *account, const unsigned char *bytes) {
   }
 }
 
-int arca_protected_read(const char *account, unsigned char *bytes, int interactive) {
+// `reason` completes the system's "Arca is trying to ..." sentence. A prompt
+// that names the site is what lets one fingerprint both open the vault and
+// approve the sign-in it was asked for. NULL keeps the generic wording.
+int arca_protected_read_because(const char *account, unsigned char *bytes, int interactive,
+                                const char *reason) {
   @autoreleasepool {
     NSMutableDictionary *q = protectedQuery(account);
     if (!q || !bytes) return errSecParam;
     LAContext *context = [[LAContext alloc] init];
     context.interactionNotAllowed = !interactive;
-    context.localizedReason = @"Unlock Arca's protected device key";
+    NSString *said = reason ? [NSString stringWithUTF8String:reason] : nil;
+    context.localizedReason = said.length ? said : @"Unlock Arca's protected device key";
     q[(__bridge id)kSecUseAuthenticationContext] = context;
     q[(__bridge id)kSecReturnData] = @YES;
     CFTypeRef value = NULL;
@@ -56,6 +61,10 @@ int arca_protected_read(const char *account, unsigned char *bytes, int interacti
     [context invalidate];
     return status;
   }
+}
+
+int arca_protected_read(const char *account, unsigned char *bytes, int interactive) {
+  return arca_protected_read_because(account, bytes, interactive, NULL);
 }
 
 int arca_protected_exists(const char *account) {

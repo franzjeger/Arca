@@ -123,6 +123,18 @@ fn current(st: &AppState, generation: u64, vault_path: &Path) -> Result<(), CmdE
 
 /// Runs on a worker, including when invoked by the browser bridge.
 pub fn unlock(state: &Mutex<AppState>, app: Option<&tauri::AppHandle>) -> Result<(), CmdError> {
+    unlock_because(state, app, None)
+}
+
+/// [`unlock`], with the Touch ID prompt saying what it is for: `reason` ends
+/// the system's "Arca is trying to ..." sentence. The browser bridge names the
+/// sign-in or fill a pick asked for, so the one fingerprint that opens the
+/// vault is also the approval of that act.
+pub fn unlock_because(
+    state: &Mutex<AppState>,
+    app: Option<&tauri::AppHandle>,
+    reason: Option<&str>,
+) -> Result<(), CmdError> {
     let _prompt = claim_authentication(&AUTHENTICATION)?;
     {
         let st = state.lock().map_err(|_| failure("Vault unavailable."))?;
@@ -138,14 +150,16 @@ pub fn unlock(state: &Mutex<AppState>, app: Option<&tauri::AppHandle>) -> Result
     let key = match &config {
         Some(Config {
             account: Some(account),
-        }) => SymmetricKey::from_bytes(*protected::read(account).map_err(key_error)?),
+        }) => {
+            SymmetricKey::from_bytes(*protected::read_because(account, reason).map_err(key_error)?)
+        }
         Some(_) => {
             return Err(failure(
                 "Touch ID is disabled. Unlock with your master password.",
             ))
         }
         None => {
-            crate::biometric::authenticate(app, "unlock your password vault")
+            crate::biometric::authenticate(app, reason.unwrap_or("unlock your password vault"))
                 .map_err(|message| CmdError::new("biometric_failed", &message))?;
             let st = state.lock().map_err(|_| failure("Vault unavailable."))?;
             current(&st, generation, &vault_path)?;

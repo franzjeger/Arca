@@ -136,10 +136,11 @@ pub mod protected {
 
     unsafe extern "C" {
         fn arca_protected_create(account: *const std::ffi::c_char, key: *const u8) -> i32;
-        fn arca_protected_read(
+        fn arca_protected_read_because(
             account: *const std::ffi::c_char,
             key: *mut u8,
             interactive: i32,
+            reason: *const std::ffi::c_char,
         ) -> i32;
         fn arca_protected_exists(account: *const std::ffi::c_char) -> i32;
         fn arca_protected_delete(account: *const std::ffi::c_char) -> i32;
@@ -163,10 +164,21 @@ pub mod protected {
         result(unsafe { arca_protected_create(name.as_ptr(), key.as_ptr()) })
     }
     pub fn read(name: &str) -> Result<Zeroizing<[u8; 32]>, i32> {
+        read_because(name, None)
+    }
+    /// The key, behind a Touch ID prompt that ends the system's "Arca is
+    /// trying to ..." with `reason`, such as "sign in to github.com". `None`
+    /// keeps the generic wording.
+    pub fn read_because(name: &str, reason: Option<&str>) -> Result<Zeroizing<[u8; 32]>, i32> {
         let name = account(name)?;
+        let reason = reason.map(CString::new).transpose().map_err(|_| -50)?;
         let mut key = Zeroizing::new([0u8; 32]);
-        // SAFETY: the output has exactly the 32 writable bytes required by the shim.
-        result(unsafe { arca_protected_read(name.as_ptr(), key.as_mut_ptr(), 1) })?;
+        let reason_ptr = reason.as_ref().map_or(std::ptr::null(), |r| r.as_ptr());
+        // SAFETY: the output has exactly the 32 writable bytes required by the
+        // shim, and both strings outlive this synchronous call.
+        result(unsafe {
+            arca_protected_read_because(name.as_ptr(), key.as_mut_ptr(), 1, reason_ptr)
+        })?;
         Ok(key)
     }
     pub fn exists(name: &str) -> Result<bool, i32> {
