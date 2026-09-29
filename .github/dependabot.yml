@@ -10,6 +10,10 @@ updates:
     open-pull-requests-limit: 3
   # Security fixes arrive as their own pull requests whatever the grouping;
   # routine minor and patch bumps come as one per ecosystem each week.
+  #
+  # Tauri's npm packages and its crates must stay on the same minor release,
+  # and they arrive in the cargo and npm groups below: merge those two pull
+  # requests together. CI's packaging job refuses either one alone.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -17,6 +21,31 @@ updates:
     groups:
       rust:
         update-types: [minor, patch]
+      # The RustCrypto crates move their shared traits together: a new major
+      # of one (hkdf 0.13) needs the same of the others (hmac 0.13, sha2
+      # 0.11), so one alone does not build. They come as one pull request,
+      # which must also show that existing vault files still open.
+      rustcrypto:
+        patterns:
+          - aead
+          - aes
+          - argon2
+          - chacha20poly1305
+          - cipher
+          - ctr
+          - digest
+          - ecdsa
+          - ed25519-dalek
+          - elliptic-curve
+          - hkdf
+          - hmac
+          - p256
+          - rand_core
+          - sha1
+          - sha2
+          - signature
+          - ssh-key
+        update-types: [major]
     open-pull-requests-limit: 5
   - package-ecosystem: npm
     directory: /apps/desktop
@@ -25,4 +54,12 @@ updates:
     groups:
       desktop-ui:
         update-types: [minor, patch]
+      # These only work in step: React with its DOM and type packages, Vite
+      # with its React plugin and vitest.
+      react:
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
+        update-types: [major]
+      vite:
+        patterns: ["vite", "@vitejs/*", "vitest", "@vitest/*"]
+        update-types: [major]
     open-pull-requests-limit: 5
