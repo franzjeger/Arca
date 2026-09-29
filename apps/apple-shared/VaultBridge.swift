@@ -25,6 +25,7 @@
 // by nature. The queue also supplies the guarantee vault_ffi.h asks for —
 // `vault_ffi_vault_free` never overlaps another call on the same handle.
 
+import CryptoKit
 import Foundation
 import LocalAuthentication
 import Security
@@ -85,11 +86,14 @@ enum VaultShared {
     /// for taking on one made on another device; v19 added
     /// `vault_ffi_vault_load`, so a locked phone can take that change on with
     /// the new password alone; v20 made every copy say how often each device
-    /// has pushed it (`vault_ffi_sync_set_device`, `vault_ffi_devices`).
+    /// has pushed it (`vault_ffi_sync_set_device`, `vault_ffi_devices`); v21
+    /// lets a phone keep the copy that carries a change and take it on from
+    /// there (`vault_ffi_sync_rotated_copy`, `vault_ffi_vault_adopt`,
+    /// `vault_ffi_vault_key_epoch`).
     /// Bump this in the SAME commit that bumps `ABI_VERSION`: nothing compiles
     /// against it, so a stale value is only ever caught at runtime, by this
     /// guard, on a device.
-    static let requiredAbiVersion: Int32 = 20
+    static let requiredAbiVersion: Int32 = 21
 
     // MARK: Password generation
 
@@ -115,6 +119,20 @@ enum VaultShared {
             vault_ffi_vault_check(buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count)
         }
         return code == VaultFFICode.ok
+    }
+
+    /// The key epoch a vault file's header names: how many master password
+    /// changes the vault had been through when that copy was sealed. Nil for
+    /// bytes this build does not read as a vault. Unauthenticated, so only for
+    /// comparing copies, never for trusting one.
+    static func keyEpoch(of bytes: Data) -> UInt64? {
+        guard !bytes.isEmpty, (try? requireMatchingAbi()) != nil else { return nil }
+        var epoch: UInt64 = 0
+        let code = bytes.withUnsafeBytes { buffer in
+            vault_ffi_vault_key_epoch(
+                buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count, &epoch)
+        }
+        return code == VaultFFICode.ok ? epoch : nil
     }
 
     /// Generate a password satisfying a site's Password Rules string.
@@ -353,6 +371,102 @@ enum VaultShared {
                 ? VaultError.containerNotPermitted
                 : VaultError.vaultWriteFailed(code: error.code)
         }
+    }
+}
+
+// MARK: - A password change made elsewhere, kept
+
+/// A master password change made on another device that this device has not
+/// taken on yet: the copy of the vault that carries it, kept beside the vault
+/// and never synced. While it is there only the new password opens the vault
+/// here, and nothing that wrapped the old key does: the app removes the device
+/// key when it keeps a copy, and the AutoFill extension refuses to open. The
+/// rules are the desktop's (`pending_change`).
+///
+/// Such a copy is not proof. The key that could prove it is the one this device
+/// lacks, and whoever can write to the Google account can put a copy there. So
+/// the user can deny it with the password they have and the phone's own Face ID
+/// or passcode, and that copy never blocks this device again.
+struct PendingPasswordChange: Sendable {
+    let directory: URL
+
+    /// Beside the shared vault, where the app and its extension both look.
+    static var shared: PendingPasswordChange? {
+        VaultShared.vaultURL.map { PendingPasswordChange(directory: $0.deletingLastPathComponent()) }
+    }
+
+    private var pendingURL: URL { directory.appending(path: "pending-password-change.vault") }
+    private var deniedURL: URL { directory.appending(path: "denied-password-change") }
+    private var vaultURL: URL { directory.appending(path: VaultShared.vaultFileName) }
+
+    /// The key epoch of the vault this device holds, or nil if it cannot be
+    /// read right now.
+    private var localEpoch: UInt64? {
+        (try? Data(contentsOf: vaultURL)).flatMap(VaultShared.keyEpoch(of:))
+    }
+
+    /// Keep `copy`, sealed after a change this vault has not taken on, unless
+    /// it is one the user denied or it is not ahead of the vault. Returns
+    /// whether it was kept now, which is when the device key has to go.
+    @discardableResult
+    func record(_ copy: Data) -> Bool {
+        guard let theirs = VaultShared.keyEpoch(of: copy), let ours = localEpoch,
+              theirs > ours, !isDenied(copy)
+        else { return false }
+        // The same copy again is nothing new, and an earlier change never
+        // replaces a later one.
+        if let kept = pending() {
+            if kept == copy { return false }
+            if let keptEpoch = VaultShared.keyEpoch(of: kept), keptEpoch > theirs { return false }
+        }
+        return (try? write(copy, to: pendingURL)) != nil
+    }
+
+    /// The kept copy while it is still ahead of the vault. One that no longer
+    /// reads as a vault, or that the vault has caught up with, is removed; a
+    /// vault that cannot be read right now removes nothing, because failing
+    /// open is exactly what this exists to prevent.
+    func pending() -> Data? {
+        guard let copy = try? Data(contentsOf: pendingURL) else { return nil }
+        guard let theirs = VaultShared.keyEpoch(of: copy) else {
+            clear()
+            return nil
+        }
+        if let ours = localEpoch, theirs <= ours {
+            clear()
+            return nil
+        }
+        return copy
+    }
+
+    /// The change was taken on.
+    func clear() {
+        try? FileManager.default.removeItem(at: pendingURL)
+    }
+
+    /// The user did not make this change: set the kept copy aside for good.
+    func deny() throws {
+        if let copy = pending() {
+            try write(Data(Self.fingerprint(copy).utf8), to: deniedURL)
+        }
+        clear()
+    }
+
+    func isDenied(_ copy: Data) -> Bool {
+        guard let denied = try? String(contentsOf: deniedURL, encoding: .utf8) else { return false }
+        return denied.trimmingCharacters(in: .whitespacesAndNewlines) == Self.fingerprint(copy)
+    }
+
+    private static func fingerprint(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func write(_ bytes: Data, to url: URL) throws {
+        #if os(iOS)
+        try bytes.write(to: url, options: [.atomic, .completeFileProtection])
+        #else
+        try bytes.write(to: url, options: [.atomic])
+        #endif
     }
 }
 
@@ -739,6 +853,41 @@ final class VaultSession: @unchecked Sendable {
             }
             return VaultSession(handle: handle)
         }
+    }
+
+    /// Open the vault with a master password changed on another device, from
+    /// the copy this device kept (see `PendingPasswordChange`): the vault is
+    /// loaded unopened, the change taken on with `password`, and the vault
+    /// written back under the new key. Needs no network. Face ID wrapped the
+    /// old key: if it was on, a new device key wraps the new one, which needs
+    /// no prompt.
+    static func adoptKeptChange(_ copy: Data, password: String) async throws -> VaultSession {
+        let session = try await loadLocked()
+        let hadQuickUnlock = await session.hasDeviceUnlock()
+        try await Self.run {
+            let code = copy.withUnsafeBytes { buffer in
+                password.withCString {
+                    vault_ffi_vault_adopt(
+                        session.handle, buffer.bindMemory(to: UInt8.self).baseAddress,
+                        buffer.count, $0)
+                }
+            }
+            guard code == VaultFFICode.ok else {
+                throw VaultError.ffi(code: code, operation: "vault_adopt")
+            }
+            try session.writeMerged()
+        }
+        if hadQuickUnlock { try? await session.enableDeviceUnlock() }
+        return session
+    }
+
+    /// Ask for the phone's owner, by Face ID or the device passcode, not for
+    /// anything the vault holds. What denying a password change needs on top of
+    /// the password: knowing an old password must not be enough.
+    static func confirmDeviceOwner(reason: String) async throws {
+        let context = LAContext()
+        defer { context.invalidate() }
+        try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
     }
 
     // MARK: Reading
@@ -1419,6 +1568,30 @@ final class VaultSession: @unchecked Sendable {
             } catch {
                 throw VaultError.malformedIdentities
             }
+        }
+    }
+
+    /// Write this handle's vault to the file: under the vault lock, fold in
+    /// whatever is on disk NOW and serialize that, so merge and write are one
+    /// step no other process can split. Call on the vault queue.
+    func writeMerged() throws {
+        try VaultShared.withVaultLock {
+            let disk = (try? VaultShared.loadVault()) ?? Data()
+            var merged: UnsafeMutablePointer<UInt8>?
+            var mergedLength = 0
+            let mergeCode = disk.withUnsafeBytes { buf in
+                vault_ffi_merge_and_serialize(
+                    self.handle,
+                    buf.bindMemory(to: UInt8.self).baseAddress,
+                    buf.count,
+                    &merged,
+                    &mergedLength)
+            }
+            guard mergeCode == VaultFFICode.ok, let merged, mergedLength > 0 else {
+                throw VaultError.ffi(code: mergeCode, operation: "merge_and_serialize")
+            }
+            defer { vault_ffi_free(merged, mergedLength) }
+            try VaultShared.writeVault(Data(bytes: merged, count: mergedLength))
         }
     }
 

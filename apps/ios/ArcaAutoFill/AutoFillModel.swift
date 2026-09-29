@@ -149,6 +149,14 @@ final class AutoFillModel {
         _ makeSession: @Sendable () async throws -> VaultSession
     ) async {
         guard phase != .unlocking else { return }
+        // A master password change made elsewhere that the app kept: only the
+        // app, with the new password, opens the vault now (see
+        // `PendingPasswordChange`). Asked before any Face ID sheet, too.
+        if PendingPasswordChange.shared?.pending() != nil {
+            failure = "Your master password was changed on another device. Open Arca and enter the new one."
+            phase = .locked
+            return
+        }
         phase = .unlocking
         failure = nil
         do {
