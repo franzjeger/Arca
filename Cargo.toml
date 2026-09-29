@@ -64,7 +64,7 @@ vault-bridge = { path = "crates/vault-bridge" }
 
 # --- crypto (audited RustCrypto crates only; no custom primitives) ---
 argon2 = "0.5"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 subtle = "2.6"
 hmac = "0.12"
