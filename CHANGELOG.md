@@ -7,6 +7,12 @@ and earlier refuse to open, and the iOS app needs this release's library
 (C ABI v20). Update Arca on every computer and phone before any of them syncs:
 a device still on 0.6.x cannot sync with the others until it is updated.
 
+- iOS: when Face ID cannot open the vault, the unlock screen says why and
+  waits for the master password. It asked for Face ID again the moment the
+  prompt closed, for ever, so the password field was never reachable. A
+  phone that last ran an older build meets this once after updating: its
+  vault file predates authenticated containers, which Face ID no longer
+  opens. The master password opens and upgrades it, and Face ID works again.
 - Import: a Bitwarden CSV export keeps its authenticator codes. The importer
   did not know Bitwarden's `login_totp` column, so every login came in without
   its 2FA code, and nothing said so.
