@@ -796,6 +796,14 @@ async fn authenticate_off_main(
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 pub async fn quick_unlock(app: tauri::AppHandle, state: St<'_>) -> Result<(), CmdError> {
+    // Quick unlock wrapped the key a change made elsewhere replaced. Asked
+    // before the prompt, and the guard is gone before anything awaits.
+    {
+        let st = guard(state.inner())?;
+        if crate::pending_change::pending(&st).is_some() {
+            return Err(vault_core::Error::KeyRotated.into());
+        }
+    }
     // Prompt for Touch ID / Windows Hello *before* taking the state lock — the
     // prompt blocks on user interaction, and we must not freeze other commands
     // meanwhile. This app-layer biometric is the single gate on ALL platforms:
@@ -803,10 +811,6 @@ pub async fn quick_unlock(app: tauri::AppHandle, state: St<'_>) -> Result<(), Cm
     // biometric is enforced here rather than by a per-item keychain access
     // control (that macOS variant broke unlock under dev signing — see
     // vault-store::keychain). No-op on platforms without a biometric provider.
-    // Quick unlock wrapped the key a change made elsewhere replaced.
-    if crate::pending_change::pending(&guard(state.inner())?).is_some() {
-        return Err(vault_core::Error::KeyRotated.into());
-    }
     authenticate_off_main(app.clone(), "unlock your password vault").await?;
 
     let mut st = guard(state.inner())?;
