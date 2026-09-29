@@ -22,6 +22,9 @@ export interface VaultStatus {
   quickUnlockProtected?: boolean;
   /** A USB key file is enrolled for this vault. Absent/null otherwise. */
   keyFile?: KeyFileStatus | null;
+  /** The master password was changed on another device and this computer
+   *  knows it: only the new one opens the vault, and no quick unlock does. */
+  passwordChangePending?: boolean;
 }
 
 export interface KeyFileStatus {
@@ -431,6 +434,10 @@ export const api = {
   /** Take on a master password change made on another device. Opens a locked vault too. */
   syncAdoptPassword: (password: string) =>
     invoke<Rekeyed>("sync_adopt_password", { password }),
+  /** The user did not make the change sync kept: the previous password, and
+   *  the computer's own verification, open the vault as before. */
+  denyPasswordChange: (masterPassword: string) =>
+    invoke<Rekeyed>("deny_password_change", { masterPassword }),
   syncConnect: () => invoke<string>("sync_connect"),
   syncDisconnect: () => invoke<void>("sync_disconnect"),
   syncStatus: () => invoke<SyncStatus>("sync_status"),

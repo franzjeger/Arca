@@ -11,6 +11,7 @@ mod clipboard;
 mod commands;
 mod conflicts;
 mod keyfile_unlock;
+mod pending_change;
 #[cfg(target_os = "macos")]
 mod protected_unlock;
 mod reauth;
@@ -333,6 +334,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         keyfile_unlock::keyfile_unlock,
         commands::change_master_password,
         commands::sync_adopt_password,
+        commands::deny_password_change,
         commands::sync_connect,
         commands::sync_disconnect,
         commands::sync_status,

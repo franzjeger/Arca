@@ -61,7 +61,7 @@ Current source version: **0.7.0** — see [`CHANGELOG.md`](./CHANGELOG.md)
 | **macOS** | Daily driver. Signed + notarizable releases, see [`docs/RELEASING.md`](./docs/RELEASING.md). |
 | **Windows** | Working, including the ssh-agent named pipe. Built in CI. |
 | **Linux** | First run by a human on 2026-08-01, on CachyOS (KDE Plasma on Wayland, NVIDIA): builds from source, unlocks, saves, snapshots. The `.deb`/`.rpm` ship the native-messaging host and register it for Chromium-family browsers and Firefox, asserted by the `linux-package` job; the host-to-app handshake is verified, in-page autofill is not yet. Unlock without the master password with a USB key ([docs/KEYFILE-UNLOCK.md](docs/KEYFILE-UNLOCK.md)) — Linux's stand-in for Touch ID; the same stick also works on macOS and Windows. Still no Linux release artifact: build from source. |
-| **iOS** | Running on a phone since 2026-07-28: unlock, Face ID, search, add/edit/delete logins, passkey registration, an AutoFill provider, and Google Drive sync both ways (C ABI v20). Sideloaded — no TestFlight. See [`docs/IOS.md`](./docs/IOS.md). |
+| **iOS** | Running on a phone since 2026-07-28: unlock, Face ID, search, add/edit/delete logins, passkey registration, an AutoFill provider, and Google Drive sync both ways (C ABI v21). Distributed to its testers through TestFlight. See [`docs/IOS.md`](./docs/IOS.md). |
 | **Android** | Not built. |
 | **System-wide macOS AutoFill** | Native passwords and passkeys, including registration, are embedded in locally development-signed builds. Requires local provisioning and enabling Arca in system settings. See [macOS setup](apps/macos/README.md) and [manual acceptance checks](docs/MACOS-PASSKEYS.md). |
 
@@ -85,7 +85,7 @@ crates/
 ├── vault-store/      Atomic single-file persistence, rotating snapshots,
 │                     OS-keychain quick unlock.
 ├── vault-ffi/        C ABI over the core, for native platform integrations
-│                     (Swift). ABI v20, including sync and locked read-modify-write.
+│                     (Swift). ABI v21, including sync and locked read-modify-write.
 ├── vault-secmem/     mlock'd buffers for key material.
 ├── vault-appgroup/   macOS App Group container resolution (one isolated
 │                     Objective-C call, so the app crate stays unsafe-free).

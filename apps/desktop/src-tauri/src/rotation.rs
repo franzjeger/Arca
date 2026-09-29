@@ -92,12 +92,43 @@ pub fn adopt(state: &Mutex<AppState>, copy: &[u8], password: &str) -> Result<boo
     })?;
     let touch_id = restore_silently(&mut st, had_quick_unlock);
     persist(&mut st)?;
+    crate::pending_change::clear(&st.store);
     if was_locked {
         st.unlock_generation = st.unlock_generation.wrapping_add(1);
     }
     st.touch();
     drop(st);
     crate::sync::rotation_adopted();
+    Ok(touch_id)
+}
+
+/// The user says they did not make the change the kept copy claims (see
+/// `pending_change`): the previous password opens the vault as before, the copy
+/// is set aside for good, and quick unlock, removed when the copy was found,
+/// comes back. The caller has already had this computer verify its owner.
+pub fn deny(state: &Mutex<AppState>, password: &str) -> Result<bool, CmdError> {
+    let mut st = write_guard(state)?;
+    if crate::pending_change::pending(&st).is_none() {
+        return Err(CmdError::new(
+            "no_password_change",
+            "No master password change is waiting.",
+        ));
+    }
+    if st.vault.is_none() && st.store.exists() {
+        st.vault = Some(st.store.load()?);
+    }
+    let vault = st.vault_mut()?;
+    let was_locked = !vault.is_unlocked();
+    vault.unlock(password)?;
+    let had_quick_unlock = vault.has_device_unlock();
+    crate::pending_change::deny(&st)
+        .map_err(|_| CmdError::new("io", "Could not record that the change was not yours."))?;
+    let touch_id = restore_silently(&mut st, had_quick_unlock);
+    persist(&mut st)?;
+    if was_locked {
+        st.unlock_generation = st.unlock_generation.wrapping_add(1);
+    }
+    st.touch();
     Ok(touch_id)
 }
 

@@ -41,6 +41,16 @@ final class VaultStore {
     private(set) var identities: [VaultIdentity] = []
     /// The last failure, already phrased for a person.
     private(set) var failure: String?
+
+    /// A master password change made on another device that this phone kept
+    /// (see `PendingPasswordChange`): only the new password opens the vault
+    /// here, and Face ID is gone until it has.
+    private(set) var passwordChangeKept = false
+
+    /// The last password tried was the one a kept change replaced. Either
+    /// habit or a change the user never made; the unlock screen offers the way
+    /// out for the second (`denyPasswordChange`).
+    private(set) var previousPasswordTyped = false
     /// Whether AutoFill is switched on for Arca in Settings. `nil` until an
     /// unlock has actually asked, so the UI can stay quiet rather than guess.
     private(set) var autoFillEnabled: Bool?
@@ -147,6 +157,7 @@ final class VaultStore {
     func refresh() {
         guard phase != .unlocked, phase != .unlocking else { return }
         phase = VaultFile.exists ? .locked : .needsVault
+        passwordChangeKept = PendingPasswordChange.shared?.pending() != nil
         refreshQuickUnlockAvailability()
     }
 
@@ -175,6 +186,9 @@ final class VaultStore {
         // Argon2id with the vault header's parameters — hundreds of
         // milliseconds, off the main actor inside VaultSession.
         await open(fallback: "Couldn't unlock the vault.") {
+            if let kept = PendingPasswordChange.shared, let copy = kept.pending() {
+                return try await Self.openKeptChange(copy, password: password, kept: kept)
+            }
             do {
                 return try await VaultSession.openWithMasterPassword(password)
             } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
@@ -195,6 +209,57 @@ final class VaultStore {
 
     private struct WrongPassword: LocalizedError {
         var errorDescription: String? { "Wrong master password." }
+    }
+
+    /// Only the new password opens a phone that kept a change made elsewhere,
+    /// and opening takes the change on, offline too. The password the change
+    /// replaced is refused, and says so.
+    private static func openKeptChange(
+        _ copy: Data, password: String, kept: PendingPasswordChange
+    ) async throws -> VaultSession {
+        do {
+            let session = try await VaultSession.adoptKeptChange(copy, password: password)
+            kept.clear()
+            return session
+        } catch VaultError.ffi(let code, _) where code == VaultFFICode.decryptionFailed {
+            if (try? await VaultSession.openWithMasterPassword(password)) != nil {
+                throw PreviousPassword()
+            }
+            throw WrongPassword()
+        } catch VaultError.ffi(let code, _) where code == VaultFFICode.notFound {
+            // The vault caught up another way: nothing is pending after all.
+            kept.clear()
+            return try await VaultSession.openWithMasterPassword(password)
+        }
+    }
+
+    private struct PreviousPassword: LocalizedError {
+        var errorDescription: String? {
+            "That is your previous master password. It was changed on another device: enter the new one."
+        }
+    }
+
+    /// The user did not make the change this phone kept. The phone's owner, by
+    /// Face ID or passcode, and the password they have open the vault as
+    /// before; that copy is set aside for good, and Face ID comes back if it
+    /// was on.
+    func denyPasswordChange(password: String) async {
+        guard let kept = PendingPasswordChange.shared, kept.pending() != nil else { return }
+        do {
+            try await VaultSession.confirmDeviceOwner(
+                reason: "confirm you did not change your master password")
+        } catch {
+            failure = "Arca could not confirm it is you."
+            return
+        }
+        await open(fallback: "Couldn't unlock the vault.") {
+            let session = try await VaultSession.openWithMasterPassword(password)
+            try kept.deny()
+            if await session.hasDeviceUnlock() { try? await session.enableDeviceUnlock() }
+            return session
+        }
+        passwordChangeKept = kept.pending() != nil
+        refreshQuickUnlockAvailability()
     }
 
     /// Unlock with the stored device key, behind Face ID / Touch ID.
@@ -225,6 +290,7 @@ final class VaultStore {
         guard phase != .unlocking, phase != .unlocked, let token = lifetime.begin() else { return }
         phase = .unlocking
         failure = nil
+        previousPasswordTyped = false
         do {
             let session = try await makeSession()
             guard lifetime.accepts(token) else { return }
@@ -233,6 +299,7 @@ final class VaultStore {
             let quickUnlock = await session.hasDeviceUnlock()
             guard lifetime.accepts(token) else { return }
             quickUnlockEnabled = quickUnlock
+            passwordChangeKept = PendingPasswordChange.shared?.pending() != nil
             phase = .unlocked
             // After the phase flip on purpose: this is what puts Arca in the
             // QuickType bar, and it is metadata only, so nobody should be made
@@ -249,6 +316,7 @@ final class VaultStore {
             lock()
             log.error("unlock failed: \(vaultLogMessage(for: error), privacy: .public)")
             failure = Self.cancelled(error) ? nil : Self.message(error, fallback: fallback)
+            previousPasswordTyped = error is PreviousPassword
             phase = VaultFile.exists ? .locked : .needsVault
         }
     }
@@ -352,6 +420,8 @@ final class VaultStore {
         lifetime.invalidate()
         syncing = false
         quickUnlockEnabled = false
+        previousPasswordTyped = false
+        passwordChangeKept = PendingPasswordChange.shared?.pending() != nil
         passkeyIdentities = []
         leftAt = nil
         // NOT clearing the credential identity store: it holds no secrets, and
@@ -586,6 +656,18 @@ final class VaultStore {
             }
     }
 
+    /// Sync found a master password change made on another device. Keep the
+    /// copy that carries it: from now on only the new password opens this
+    /// phone, and Face ID, which wrapped the old key, is gone until it has.
+    private func keepPasswordChange(from sync: VaultSync) async {
+        guard let kept = PendingPasswordChange.shared, let copy = await sync.rotatedCopy(),
+              kept.record(copy)
+        else { return }
+        VaultSession.forgetDeviceKey()
+        passwordChangeKept = true
+        await resolveQuickUnlockAvailability()
+    }
+
     /// Build the engine for a freshly opened vault and, if this device is
     /// already signed in, reconnect and pull.
     private func startSync(_ session: VaultSession) async {
@@ -626,6 +708,7 @@ final class VaultStore {
             let status = try await sync.syncNow()
             guard self.session === session else { return }
             syncStatus = status
+            if status.needsPassword == true { await keepPasswordChange(from: sync) }
             // A merge rewrote the vault file AND the shared in-memory vault, so
             // the list on screen is now behind what the engine already holds.
             if status.merged { await reload(session) }

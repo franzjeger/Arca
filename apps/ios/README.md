@@ -2,7 +2,7 @@
 
 SwiftUI app and AutoFill Credential Provider over the shared Rust vault core.
 The project has run on an iPhone since 2026-07-28. Current source is **0.7.0**,
-with **C ABI v20**; that is separate from the version installed on a device.
+with **C ABI v21**; that is separate from the version installed on a device.
 
 ## Implemented
 
