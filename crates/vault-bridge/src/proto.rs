@@ -45,6 +45,13 @@ pub enum Request {
     Fill {
         id: String,
         url: String,
+        /// The user picked this login in Arca's own list, with a trusted
+        /// click. With the vault locked the desktop then opens it for this
+        /// fill, behind one prompt that names the site, instead of answering
+        /// "locked" and making the user pick again. Absent from older clients,
+        /// which get "locked" as before.
+        #[serde(default)]
+        picked: bool,
     },
     /// Register a new WebAuthn passkey (navigator.credentials.create).
     PasskeyCreate {

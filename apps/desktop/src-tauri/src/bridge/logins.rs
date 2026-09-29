@@ -205,7 +205,22 @@ pub(super) fn list_matches(ctx: &mut Ctx, url: String) -> Response {
     Response::Logins { items }
 }
 
-pub(super) fn fill(ctx: &mut Ctx, id: String, url: String) -> Response {
+pub(super) fn fill(ctx: &mut Ctx, id: String, url: String, picked: bool) -> Response {
+    // Picked in Arca's list with the vault locked: open it for this fill,
+    // behind one prompt that names the site, and go on with the same login.
+    // That fingerprint is also the approval a per-fill confirmation asks for,
+    // so it is not asked again below.
+    let mut verified = false;
+    if picked {
+        match (ctx.unlock)(&format!("fill your password on {}", host_of(&url))) {
+            RequestUnlock::Verified => verified = true,
+            RequestUnlock::AlreadyOpen | RequestUnlock::Unattended => {}
+            RequestUnlock::Declined => return error("unlock_cancelled"),
+            // The window is asking for the master password; the extension
+            // waits for it and sends this same fill again.
+            RequestUnlock::Window => return error("unlocking"),
+        }
+    }
     let state = ctx.state;
     let app = ctx.app;
     let consent = &mut *ctx.consent;
@@ -260,7 +275,7 @@ pub(super) fn fill(ctx: &mut Ctx, id: String, url: String) -> Response {
     }
 
     // Optional per-fill consent: the app is the final approver.
-    if confirm {
+    if confirm && !verified {
         let ctx = ConsentContext {
             site: host_of(&url),
             account: username.clone(),

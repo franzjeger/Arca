@@ -302,6 +302,12 @@ pub(super) fn passkey_get(
     if !rp_id_allows_origin(&rp_id, &origin) {
         return error("origin_mismatch");
     }
+    let cooldown_key = format!("{rp_id}/get");
+    let verified_by_unlock =
+        match open_for_sign_in(state, app, &mut *ctx.unlock, &rp_id, &cooldown_key) {
+            Ok(verified) => verified,
+            Err(response) => return response,
+        };
     // Discover eligible accounts without choosing the first matching key.
     let choices = match passkey_choices(state, &rp_id, &allow_credentials) {
         Ok(choices) => choices,
@@ -353,13 +359,21 @@ pub(super) fn passkey_get(
     // which relying parties trust for step-up defenses. `false` = this
     // is a sign-in, so the prompt says "sign in" (not "create").
     let require_password = passkey_reprompt(state);
-    let Some(user_verified) =
-        approve_passkey(&rp_id, false, app, consent, confirmed, require_password)
-    else {
-        // Cancelled, or a biometric prompt that never came back — which
-        // looks to the user like the browser hanging on the sign-in.
-        log_passkey_outcome(state, &rp_id, "declined_or_no_verification");
-        return error("denied");
+    let user_verified = if verified_by_unlock && !require_password {
+        // The prompt that opened the vault said "sign in to <rp_id>" a moment
+        // ago: that was the user verifying this sign-in.
+        clear_passkey_decline(&cooldown_key);
+        true
+    } else {
+        let Some(user_verified) =
+            approve_passkey(&rp_id, false, app, consent, confirmed, require_password)
+        else {
+            // Cancelled, or a biometric prompt that never came back — which
+            // looks to the user like the browser hanging on the sign-in.
+            log_passkey_outcome(state, &rp_id, "declined_or_no_verification");
+            return error("denied");
+        };
+        user_verified
     };
 
     // The prompt can outlast the vault, exactly as it can for a fill:
@@ -391,6 +405,52 @@ pub(super) fn passkey_get(
         authenticator_data,
         signature,
         user_handle,
+    }
+}
+
+/// With the vault locked, open it for a sign-in: one prompt that says "sign in
+/// to <site>", and the request goes on. Whether that prompt verified the user,
+/// or the answer to give when the vault did not open.
+///
+/// The fingerprint that opens the vault is the user verification the assertion
+/// needs, so the caller does not ask for it twice. The relay used to open the
+/// vault as a step of its own first, and the sign-in then asked again.
+///
+/// A site the user keeps declining is muted as before, and a declined unlock
+/// counts: a background tab re-firing its request must not become a stream of
+/// Touch ID sheets.
+fn open_for_sign_in(
+    state: &Mutex<AppState>,
+    app: Option<&AppHandle>,
+    unlock: &mut dyn FnMut(&str) -> RequestUnlock,
+    rp_id: &str,
+    cooldown_key: &str,
+) -> Result<bool, Response> {
+    if app.is_some() && passkey_suppressed(cooldown_key) {
+        log_passkey_outcome(state, rp_id, "suppressed");
+        return Err(error("denied"));
+    }
+    match unlock(&format!("sign in to {rp_id}")) {
+        RequestUnlock::Verified => Ok(true),
+        RequestUnlock::AlreadyOpen | RequestUnlock::Unattended => Ok(false),
+        RequestUnlock::Declined => {
+            log_passkey_outcome(state, rp_id, "declined_unlock");
+            if let Some(app) = app {
+                if record_passkey_decline(cooldown_key) {
+                    let _ = app.emit(
+                        "passkey-suppressed",
+                        PasskeySuppressedDto {
+                            site: rp_id.to_string(),
+                            is_create: false,
+                        },
+                    );
+                }
+            }
+            Err(error("unlock_cancelled"))
+        }
+        // The window asks for the master password; the relay waits for it and
+        // sends this same request again.
+        RequestUnlock::Window => Err(error("unlocking")),
     }
 }
 

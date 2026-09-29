@@ -503,6 +503,7 @@ fn a_trashed_login_is_neither_filled_nor_read_nor_deleted_twice() {
             Request::Fill {
                 id: id.clone(),
                 url: "https://github.com/login".into(),
+                picked: false,
             },
             &mut authed,
         ),
@@ -526,6 +527,7 @@ fn a_trashed_login_is_neither_filled_nor_read_nor_deleted_twice() {
             Request::Fill {
                 id: id.clone(),
                 url: "https://github.com/login".into(),
+                picked: false,
             },
             &mut authed,
         ),
@@ -720,6 +722,7 @@ fn browser_use_resets_the_idle_timer_but_polling_does_not() {
         Request::Fill {
             id: "x".into(),
             url: "https://github.com".into(),
+            picked: false,
         },
         Request::SaveLogin {
             url: "https://github.com".into(),
@@ -1001,6 +1004,7 @@ fn match_and_fill_respect_origin_and_unlock() {
         Request::Fill {
             id: gh.clone(),
             url: "https://github.com/login".into(),
+            picked: false,
         },
         &state,
         "t",
@@ -1021,6 +1025,7 @@ fn match_and_fill_respect_origin_and_unlock() {
         Request::Fill {
             id: gh.clone(),
             url: "https://evil.com".into(),
+            picked: false,
         },
         &state,
         "t",
@@ -1043,6 +1048,7 @@ fn match_and_fill_respect_origin_and_unlock() {
         Request::Fill {
             id: gh,
             url: "https://github.com".into(),
+            picked: false,
         },
         &state,
         "t",
@@ -1113,6 +1119,7 @@ fn fill_requires_consent_when_confirm_is_enabled() {
         Request::Fill {
             id: gh.clone(),
             url: "https://github.com".into(),
+            picked: false,
         },
         &state,
         "t",
@@ -1132,6 +1139,7 @@ fn fill_requires_consent_when_confirm_is_enabled() {
         Request::Fill {
             id: gh,
             url: "https://github.com/login".into(),
+            picked: false,
         },
         &state,
         "t",
@@ -1659,6 +1667,7 @@ fn a_refused_request_does_not_reset_the_idle_timer() {
         Request::Fill {
             id: Uuid::new_v4().to_string(),
             url: "https://example.com".into(),
+            picked: false,
         },
         &state,
         "t",
@@ -2110,4 +2119,215 @@ fn passkey_create_for_a_known_account_is_refused_without_an_exclude_list() {
         matches!(resp, Response::PasskeyCredential { .. }),
         "a distinct user handle must not be blocked, got {resp:?}"
     );
+}
+
+// ---- one prompt for a pick made while locked --------------------------------
+
+fn lock_vault(state: &Mutex<AppState>) {
+    state
+        .lock()
+        .unwrap()
+        .vault
+        .as_mut()
+        .unwrap()
+        .lock()
+        .unwrap();
+}
+
+/// Answers a request's unlock prompt as the person at the Mac does with Touch
+/// ID: an open vault asks nothing; a locked one is opened and the user is
+/// verified. Records what each prompt said.
+fn fingerprint<'a>(
+    state: &'a Mutex<AppState>,
+    prompts: &'a mut Vec<String>,
+) -> impl FnMut(&str) -> RequestUnlock + 'a {
+    move |reason| {
+        let mut st = state.lock().unwrap();
+        let vault = st.vault.as_mut().unwrap();
+        if vault.is_unlocked() {
+            return RequestUnlock::AlreadyOpen;
+        }
+        prompts.push(reason.to_string());
+        vault.unlock("pw").unwrap();
+        RequestUnlock::Verified
+    }
+}
+
+fn is_error(r: &Response, expected: &str) -> bool {
+    matches!(r, Response::Error { message } if message == expected)
+}
+
+/// The Apple Passwords shape: choose the account, one fingerprint that says
+/// what for, done. It used to be: choose, "locked", unlock, choose again, and
+/// with confirmation on, approve again.
+#[test]
+fn a_login_picked_while_locked_fills_after_one_prompt_that_names_the_site() {
+    let dir = TempDir::new().unwrap();
+    let state = unlocked_state(&dir);
+    let gh = add(&state, "GitHub", "frank", "gh-pw", "https://github.com");
+    state.lock().unwrap().settings.confirm_autofill = true;
+    lock_vault(&state);
+    let mut authed = Session::Authed;
+    let fill = |picked| Request::Fill {
+        id: gh.clone(),
+        url: "https://github.com/login".into(),
+        picked,
+    };
+
+    let mut prompts = Vec::new();
+    let r = dispatch_with(
+        fill(true),
+        &state,
+        "t",
+        &mut authed,
+        None,
+        &mut |_: &ConsentContext| panic!("the fingerprint already approved this fill"),
+        &mut fingerprint(&state, &mut prompts),
+    );
+    assert_eq!(
+        r,
+        Response::Credentials {
+            username: "frank".into(),
+            password: "gh-pw".into()
+        }
+    );
+    assert_eq!(prompts, ["fill your password on github.com"]);
+
+    // Open already: no prompt, and the confirmation the user turned on is
+    // asked as before, since nothing else approved this fill.
+    let mut asked = 0;
+    let r = dispatch_with(
+        fill(true),
+        &state,
+        "t",
+        &mut authed,
+        None,
+        &mut |_: &ConsentContext| {
+            asked += 1;
+            true
+        },
+        &mut fingerprint(&state, &mut prompts),
+    );
+    assert!(matches!(r, Response::Credentials { .. }));
+    assert_eq!((asked, prompts.len()), (1, 1));
+
+    // A fill nobody picked in Arca's list never prompts: locked is locked.
+    lock_vault(&state);
+    let r = dispatch_with(
+        fill(false),
+        &state,
+        "t",
+        &mut authed,
+        None,
+        &mut allow(),
+        &mut |_: &str| -> RequestUnlock { panic!("an unpicked fill must not prompt") },
+    );
+    assert!(is_error(&r, "locked"));
+}
+
+#[test]
+fn a_declined_prompt_or_the_window_leaves_the_vault_locked_and_says_which() {
+    let dir = TempDir::new().unwrap();
+    let state = unlocked_state(&dir);
+    let gh = add(&state, "GitHub", "frank", "gh-pw", "https://github.com");
+    lock_vault(&state);
+    let mut authed = Session::Authed;
+    for (answer, expected) in [
+        (RequestUnlock::Declined, "unlock_cancelled"),
+        // No Touch ID here: the window asks for the master password, and the
+        // extension sends this same fill again once it is open.
+        (RequestUnlock::Window, "unlocking"),
+    ] {
+        let r = dispatch_with(
+            Request::Fill {
+                id: gh.clone(),
+                url: "https://github.com/login".into(),
+                picked: true,
+            },
+            &state,
+            "t",
+            &mut authed,
+            None,
+            &mut allow(),
+            &mut |_: &str| answer,
+        );
+        assert!(is_error(&r, expected), "{answer:?} gave {r:?}");
+        assert!(!state.lock().unwrap().vault.as_ref().unwrap().is_unlocked());
+    }
+}
+
+/// A sign-in with the vault locked: the one fingerprint that opens it is the
+/// user verification, so the assertion carries UV without a second prompt.
+/// With "ask for the master password for passkeys" on, it does not count.
+#[test]
+fn a_passkey_sign_in_while_locked_asks_once_unless_the_password_is_required() {
+    let dir = TempDir::new().unwrap();
+    let state = unlocked_state(&dir);
+    let mut authed = Session::Authed;
+    let cred_id = match handle_request(
+        Request::PasskeyCreate {
+            origin: "https://github.com".into(),
+            rp_id: "github.com".into(),
+            user_name: "frank".into(),
+            user_handle: vec![9, 9, 9],
+            exclude_credentials: vec![],
+        },
+        &state,
+        "t",
+        &mut authed,
+        None,
+        &mut allow(),
+    ) {
+        Response::PasskeyCredential { credential_id, .. } => credential_id,
+        other => panic!("expected a credential, got {other:?}"),
+    };
+    let get = |picked| Request::PasskeyGet {
+        origin: "https://github.com/login".into(),
+        rp_id: "github.com".into(),
+        client_data_hash: vec![3u8; 32],
+        allow_credentials: vec![cred_id.clone()],
+        picked,
+    };
+
+    for picked in [true, false] {
+        lock_vault(&state);
+        let mut prompts = Vec::new();
+        let r = dispatch_with(
+            get(picked),
+            &state,
+            "t",
+            &mut authed,
+            None,
+            &mut |_: &ConsentContext| panic!("the fingerprint already verified this sign-in"),
+            &mut fingerprint(&state, &mut prompts),
+        );
+        let Response::PasskeyAssertion {
+            authenticator_data, ..
+        } = r
+        else {
+            panic!("expected an assertion, got {r:?}");
+        };
+        // Flags byte after the 32-byte rpIdHash: user present and verified.
+        assert_eq!(authenticator_data[32] & 0x05, 0x05);
+        assert_eq!(prompts, ["sign in to github.com"]);
+    }
+
+    state.lock().unwrap().settings.passkey_reprompt = true;
+    lock_vault(&state);
+    let mut asked = 0;
+    let mut prompts = Vec::new();
+    let r = dispatch_with(
+        get(true),
+        &state,
+        "t",
+        &mut authed,
+        None,
+        &mut |_: &ConsentContext| {
+            asked += 1;
+            true
+        },
+        &mut fingerprint(&state, &mut prompts),
+    );
+    assert!(matches!(r, Response::PasskeyAssertion { .. }), "{r:?}");
+    assert_eq!(asked, 1, "the master password is still asked for");
 }
