@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-09-29
+
+**Update every device together.** Vault files are now `SYBRVLT7`, which 0.6.x
+and earlier refuse to open, and the iOS app needs this release's library
+(C ABI v20). Update Arca on every computer and phone before any of them syncs:
+a device still on 0.6.x cannot sync with the others until it is updated.
 
 - Import: a Bitwarden CSV export keeps its authenticator codes. The importer
   did not know Bitwarden's `login_totp` column, so every login came in without
@@ -11,7 +16,7 @@
   A device that has seen newer changes than Drive still accounts for says
   whose they were (desktop status bar, iPhone banner) and puts them back.
   Settings on the desktop and Options → Synced devices on iOS list every
-  device that syncs the vault and when each last did. iOS needs C ABI v20.
+  device that syncs the vault and when each last did.
 - Security: changing the master password now replaces the vault key. It used
   to rewrap the same key, so an old password plus an old copy of the file
   opened everything written afterwards, forever. Other devices ask for the new
@@ -20,17 +25,14 @@
   forged with an old password is refused. Touch ID, Windows Hello and a
   plugged-in USB key come back by themselves (one Touch ID prompt on macOS).
   Vault files are now `SYBRVLT7`, with items and the container tag under keys
-  derived from the vault key (HKDF); V6 files open and are rewritten as V7.
-  Update every device before syncing: earlier builds refuse V7, and iOS needs
-  C ABI v19.
-- Security: vault files are now `SYBRVLT6`. Relabelling a V5 file as the
-  unauthenticated V4 format took two bytes and no key, and the result unlocked
-  and was re-signed on the next save — so whoever could write the file could
-  drop items, bring back purged ones or restore an old password's header.
-  The master-password wrap now names the authenticated container, and quick
-  unlock or a USB key only opens authenticated files. A vault upgrades the
-  next time it is unlocked with the master password. Earlier builds refuse V6
-  files as newer: update every device before syncing.
+  derived from the vault key (HKDF); older files open and are rewritten as V7.
+- Security: relabelling a V5 file as the unauthenticated V4 format took two
+  bytes and no key, and the result unlocked and was re-signed on the next
+  save — so whoever could write the file could drop items, bring back purged
+  ones or restore an old password's header. The master-password wrap now
+  names the authenticated container, and quick unlock or a USB key only opens
+  authenticated files. A vault upgrades the next time it is unlocked with the
+  master password.
 - AutoFill generates a password for a field whose rules allow only an
   explicit set of symbols, such as `allowed: [-]`. It used to end up with no
   characters to choose from and offer nothing.
