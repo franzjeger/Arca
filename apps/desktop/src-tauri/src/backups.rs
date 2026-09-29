@@ -24,6 +24,58 @@ pub struct BackupStatus {
     namespace: String,
 }
 
+/// Why `directory` cannot take a backup, in words that say what to do. Every
+/// missing folder used to read "Reconnect the drive", which sent people
+/// looking for a drive that was never there: a folder on another Mac, or in
+/// a home folder of another name.
+fn unavailable(directory: &Path) -> String {
+    if directory.exists() {
+        return format!(
+            "{} is not a folder. Choose the backup folder again.",
+            directory.display()
+        );
+    }
+    if let Some(drive) = disconnected_drive(directory) {
+        return format!(
+            "The drive {drive} is not connected. Connect it, or choose another backup folder."
+        );
+    }
+    format!(
+        "{} does not exist. Choose the backup folder again.",
+        directory.display()
+    )
+}
+
+/// The name of the removable drive `directory` is on, when that drive is not
+/// connected: a volume under /Volumes (macOS), /media, /run/media or /mnt
+/// (Linux), or a drive letter (Windows). None when it is on no such drive, or
+/// the drive is there and only the folder is missing.
+fn disconnected_drive(directory: &Path) -> Option<String> {
+    let parts: Vec<_> = directory.components().collect();
+    let depth = if cfg!(windows) {
+        // A drive letter or share and its root, E:\, when the path has one.
+        if !matches!(parts.first(), Some(std::path::Component::Prefix(_))) {
+            return None;
+        }
+        2
+    } else {
+        match parts.get(1).and_then(|part| part.as_os_str().to_str()) {
+            Some("Volumes" | "mnt") => 3,
+            Some("media") => 4,
+            Some("run") if parts.get(2).is_some_and(|part| part.as_os_str() == "media") => 5,
+            _ => return None,
+        }
+    };
+    let mount: PathBuf = parts.get(..depth)?.iter().collect();
+    if mount.exists() {
+        return None;
+    }
+    Some(match mount.file_name() {
+        Some(name) => format!("\"{}\"", name.to_string_lossy()),
+        None => mount.display().to_string(),
+    })
+}
+
 fn is_git_repository_or_internal(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == ".git") || path.join(".git").exists()
 }
@@ -144,10 +196,7 @@ impl Backups {
         // Do not recreate a missing mount point and silently back up to the
         // system disk when an external drive is unplugged.
         if !directory.is_dir() {
-            return Err(CmdError::new(
-                "backup",
-                "Backup folder unavailable. Reconnect the drive and retry.",
-            ));
+            return Err(CmdError::new("backup", &unavailable(directory)));
         }
         if is_git_repository_or_internal(directory) {
             return Err(CmdError::new(
@@ -330,7 +379,59 @@ mod tests {
         assert!(backups.run(store.path(), true, 2).is_err());
         assert!(!folder.exists());
         assert_eq!(backups.status.last_success_unix, Some(1));
-        assert!(backups.status.last_error.is_some());
+        // Not on a removable drive: the folder itself is what is missing.
+        let configured = backups.status.directory.clone().unwrap();
+        assert_eq!(
+            backups.status.last_error.unwrap(),
+            format!(
+                "{} does not exist. Choose the backup folder again.",
+                configured.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_missing_backup_folder_says_which_and_what_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a file");
+        std::fs::write(&file, b"not a folder").unwrap();
+        assert!(unavailable(&file).ends_with("is not a folder. Choose the backup folder again."));
+        // A home folder of another name, as after moving to a new Mac.
+        let elsewhere = Path::new("/Users/someone-else-3f2504e0/Documents/Backups");
+        assert_eq!(
+            unavailable(elsewhere),
+            format!(
+                "{} does not exist. Choose the backup folder again.",
+                elsewhere.display()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_disconnected_drive_is_named() {
+        for (path, drive) in [
+            (
+                "/Volumes/Arca Test 3f2504e0/Backups",
+                "\"Arca Test 3f2504e0\"",
+            ),
+            ("/media/me/ArcaTest3f2504e0/Backups", "\"ArcaTest3f2504e0\""),
+            (
+                "/run/media/me/ArcaTest3f2504e0/Backups",
+                "\"ArcaTest3f2504e0\"",
+            ),
+            ("/mnt/arca-test-3f2504e0/Backups", "\"arca-test-3f2504e0\""),
+        ] {
+            assert_eq!(
+                unavailable(Path::new(path)),
+                format!("The drive {drive} is not connected. Connect it, or choose another backup folder.")
+            );
+        }
+        // The drive is there (the root always is) and the folder is not.
+        assert_eq!(
+            disconnected_drive(Path::new("/nonexistent-3f2504e0/Backups")),
+            None
+        );
     }
 
     #[test]

@@ -50,6 +50,15 @@ it("prioritizes errors and recovers after a failed status read", async () => {
   expect(screen.getByText(/Backed up/)).toBeInTheDocument();
 });
 
+it("says how old the newest good backup is while backups fail", async () => {
+  const lastGood = now - 18 * 86_400;
+  const failing = "/Users/someone/Backups does not exist. Choose the backup folder again.";
+  await show({ ...healthy, lastSuccessUnix: lastGood, lastError: failing });
+  const when = new Date(lastGood * 1000).toLocaleString();
+  expect(screen.getByText(`Backup: ${failing} Last backup ${when}.`)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Backup settings" })).toBeInTheDocument();
+});
+
 it("applies configuration immediately and ignores an older in-flight status reply", async () => {
   const { publishBackupStatus } = await import("../lib/backupUpdates");
   let finish!: (status: BackupStatus) => void;
