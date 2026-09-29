@@ -452,3 +452,19 @@ fn autofill_importer(app: AppHandle) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The updater's settings as the plugin reads them at launch. It ignores
+    /// keys it does not know, so a misspelt flag would switch nothing on and
+    /// say nothing.
+    #[test]
+    fn an_update_must_be_signed_for_the_version_it_claims() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let updater: tauri_plugin_updater::Config =
+            serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(updater.require_signed_version);
+        assert!(!updater.allow_downgrades);
+    }
+}
