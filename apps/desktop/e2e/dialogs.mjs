@@ -58,6 +58,7 @@ try {
         copyPasswordHistory: async () => { window.historyCopied = true; },
         restorePasswordHistory: async () => { window.historyRestored = true; },
         listSnapshots: async () => [],
+        mergeDuplicates: async () => 0,
       };
     `,
   }));
@@ -71,6 +72,18 @@ try {
     await page.keyboard.press('Tab');
     assert(await settings.evaluate(el => el.contains(document.activeElement)), 'Tab escaped Settings');
   }
+  // A modal dialog is in the top layer, above every z-index: a result raised
+  // from inside one must be drawn in front of it, or the button looks dead.
+  await settings.getByRole('button', { name: 'Merge…', exact: true }).click();
+  const merged = settings.getByRole('status').filter({ hasText: 'No duplicates found' });
+  await merged.waitFor();
+  assert(await merged.evaluate(el => {
+    el.style.pointerEvents = 'auto';
+    const box = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    el.style.pointerEvents = '';
+    return el.contains(hit);
+  }), 'The toast is hidden behind the dialog');
   await settings.getByRole('switch', { name: 'Lock when window loses focus' }).click();
   await settings.getByRole('alert').filter({ hasText: 'Test disk failure' }).waitFor();
   assert.equal(await settings.getByRole('switch', { name: 'Lock when window loses focus' }).getAttribute('aria-checked'), 'false');
