@@ -7,7 +7,7 @@
 use std::process::Command;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use rand_core::OsRng;
+use ssh_key::rand_core::OsRng;
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, LineEnding, PrivateKey};
 use vault_core::ssh::{self, KeyFileError};
 

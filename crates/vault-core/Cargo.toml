@@ -21,7 +21,6 @@ sha2.workspace = true
 getrandom.workspace = true
 data-encoding.workspace = true
 p256.workspace = true
-rand_core.workspace = true
 ed25519-dalek.workspace = true
 ssh-key.workspace = true
 vault-secmem.workspace = true
@@ -37,4 +36,4 @@ workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 # Tests make the key files they import (none are checked in).
-ssh-key = { workspace = true, features = ["ed25519", "p256", "rand_core"] }
+ssh-key = { workspace = true, features = ["ed25519", "p256", "getrandom"] }

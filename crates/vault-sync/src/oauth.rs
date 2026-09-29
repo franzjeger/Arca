@@ -39,7 +39,7 @@ impl Pkce {
     /// 32 random bytes → 43 base64url characters, inside RFC 7636's 43–128.
     pub fn generate() -> Result<Self, String> {
         let mut raw = Zeroizing::new([0u8; 32]);
-        getrandom::getrandom(raw.as_mut_slice()).map_err(|_| "rng failure".to_string())?;
+        getrandom::fill(raw.as_mut_slice()).map_err(|_| "rng failure".to_string())?;
         let verifier = Zeroizing::new(data_encoding::BASE64URL_NOPAD.encode(raw.as_slice()));
         let challenge = challenge_for(&verifier);
         Ok(Self {

@@ -211,7 +211,7 @@ fn unhex(s: &str) -> Option<Zeroizing<Vec<u8>>> {
 /// secret. Both inputs are 32 uniformly random bytes, so this is a KDF in the
 /// extract sense only; the label keeps the output bound to this use.
 fn derive(pepper: &[u8], secret: &[u8]) -> Result<SymmetricKey, CmdError> {
-    use hmac::Mac;
+    use hmac::{KeyInit, Mac};
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(pepper)
         .map_err(|_| failure("The USB key settings are invalid."))?;
     mac.update(DERIVE_INFO);

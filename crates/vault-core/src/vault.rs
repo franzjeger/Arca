@@ -27,7 +27,7 @@
 use crate::VaultItem;
 use bincode::Options;
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;

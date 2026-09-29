@@ -37,7 +37,7 @@ impl SymmetricKey {
     /// memory.
     pub fn generate() -> Result<Self> {
         let mut buf = SecretBytes::zeroed(KEY_LEN);
-        getrandom::getrandom(buf.as_mut_slice()).map_err(|_| Error::Random)?;
+        getrandom::fill(buf.as_mut_slice()).map_err(|_| Error::Random)?;
         Ok(Self(buf))
     }
 

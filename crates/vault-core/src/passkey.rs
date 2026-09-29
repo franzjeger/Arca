@@ -17,6 +17,7 @@
 
 use ciborium::value::{Integer, Value as Cbor};
 use p256::ecdsa::{signature::Signer, Signature, SigningKey, VerifyingKey};
+use p256::elliptic_curve::Generate;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -61,7 +62,7 @@ fn int(n: i64) -> Cbor {
 
 /// COSE_Key (RFC 9052) for a P-256 public key used with ES256.
 fn cose_ec2_public_key(vk: &VerifyingKey) -> Vec<u8> {
-    let point = vk.to_encoded_point(false); // 0x04 || X || Y (uncompressed)
+    let point = vk.to_sec1_point(false); // 0x04 || X || Y (uncompressed)
     let x = point.x().expect("P-256 point has X").to_vec();
     let y = point.y().expect("P-256 point has Y").to_vec();
     // kty(1)=EC2(2), alg(3)=ES256(-7), crv(-1)=P-256(1), x(-2), y(-3).
@@ -115,12 +116,12 @@ fn authenticator_data(
 /// Create a new passkey for `rp_id`. The sign counter starts at 0. `user_verified`
 /// records whether a biometric/PIN verification gated this registration.
 pub fn create(rp_id: &str, user_verified: bool) -> Result<NewPasskey> {
-    let signing = SigningKey::random(&mut rand_core::OsRng);
+    let signing = SigningKey::try_generate().map_err(|_| Error::Random)?;
     let verifying = VerifyingKey::from(&signing);
     let cose = cose_ec2_public_key(&verifying);
 
     let mut credential_id = vec![0u8; CREDENTIAL_ID_LEN];
-    getrandom::getrandom(&mut credential_id).map_err(|_| Error::Random)?;
+    getrandom::fill(&mut credential_id).map_err(|_| Error::Random)?;
 
     let auth_data = authenticator_data(rp_id, 0, Some((&credential_id, &cose)), user_verified);
 
@@ -175,7 +176,7 @@ pub fn assert(
 pub fn public_key_sec1(private_key: &[u8]) -> Result<Vec<u8>> {
     let signing = SigningKey::from_slice(private_key).map_err(|_| Error::Passkey)?;
     Ok(VerifyingKey::from(&signing)
-        .to_encoded_point(false)
+        .to_sec1_point(false)
         .as_bytes()
         .to_vec())
 }

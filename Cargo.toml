@@ -63,30 +63,40 @@ vault-sync = { path = "crates/vault-sync" }
 vault-bridge = { path = "crates/vault-bridge" }
 
 # --- crypto (audited RustCrypto crates only; no custom primitives) ---
-argon2 = "0.5"
-chacha20poly1305 = "0.10"
+# `zeroize` wipes the hashes Argon2 starts and ends with, either of which
+# gives the key without the password; its memory is ours (crypto.rs).
+argon2 = { version = "0.6", features = ["zeroize"] }
+# 0.10 always wiped the cipher's copy of the key when dropped; since 0.11
+# that takes `zeroize`.
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 subtle = "2.6"
-hmac = "0.12"
+hmac = "0.13"
 # Keys derived from the vault key, one per job (V7).
-hkdf = "0.12"
-sha1 = "0.10"
-sha2 = "0.10"
-getrandom = "0.2"
+hkdf = "0.13"
+# `zeroize` wipes hash state when dropped. HMAC and HKDF keep their keyed
+# state in these hashes' cores, so it covers them too.
+sha1 = { version = "0.11", features = ["zeroize"] }
+sha2 = { version = "0.11", features = ["zeroize"] }
+getrandom = "0.4"
 data-encoding = "2.6"
 # Cross-platform mlock/VirtualLock so secret memory can't be paged to swap.
 region = "3"
 # WebAuthn passkeys: ES256 (P-256 ECDSA). RustCrypto, no custom EC math.
-p256 = { version = "0.13", features = ["ecdsa"] }
-rand_core = { version = "0.6", features = ["getrandom"] }
+# New keys come from the OS CSPRNG through p256's own `getrandom` feature.
+p256 = { version = "0.14", features = ["ecdsa", "getrandom"] }
 # SSH agent keys: Ed25519 (dalek, audited). The OpenSSH wire encoding is
 # hand-rolled from length-prefixed strings and tested byte-exactly against the
 # ssh CLI; signing stays internal so the private key never leaves the vault.
 # Seeds come from `getrandom` (not dalek's RNG helper), so no `rand_core` feature.
-ed25519-dalek = { version = "2", features = ["zeroize"] }
+ed25519-dalek = { version = "3", features = ["zeroize"] }
 # Reading keys people already have in ~/.ssh: the OpenSSH private-key container
 # and its passphrase encryption (bcrypt-pbkdf + AES), RustCrypto. Only parsing;
 # every key it yields is signed with dalek above, like one Arca generated.
+# 0.6 is still on the previous generation of the RustCrypto traits (0.7 is
+# only a release candidate), so Cargo.lock carries both generations for now.
+# Tests take its RNG from the rand_core it re-exports, so nothing here names
+# the old rand_core directly.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "encryption"] }
 
 # --- serde / data ---
