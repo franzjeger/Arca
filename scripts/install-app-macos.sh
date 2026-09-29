@@ -61,16 +61,11 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-# Entitlements (App Group + shared keychain group) so the vault + device key are
-# shared with the AutoFill extension. The re-sign below MUST pass these or it
-# strips what `tauri build` embedded.
-ENTITLEMENTS="$REPO/apps/desktop/src-tauri/Entitlements.plist"
 SIGNING_DIR="$(mktemp -d /tmp/arca-install.XXXXXX)"
 SIGNING_PLAN="$SIGNING_DIR/signing.json"
 if [ "${ARCA_ADHOC:-}" != "1" ]; then
   python3 "$REPO/scripts/prepare-autofill-signing.py" --plan "$SIGNING_PLAN" \
     || die "Local development signing is not ready. See apps/macos/README.md."
-  IDENTITY="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["identity"])' "$SIGNING_PLAN")"
 fi
 
 echo "==> Installing locked frontend dependencies…"
@@ -133,39 +128,9 @@ ditto --norsrc "$CARGO_OUTPUT/release/vault-native-host" "$APP_SRC/Contents/MacO
 
 # All profiles come from Xcode or the installed app and were matched to one
 # usable certificate, this Mac, both bundle IDs and their capabilities above.
+# The published release is assembled by the same script (release-macos.sh).
 if [ "${ARCA_ADHOC:-}" != "1" ]; then
-  echo "==> Building the AutoFill extension"
-  APPLE_BUILD="${ARCA_APPLE_BUILD_ROOT:-$CARGO_OUTPUT/apple}/ArcaHost"
-  # Isolate the FFI cache and compile outside Xcode's build environment first.
-  # Reusing desktop proc-macro artifacts under Xcode caused E0463 on this Mac.
-  ( export CARGO_TARGET_DIR="$CARGO_OUTPUT/apple-ffi"
-    cd "$REPO" || exit
-    cargo build -p vault-ffi --profile release-ffi --target aarch64-apple-darwin || exit
-    cd apps/macos || exit
-    xcodegen generate >/dev/null || exit
-    xcodebuild -project Arca.xcodeproj -scheme ArcaHost -configuration Release \
-      -derivedDataPath "$APPLE_BUILD" ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
-      CODE_SIGNING_ALLOWED=NO build >"$SIGNING_DIR/autofill-build.log" 2>&1 ) \
-    || { cat "$SIGNING_DIR/autofill-build.log" >&2 2>/dev/null || true; die "AutoFill build failed"; }
-  APPEX="$APPLE_BUILD/Build/Products/Release/ArcaHost.app/Contents/PlugIns/ArcaAutoFill.appex"
-  [ -d "$APPEX" ] || die "no ArcaAutoFill.appex at $APPEX"
-  mkdir -p "$APP_SRC/Contents/PlugIns"
-  ditto --norsrc "$APPEX" "$APP_SRC/Contents/PlugIns/ArcaAutoFill.appex"
-  APPEX_ENT="$SIGNING_DIR/autofill.entitlements"
-  APP_ENT="$SIGNING_DIR/desktop.entitlements"
-  python3 "$REPO/scripts/prepare-autofill-signing.py" --prepare \
-    "$APP_SRC/Contents/PlugIns/ArcaAutoFill.appex" \
-    "$REPO/apps/macos/ArcaAutoFill/ArcaAutoFill.entitlements" "$APPEX_ENT" "$SIGNING_PLAN"
-  python3 "$REPO/scripts/prepare-autofill-signing.py" --prepare \
-    "$APP_SRC" "$ENTITLEMENTS" "$APP_ENT" "$SIGNING_PLAN"
-  xattr -cr "$APP_SRC"
-  echo "==> Signing the browser host and the extension, then the app"
-  codesign --force -s "$IDENTITY" -i no.sybr.vault.native-host "$APP_SRC/Contents/MacOS/vault-native-host"
-  codesign --force --entitlements "$APPEX_ENT" -s "$IDENTITY" "$APP_SRC/Contents/PlugIns/ArcaAutoFill.appex"
-  codesign --force --entitlements "$APP_ENT" -s "$IDENTITY" "$APP_SRC"
-  for bundle in "$APP_SRC/Contents/PlugIns/ArcaAutoFill.appex" "$APP_SRC"; do
-    python3 "$REPO/scripts/prepare-autofill-signing.py" --verify "$bundle"
-  done
+  "$REPO/scripts/assemble-app-macos.sh" "$APP_SRC" "$SIGNING_PLAN" "$SIGNING_DIR"
 else
   echo "==> Explicit ad hoc build: native AutoFill and shared entitlements are unavailable"
   codesign --force --deep -s - "$APP_SRC"
