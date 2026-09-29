@@ -50,6 +50,9 @@ Current source version: **0.7.0** — see [`CHANGELOG.md`](./CHANGELOG.md)
 - Built-in ssh-agent: vault SSH keys serve `ssh` and `git` over a Unix socket
   (macOS/Linux) or the OpenSSH named pipe (Windows), signing in-process so the
   private key never reaches disk
+- Import the Ed25519 keys already in `~/.ssh`, passphrase-protected ones too,
+  crossed off by fingerprint against the vault and against each other, so no
+  key is stored twice; the files stay until you remove them
 
 ## Platform status
 
