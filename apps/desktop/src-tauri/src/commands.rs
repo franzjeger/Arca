@@ -1200,22 +1200,6 @@ pub async fn restore_vault_backup(
     Ok(())
 }
 
-/// Merge duplicate logins (same site + username). Losers go to the Trash;
-/// returns how many were merged away.
-#[tauri::command]
-pub fn merge_duplicates(state: St<'_>) -> Result<usize, CmdError> {
-    let mut st = write_guard(state.inner())?;
-    let merged = {
-        let vault = st.vault.as_mut().ok_or_else(CmdError::no_vault)?;
-        vault.merge_duplicate_logins(crate::state::now_millis())?
-    };
-    if merged > 0 {
-        persist(&mut st)?;
-    }
-    st.touch();
-    Ok(merged)
-}
-
 // ---- Google Drive sync ----------------------------------------------------
 
 /// Interactive Google sign-in (opens the browser; blocks until the redirect).

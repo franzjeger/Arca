@@ -322,6 +322,38 @@ export interface PasswordOptions {
   symbols: boolean;
 }
 
+/** A login in a group of duplicates, as the review shows it. */
+export interface DuplicateLogin {
+  id: string;
+  revision: string;
+  title: string;
+  site: string;
+  username: string;
+  /** Unix MILLISECONDS. */
+  modifiedAt: number;
+  /** Logins with the same number share a password; nothing more is told. */
+  password: number;
+  hasPassword: boolean;
+  hasTotp: boolean;
+  hasNotes: boolean;
+}
+
+/** Logins that look like one account. */
+export interface DuplicateGroup {
+  /** One username on different sites of one domain, not one site. */
+  possible: boolean;
+  /** The login a merge keeps unless another is picked. */
+  keep: string;
+  /** Newest first. */
+  logins: DuplicateLogin[];
+}
+
+/** One group to merge, as it was chosen. */
+export interface DuplicateChoice {
+  keep: string;
+  ids: string[];
+}
+
 /** One rotated local snapshot of the encrypted vault file. */
 export interface SnapshotSummary {
   /** Absolute path; pass back verbatim to `restoreSnapshot`. */
@@ -461,7 +493,10 @@ export const api = {
   /** First-run restore: adopt the vault in the signed-in Google account. */
   syncBootstrap: (masterPassword: string) =>
     invoke<void>("sync_bootstrap", { masterPassword }),
-  mergeDuplicates: () => invoke<number>("merge_duplicates"),
+  findDuplicates: () => invoke<DuplicateGroup[]>("find_duplicates"),
+  /** Merges nothing unless every login shown is unchanged. */
+  mergeDuplicates: (choices: DuplicateChoice[], shown: { id: string; revision: string }[]) =>
+    invoke<number>("merge_duplicates", { choices, shown }),
   lock: () => invoke<void>("lock"),
   touch: () => invoke<void>("touch"),
 

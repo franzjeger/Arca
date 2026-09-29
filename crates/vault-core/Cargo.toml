@@ -23,6 +23,8 @@ data-encoding.workspace = true
 p256.workspace = true
 ed25519-dalek.workspace = true
 ssh-key.workspace = true
+# Registrable domains, for logins that are possibly one account.
+psl.workspace = true
 vault-secmem.workspace = true
 serde.workspace = true
 bincode.workspace = true

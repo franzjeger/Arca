@@ -6343,6 +6343,7 @@ dependencies = [
  "hkdf",
  "hmac 0.13.0",
  "p256 0.14.0",
+ "psl",
  "serde",
  "serde_json",
  "sha1",

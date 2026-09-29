@@ -483,7 +483,7 @@ export default function App() {
     category === "wifi"
       ? "No Wi-Fi networks yet — click + to add one."
       : category === "sshKeys"
-        ? "No SSH keys yet — click + to generate one."
+        ? "No SSH keys yet — click + to generate one, or to import yours from ~/.ssh."
         : category === "notes"
           ? "No notes yet — click + to write one."
           : category === "bookmarks"

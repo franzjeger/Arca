@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api, checkForUpdate, type Settings, type VaultStatus } from "../lib/api";
@@ -14,6 +14,7 @@ vi.mock("../lib/api", async () => {
       appInfo: vi.fn().mockResolvedValue({ version: "0.5.0", build: "test-build", platform: "linux" }),
       syncStatus: vi.fn().mockResolvedValue({ connected: false, pending: true, syncing: false }),
       backupStatus: vi.fn().mockResolvedValue({ directory: null, lastSuccessUnix: null, lastError: null }),
+      sshImportScan: vi.fn().mockResolvedValue([]),
     },
   };
 });
@@ -122,4 +123,12 @@ it("shows the enrolled key next to the keychain toggle, and removes it after con
   await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
   await waitFor(() => expect(api.keyfileRevoke).toHaveBeenCalledWith("correct horse"));
   expect(onStatusChanged).toHaveBeenCalledOnce();
+});
+
+it("offers the SSH keys in ~/.ssh next to the password import", async () => {
+  show();
+  const row = (await screen.findByText("Import SSH keys")).parentElement!.parentElement!;
+  await userEvent.click(within(row).getByRole("button", { name: "Import…" }));
+  expect(await screen.findByRole("dialog", { name: "Import SSH keys" })).toBeInTheDocument();
+  expect(api.sshImportScan).toHaveBeenCalledOnce();
 });

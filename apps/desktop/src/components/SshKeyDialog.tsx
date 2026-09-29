@@ -58,7 +58,7 @@ export function SshKeyDialog({
         </div>
 
         {mode === "import" ? (
-          <SshImportPanel onImported={onSaved} onClose={onClose} />
+          <SshImportPanel onImported={(ids) => onSaved(ids[0])} onClose={onClose} />
         ) : (
           <>
             <div className="space-y-3 px-5 py-4">
@@ -101,6 +101,30 @@ export function SshKeyDialog({
             </div>
           </>
         )}
+      </div>
+    </Dialog>
+  );
+}
+
+/** Keys from ~/.ssh on their own, where people look for an import: next to
+ *  "Import passwords" in Settings. */
+export function SshImportDialog({
+  onClose,
+  onImported,
+}: {
+  onClose: () => void;
+  onImported: (ids: string[]) => void;
+}) {
+  return (
+    <Dialog label="Import SSH keys" onClose={onClose}>
+      <div className="w-full max-w-md rounded-2xl border border-hairline bg-panel shadow-2xl">
+        <div className="flex items-center gap-2 border-b border-hairline px-5 py-3.5">
+          <SshIcon className="h-5 w-5 text-accent" />
+          <h2 className="text-[15px] font-semibold text-neutral-100">
+            Import SSH keys
+          </h2>
+        </div>
+        <SshImportPanel onImported={onImported} onClose={onClose} />
       </div>
     </Dialog>
   );
