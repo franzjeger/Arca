@@ -106,7 +106,10 @@ fn merges_nothing_when_a_login_changed_after_it_was_shown() {
         keep: a,
         ids: vec![a, b],
     }];
-    assert!(v.merge_logins(&choice, &reviewed, 100).is_err());
+    assert!(matches!(
+        v.merge_logins(&choice, &reviewed, 100),
+        Err(vault_core::Error::Changed)
+    ));
     assert_eq!(active(&v), [a, b]);
 }
 
@@ -134,7 +137,10 @@ fn refuses_a_group_that_is_not_what_was_shown() {
             ids: vec![a],
         },
     ] {
-        assert!(v.merge_logins(&[choice], &reviewed, 100).is_err());
+        assert!(matches!(
+            v.merge_logins(&[choice], &reviewed, 100),
+            Err(vault_core::Error::InvalidArgument(_))
+        ));
     }
     assert_eq!(active(&v), [a, b, c]);
 }

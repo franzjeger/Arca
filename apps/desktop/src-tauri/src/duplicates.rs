@@ -5,42 +5,11 @@ use crate::{
     commands::{guard, persist, write_guard},
     state::{now_millis, AppState, CmdError},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Mutex;
 use tauri::State;
 use uuid::Uuid;
-use vault_core::dedupe::{DuplicateGroup, Likeness, MergeChoice};
-use vault_core::{host_of, Vault, VaultItem};
-use zeroize::Zeroizing;
-
-/// A login in a group, as the review shows it. No secret leaves the vault:
-/// `password` only says which logins in the group share one.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DuplicateLogin {
-    id: Uuid,
-    revision: Uuid,
-    title: String,
-    site: String,
-    username: String,
-    modified_at: i64,
-    /// Logins with the same number have the same password.
-    password: usize,
-    has_password: bool,
-    has_totp: bool,
-    has_notes: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Duplicates {
-    /// One username on different sites of one domain, rather than one site.
-    possible: bool,
-    /// The login a merge keeps unless someone picks another.
-    keep: Uuid,
-    /// Newest first.
-    logins: Vec<DuplicateLogin>,
-}
+use vault_core::dedupe::{DuplicateReview, MergeChoice};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,66 +25,17 @@ pub struct Shown {
     revision: Uuid,
 }
 
-fn describe(vault: &Vault, group: DuplicateGroup) -> Result<Duplicates, CmdError> {
-    let mut passwords: Vec<Zeroizing<String>> = Vec::new();
-    let mut logins = Vec::with_capacity(group.ids.len());
-    for id in group.ids {
-        let item = vault.get_item(id)?;
-        let VaultItem::Login {
-            title,
-            username,
-            password,
-            url,
-            totp_secret,
-            notes,
-        } = &item.data
-        else {
-            continue;
-        };
-        let index = match passwords
-            .iter()
-            .position(|known| known.as_str() == password)
-        {
-            Some(index) => index,
-            None => {
-                passwords.push(Zeroizing::new(password.clone()));
-                passwords.len() - 1
-            }
-        };
-        logins.push(DuplicateLogin {
-            id,
-            revision: item.revision,
-            title: title.clone(),
-            site: host_of(url),
-            username: username.clone(),
-            modified_at: item.modified_at,
-            password: index,
-            has_password: !password.is_empty(),
-            has_totp: totp_secret.as_deref().is_some_and(|t| !t.is_empty()),
-            has_notes: !notes.trim().is_empty(),
-        });
-    }
-    Ok(Duplicates {
-        possible: group.likeness == Likeness::Possible,
-        keep: group.keep,
-        logins,
-    })
-}
-
 /// Groups of logins that look like one account. Changes nothing.
 #[tauri::command]
-pub fn find_duplicates(state: State<'_, Mutex<AppState>>) -> Result<Vec<Duplicates>, CmdError> {
+pub fn find_duplicates(
+    state: State<'_, Mutex<AppState>>,
+) -> Result<Vec<DuplicateReview>, CmdError> {
     find(state.inner())
 }
 
-fn find(state: &Mutex<AppState>) -> Result<Vec<Duplicates>, CmdError> {
+fn find(state: &Mutex<AppState>) -> Result<Vec<DuplicateReview>, CmdError> {
     let state = guard(state)?;
-    let vault = state.vault()?;
-    vault
-        .find_duplicate_logins()?
-        .into_iter()
-        .map(|group| describe(vault, group))
-        .collect()
+    Ok(state.vault()?.review_duplicate_logins()?)
 }
 
 /// Merge the groups chosen, in order, as long as every login shown is as it
@@ -158,7 +78,7 @@ fn merge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vault_core::{Item, KdfParams};
+    use vault_core::{Item, KdfParams, Vault, VaultItem};
 
     fn login(title: &str, url: &str, password: &str, modified: i64) -> Item {
         Item::new(
@@ -188,7 +108,7 @@ mod tests {
         Mutex::new(AppState::new(store, Some(vault), clipboard))
     }
 
-    fn shown(groups: &[Duplicates]) -> Vec<Shown> {
+    fn shown(groups: &[DuplicateReview]) -> Vec<Shown> {
         groups
             .iter()
             .flat_map(|g| &g.logins)
@@ -197,24 +117,6 @@ mod tests {
                 revision: l.revision,
             })
             .collect()
-    }
-
-    #[test]
-    fn the_review_tells_which_passwords_match_without_showing_any() {
-        let dir = tempfile::tempdir().unwrap();
-        let items = [
-            login("Site", "https://example.test", "first-secret", 10),
-            login("Site", "https://example.test/login", "first-secret", 20),
-            login("Site", "https://www.example.test", "other-secret", 30),
-        ];
-        let groups = find(&state_in(dir.path(), &items)).unwrap();
-        let json = serde_json::to_string(&groups).unwrap();
-        assert!(!json.contains("secret"), "{json}");
-        assert_eq!(groups.len(), 1);
-        assert!(!groups[0].possible);
-        assert_eq!(groups[0].keep, items[2].id);
-        let passwords: Vec<usize> = groups[0].logins.iter().map(|l| l.password).collect();
-        assert_eq!(passwords, [0, 1, 1]);
     }
 
     #[test]

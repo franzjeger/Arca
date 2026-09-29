@@ -1,6 +1,6 @@
 /* vault-ffi — C ABI over vault-core for native platform integrations.
  *
- * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 21). All
+ * Hand-maintained to match crates/vault-ffi/src/lib.rs (ABI version 22). All
  * out-buffers are heap-allocated by the library and must be released with
  * vault_ffi_free(ptr, len), which also zeroes them.
  *
@@ -24,6 +24,8 @@
  *  -10  the master password was changed on another device: the file is sealed
  *       with a key only the new password opens (vault_ffi_sync_adopt_password)
  *  -11  the password opens a file that is not this vault's
+ *  -12  items a choice was made about changed after they were shown (sync or
+ *       another app wrote in between): nothing was done, show them again
  */
 #ifndef VAULT_FFI_H
 #define VAULT_FFI_H
@@ -82,6 +84,28 @@ int32_t vault_ffi_vault_open(const uint8_t *vault_bytes, size_t vault_len,
  * Free the buffer with vault_ffi_free. */
 int32_t vault_ffi_devices(VaultHandle *handle, uint8_t **out_json,
                           size_t *out_json_len);
+
+/* ADDED IN ABI v22. Duplicate logins, as a review shows them: a UTF-8 JSON
+ * array of groups
+ *   [{"possible":bool,"keep":id,"logins":[{"id":string,"revision":string,
+ *     "title":string,"site":string,"username":string,"modifiedAt":number,
+ *     "password":number,"hasPassword":bool,"hasTotp":bool,"hasNotes":bool}]}]
+ * logins newest first; "password" only says which logins in a group share
+ * one. Changes nothing. -4 until the vault is open. Free with vault_ffi_free. */
+int32_t vault_ffi_find_duplicates(VaultHandle *handle, uint8_t **out_json,
+                                  size_t *out_json_len);
+
+/* ADDED IN ABI v22. Merge the groups chosen in a review. request is UTF-8 JSON
+ *   {"choices":[{"keep":id,"ids":[id,...]}],
+ *    "shown":[{"id":id,"revision":string},...]}
+ * with "shown" every login the review showed. -12 if one changed since, and
+ * nothing is merged. On success *out_merged is how many logins went to the
+ * Trash and the new vault bytes are returned; persist them. The handle is left
+ * as it was on any failure. Free the bytes with vault_ffi_free. */
+int32_t vault_ffi_merge_duplicates(VaultHandle *handle, const uint8_t *request,
+                                   size_t request_len, int64_t now_unix_millis,
+                                   size_t *out_merged, uint8_t **out_vault_bytes,
+                                   size_t *out_vault_bytes_len);
 
 /* ADDED IN ABI v19. Load a vault WITHOUT opening it. Nothing can be read
  * through the handle (every read returns -4) until vault_ffi_sync_adopt_password

@@ -17,6 +17,7 @@ struct VaultListView: View {
     @State private var creating: VaultCreateKind?
     @State private var generatingPassword = false
     @State private var showingDevices = false
+    @State private var findingDuplicates = false
     /// Asking for a master password changed on another device: once when sync
     /// finds the change, then from the banner after "Not now".
     @State private var askingNewPassword = false
@@ -153,6 +154,9 @@ struct VaultListView: View {
                         Button("Generate a password", systemImage: "wand.and.sparkles") {
                             generatingPassword = true
                         }
+                        Button("Find duplicates", systemImage: "square.on.square") {
+                            findingDuplicates = true
+                        }
                         Divider()
                         if store.quickUnlockEnabled {
                             Button("Turn off quick unlock", systemImage: "faceid") {
@@ -188,6 +192,7 @@ struct VaultListView: View {
             // Copy is the only thing that would make sense.
             .sheet(isPresented: $generatingPassword) { PasswordGeneratorView() }
             .sheet(isPresented: $showingDevices) { SyncDevicesView() }
+            .sheet(isPresented: $findingDuplicates) { DuplicatesView() }
             .onChange(of: store.needsNewPassword, initial: true) { _, needed in
                 askingNewPassword = needed
             }

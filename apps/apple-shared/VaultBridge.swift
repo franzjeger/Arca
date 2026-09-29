@@ -89,11 +89,13 @@ enum VaultShared {
     /// has pushed it (`vault_ffi_sync_set_device`, `vault_ffi_devices`); v21
     /// lets a phone keep the copy that carries a change and take it on from
     /// there (`vault_ffi_sync_rotated_copy`, `vault_ffi_vault_adopt`,
-    /// `vault_ffi_vault_key_epoch`).
+    /// `vault_ffi_vault_key_epoch`); v22 added the review and merge of
+    /// duplicate logins (`vault_ffi_find_duplicates`,
+    /// `vault_ffi_merge_duplicates`).
     /// Bump this in the SAME commit that bumps `ABI_VERSION`: nothing compiles
     /// against it, so a stale value is only ever caught at runtime, by this
     /// guard, on a device.
-    static let requiredAbiVersion: Int32 = 21
+    static let requiredAbiVersion: Int32 = 22
 
     // MARK: Password generation
 
@@ -487,6 +489,9 @@ enum VaultFFICode {
     static let passwordChanged: Int32 = -10
     /// The password opens a file that is not this vault's (ABI v18).
     static let differentVault: Int32 = -11
+    /// Items a choice was made about changed after they were shown; nothing
+    /// was done (ABI v22).
+    static let changed: Int32 = -12
 }
 
 /// Everything that can go wrong reaching or opening the shared vault.
@@ -535,6 +540,8 @@ extension VaultError: LocalizedError {
             return "Your master password was changed on another device. Open Arca and enter the new one."
         case .ffi(let code, _) where code == VaultFFICode.differentVault:
             return "That password opens a different vault, not this one."
+        case .ffi(let code, _) where code == VaultFFICode.changed:
+            return "These logins changed after you looked. Look again before merging."
         case .ffi, .malformedIdentities:
             return "Couldn't read your vault."
         case .abiMismatch:
@@ -733,6 +740,59 @@ struct VaultDevice: Decodable, Sendable, Identifiable, Equatable {
     let uploads: UInt64
     /// When it last pushed a copy, by its own clock (Unix ms).
     let lastUpload: Int64
+}
+
+/// A login in a group of duplicates, as `vault_ffi_find_duplicates` shows it.
+/// No secret: `password` only says which logins in the group share one.
+struct DuplicateLogin: Decodable, Sendable, Identifiable, Equatable {
+    let id: String
+    let revision: String
+    let title: String
+    let site: String
+    let username: String
+    /// When it was last edited (Unix ms).
+    let modifiedAt: Int64
+    let password: Int
+    let hasPassword: Bool
+    let hasTotp: Bool
+    let hasNotes: Bool
+}
+
+/// Logins that look like one account.
+struct DuplicateGroup: Decodable, Sendable, Equatable {
+    /// One username on different sites of one domain, rather than one site.
+    let possible: Bool
+    /// The login a merge keeps unless another is picked.
+    let keep: String
+    /// Newest first.
+    let logins: [DuplicateLogin]
+}
+
+/// One group to merge, as it was chosen.
+struct DuplicateChoice: Encodable, Sendable, Equatable {
+    let keep: String
+    let ids: [String]
+}
+
+/// What `vault_ffi_merge_duplicates` takes: the groups chosen, and every login
+/// the review showed with the revision it had, so a merge about logins that
+/// changed since is refused rather than applied.
+struct DuplicateMergeRequest: Encodable, Sendable {
+    struct Shown: Encodable, Sendable {
+        let id: String
+        let revision: String
+    }
+
+    let choices: [DuplicateChoice]
+    let shown: [Shown]
+
+    init(choices: [DuplicateChoice], shown: [DuplicateLogin]) {
+        self.choices = choices
+        var seen = Set<String>()
+        self.shown = shown.compactMap { login in
+            seen.insert(login.id).inserted ? Shown(id: login.id, revision: login.revision) : nil
+        }
+    }
 }
 
 /// One login identity (metadata only) as produced by `vault_ffi_identities`.
@@ -1548,6 +1608,71 @@ final class VaultSession: @unchecked Sendable {
             }
             defer { vault_ffi_free(vault, vaultLength) }
             try VaultShared.writeVault(Data(bytes: vault, count: vaultLength))
+        }
+    }
+
+    /// Duplicate logins, as a review shows them.
+    ///
+    /// What other parts of Arca wrote is folded in first. A merge folds it in
+    /// too, and without this the review would show revisions the merge then
+    /// finds changed, refusing it over something that happened before anyone
+    /// looked.
+    func findDuplicates() async throws -> [DuplicateGroup] {
+        try await Self.run {
+            let lock = try VaultShared.acquireVaultLock()
+            defer { lock.release() }
+            try Self.foldInDiskState(self.handle)
+            var json: UnsafeMutablePointer<UInt8>?
+            var length = 0
+            let code = vault_ffi_find_duplicates(self.handle, &json, &length)
+            guard code == VaultFFICode.ok else {
+                throw VaultError.ffi(code: code, operation: "find_duplicates")
+            }
+            guard let json else { return [] }
+            defer { vault_ffi_free(json, length) }
+            do {
+                return try JSONDecoder()
+                    .decode([DuplicateGroup].self, from: Data(bytes: json, count: length))
+            } catch {
+                throw VaultError.malformedIdentities
+            }
+        }
+    }
+
+    /// Merge the groups chosen and persist the vault. Returns how many logins
+    /// went to the Trash.
+    ///
+    /// `shown` is every login the review showed. If one of them changed since,
+    /// nothing is merged and this throws `VaultFFICode.changed`: show the
+    /// review again.
+    func mergeDuplicates(_ choices: [DuplicateChoice], shown: [DuplicateLogin]) async throws -> Int {
+        let request = try JSONEncoder().encode(DuplicateMergeRequest(choices: choices, shown: shown))
+        return try await Self.run {
+            let lock = try VaultShared.acquireVaultLock()
+            defer { lock.release() }
+            try Self.foldInDiskState(self.handle)
+            var vault: UnsafeMutablePointer<UInt8>?
+            var vaultLength = 0
+            var merged = 0
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            let code = request.withUnsafeBytes { buf in
+                vault_ffi_merge_duplicates(
+                    self.handle,
+                    buf.bindMemory(to: UInt8.self).baseAddress,
+                    buf.count,
+                    now,
+                    &merged,
+                    &vault,
+                    &vaultLength)
+            }
+            guard code == VaultFFICode.ok, let vault else {
+                throw VaultError.ffi(code: code, operation: "merge_duplicates")
+            }
+            defer { vault_ffi_free(vault, vaultLength) }
+            if merged > 0 {
+                try VaultShared.writeVault(Data(bytes: vault, count: vaultLength))
+            }
+            return merged
         }
     }
 

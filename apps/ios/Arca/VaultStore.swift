@@ -572,6 +572,23 @@ final class VaultStore {
         }
     }
 
+    /// Duplicate logins, as a review shows them. Nothing while locked.
+    func findDuplicates() async throws -> [DuplicateGroup] {
+        guard let session else { return [] }
+        return try await session.findDuplicates()
+    }
+
+    /// Merge the groups chosen in a review. Returns how many logins went to
+    /// the Trash; throws `VaultFFICode.changed` when one shown has changed.
+    func mergeDuplicates(_ choices: [DuplicateChoice], shown: [DuplicateLogin]) async throws -> Int {
+        guard let session else { return 0 }
+        let merged = try await session.mergeDuplicates(choices, shown: shown)
+        if merged > 0 {
+            await didWrite(session)
+        }
+        return merged
+    }
+
     private func didWrite(_ session: VaultSession) async {
         guard self.session === session else { return }
         // Include notes, Wi-Fi and deletions, not just login edits.
