@@ -3,7 +3,8 @@
 //! Duplicates arise from imports, save-on-submit racing an import, or syncing
 //! two devices that each saved the same site. Two active logins are considered
 //! duplicates when they share the same **site host** and (case-insensitive)
-//! **username**.
+//! **username**. A login without a site has only its **title** to go by, so
+//! there title and username must both match.
 //!
 //! Merge policy (lossless where possible):
 //! * Winner: the most recently modified item with a non-empty password (ties →
@@ -19,22 +20,42 @@ use crate::item::{Item, VaultItem};
 use crate::url::host_of;
 use std::collections::HashMap;
 
+/// What two logins must share to be one account, or `None` when a login has
+/// too little to tell. With a site that is the host and the username. Without
+/// one, the username alone would make "Router" and "NAS", both `admin` and
+/// neither with an address, one account, so the title must match as well.
+fn account_key(title: &str, url: &str, username: &str) -> Option<(String, String)> {
+    let user = username.trim().to_lowercase();
+    let host = host_of(url);
+    if !host.is_empty() {
+        return Some((host, user));
+    }
+    let title = title.trim().to_lowercase();
+    if user.is_empty() || title.is_empty() {
+        return None;
+    }
+    // A leading space cannot start a host, so this never meets a site key.
+    Some((format!(" {title}"), user))
+}
+
 /// Merge duplicate active logins in place. Returns the number of items that
 /// were merged away (soft-deleted into the Trash).
 pub fn merge_duplicate_logins(items: &mut [Item], now_unix_millis: i64) -> usize {
-    // Group indices of active logins by (host, username).
     let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for (i, item) in items.iter().enumerate() {
         if item.is_deleted() {
             continue;
         }
-        if let VaultItem::Login { username, url, .. } = &item.data {
-            let user = username.trim().to_lowercase();
-            let host = host_of(url);
-            if host.is_empty() && user.is_empty() {
-                continue; // nothing to key on; leave untouched
+        if let VaultItem::Login {
+            title,
+            username,
+            url,
+            ..
+        } = &item.data
+        {
+            if let Some(key) = account_key(title, url, username) {
+                groups.entry(key).or_default().push(i);
             }
-            groups.entry((host, user)).or_default().push(i);
         }
     }
 
@@ -116,6 +137,10 @@ mod tests {
     use super::*;
 
     fn login(user: &str, url: &str, pw: &str, modified: i64) -> Item {
+        titled(url, user, url, pw, modified)
+    }
+
+    fn titled(title: &str, user: &str, url: &str, pw: &str, modified: i64) -> Item {
         Item {
             id: uuid::Uuid::new_v4(),
             created_at: modified,
@@ -126,7 +151,7 @@ mod tests {
             password_history: Vec::new(),
             sync_conflict: None,
             data: VaultItem::Login {
-                title: url.into(),
+                title: title.into(),
                 username: user.into(),
                 password: pw.into(),
                 url: url.into(),
@@ -167,6 +192,29 @@ mod tests {
         ];
         assert_eq!(merge_duplicate_logins(&mut items, 100), 0);
         assert_eq!(active_logins(&items), 3);
+    }
+
+    #[test]
+    fn logins_without_a_site_are_one_account_only_under_one_title() {
+        let mut items = vec![
+            titled("Router", "admin", "", "router-pw", 1),
+            titled("NAS", "admin", "", "nas-pw", 2),
+            // No username either: nothing to tell two such logins apart by.
+            titled("Door code", "", "", "1234", 3),
+            titled("Door code", "", "", "5678", 4),
+        ];
+        assert_eq!(merge_duplicate_logins(&mut items, 100), 0);
+        assert_eq!(active_logins(&items), 4);
+
+        let mut items = vec![
+            titled("Router", "admin", "", "router-pw", 1),
+            titled(" router ", "Admin", "", "router-pw", 2),
+            titled("Router", "admin", "https://router.example", "router-pw", 3),
+        ];
+        // The two without an address are one account; the one with an
+        // address is keyed by its site and stays apart.
+        assert_eq!(merge_duplicate_logins(&mut items, 100), 1);
+        assert_eq!(active_logins(&items), 2);
     }
 
     #[test]
