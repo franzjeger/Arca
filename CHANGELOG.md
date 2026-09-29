@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Import: a Bitwarden CSV export keeps its authenticator codes. The importer
+  did not know Bitwarden's `login_totp` column, so every login came in without
+  its 2FA code, and nothing said so.
 - Sync: whoever controls the Google account could show an older copy of the
   vault and hide the newer ones, and every device would quietly carry on from
   it. Every copy now records, sealed, how many copies each device has pushed.

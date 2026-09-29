@@ -538,6 +538,33 @@ fn parse_apple_csv_keeps_otpauth_and_skips_blank_rows() {
     assert!(logins[0].totp.starts_with("otpauth://"));
 }
 
+/// Bitwarden's export, as its documentation lays it out. The authenticator key
+/// sits in `login_totp`, which the importer used to skip, so every code was
+/// silently lost. A secure note has no login to import.
+#[test]
+fn do_import_logins_reads_bitwarden_exports() {
+    let dir = TempDir::new().unwrap();
+    let (state, _) = unlocked(&dir);
+    let csv_path = dir.path().join("bitwarden.csv");
+    std::fs::write(
+        &csv_path,
+        "folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n\
+         Social,1,login,Twitter,,,0,twitter.com,me@example.com,password123,JBSWY3DPEHPK3PXP\n\
+         ,,login,My Bank,Bank PIN is 1234,\"PIN: 1234\",0,https://www.wellsfargo.com/home.jhtml,john.smith,password123456,\n\
+         ,,note,My Note,\"This is a secure note.\",,0,,,,\n",
+    )
+    .unwrap();
+
+    let summary = do_import_logins(&state, csv_path.to_str().unwrap()).unwrap();
+    assert_eq!((summary.imported, summary.skipped), (2, 1));
+
+    let list = do_list_items(&state, false).unwrap();
+    let twitter = list.iter().find(|i| i.title == "Twitter").unwrap();
+    assert!(twitter.has_totp);
+    let bank = list.iter().find(|i| i.title == "My Bank").unwrap();
+    assert!(!bank.has_totp);
+}
+
 #[test]
 fn do_import_logins_adds_items_and_normalizes_totp() {
     let dir = TempDir::new().unwrap();
