@@ -29,6 +29,11 @@ export function VaultStatusBar({ onOpenSettings, conflictCount = 0, onReviewConf
       : now / 1000 - backup.lastSuccessUnix >= 30 * 60 ? "Last backup is over 30 minutes old"
       : null
     : null);
+  // A failing backup says how old the newest good one is: after days of
+  // failures, that is what decides how urgent it is.
+  const lastGood = backup?.lastError && backup.lastSuccessUnix != null
+    ? ` Last backup ${new Date(backup.lastSuccessUnix * 1000).toLocaleString()}.`
+    : "";
   const failure = actionError ?? error ?? status?.lastError;
   return <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-hairline px-4 py-2 text-[11px] text-neutral-400">
     {conflictCount > 0 && <button onClick={onReviewConflicts} className="font-medium text-amber-400 hover:underline">Review {conflictCount} sync conflict{conflictCount === 1 ? "" : "s"}</button>}
@@ -51,7 +56,7 @@ export function VaultStatusBar({ onOpenSettings, conflictCount = 0, onReviewConf
         finally { setRetrying(false); }
       }}>Retry sync</button>}
     <span role="status" className={backupWarning ? "text-amber-400" : undefined}>
-      {backupWarning ? `Backup: ${backupWarning}` : backup?.lastSuccessUnix != null
+      {backupWarning ? `Backup: ${backupWarning}${lastGood}` : backup?.lastSuccessUnix != null
         ? `Backed up ${new Date(backup.lastSuccessUnix * 1000).toLocaleString()}`
         : "Checking backup…"}
     </span>
