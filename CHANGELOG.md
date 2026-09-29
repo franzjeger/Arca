@@ -72,6 +72,12 @@
   not a vault this version can open, asks before replacing a vault, keeps the
   replaced file beside the new one, and writes under the vault lock like every
   other writer.
+
+## 0.6.2
+
+Never published as a release here: the version the source carried when this
+repository was imported with fresh history on 2026-09-25.
+
 - macOS: select matching local signing profiles before replacing the app,
   verify the installed AutoFill capabilities, and restore the previous app,
   helpers and browser registrations if installation fails. Keep the native
@@ -153,8 +159,10 @@
   an outstanding release requirement. V5 files need compatible clients on all
   devices; updating source does not install the iOS app on a phone.
 
+### 0.5.0 in detail
 
-## Unreleased
+Written during development under an "Unreleased" heading that stayed when
+the 0.5.0 summary above was added.
 
 - Prevent duplicate Touch ID prompts from overlapping window/browser unlocks
   and from a manual unlock regaining focus before its first prompt completes.
@@ -182,7 +190,7 @@
 - Sync iOS note, Wi-Fi and deletion changes; run the first cycle after Google
   sign-in and preserve error messages and last-sync timestamps across the FFI.
 
-### Data safety
+#### Data safety
 
 - **The Apple app and its AutoFill extension take a shared lock on the vault.**
   Two processes wrote one file, and each write being atomic is not the same as
@@ -224,7 +232,7 @@
   every other bridge write. They used to stay local-only until an unrelated
   edit happened to push them.
 
-### Security
+#### Security
 
 - **The bridge handshake authenticates both ways (bridge protocol v2).** Only
   the client proved itself; the app proved nothing, so a client believed
@@ -272,7 +280,7 @@
   connection that goes silent is dropped after 5 minutes rather than holding
   its thread forever.
 
-### Autofill
+#### Autofill
 
 - A password Arca generates is now offered for saving on submit. Generation is
   offered on sign-up and password-reset forms — two password boxes, often no
@@ -385,7 +393,7 @@
   prompt each time, none of which could ever work. It now falls back to the
   master password in Arca's own window, which is the only thing that says why.
 
-### Desktop app
+#### Desktop app
 
 - **An automatic lock no longer discards an open editor.** With "lock when
   window loses focus" on, the ordinary way to use the generator destroyed the
