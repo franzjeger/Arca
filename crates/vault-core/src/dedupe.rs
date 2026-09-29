@@ -1,148 +1,273 @@
 //! Find & merge duplicate logins.
 //!
 //! Duplicates arise from imports, save-on-submit racing an import, or syncing
-//! two devices that each saved the same site. Two active logins are considered
-//! duplicates when they share the same **site host** and (case-insensitive)
-//! **username**. A login without a site has only its **title** to go by, so
-//! there title and username must both match.
+//! two devices that each saved the same site. Finding and merging are apart:
+//! [`find_duplicate_logins`] reports groups for someone to review, and
+//! [`merge_logins`] merges one group into the login chosen to keep.
+//!
+//! Two active logins are the **same** account when they share the **site
+//! host** and (case-insensitive) **username**. A login without a site has only
+//! its **title** to go by, so there title and username must both match. One
+//! username on different sites of one registrable domain
+//! (`accounts.google.com` and `google.com`) is a **possible** match: often one
+//! account, sometimes two, so only someone looking can say.
 //!
 //! Merge policy (lossless where possible):
-//! * Winner: the most recently modified item with a non-empty password (ties →
-//!   most recently modified overall).
-//! * Password/TOTP: the winner's; if the winner lacks a TOTP but a duplicate
-//!   has one, it is adopted (never dropped).
+//! * Kept: the login chosen. By default the most recently modified item with a
+//!   non-empty password (ties → most recently modified overall).
+//! * Password/TOTP: the kept login's; if it lacks a TOTP but a duplicate has
+//!   one, it is adopted (never dropped).
 //! * Other passwords: every different password the duplicates held, and their
-//!   own history, go into the winner's password history.
-//! * Notes: distinct non-empty notes from losers are appended to the winner.
+//!   own history, go into the kept login's password history.
+//! * Notes: distinct non-empty notes from the others are appended.
 //! * `created_at`: the earliest across the group (true age of the account).
-//! * Losers are **soft-deleted** (moved to Trash), so nothing is destroyed and
-//!   the merge propagates to synced peers as ordinary tombstones.
+//! * The others are **soft-deleted** (moved to Trash), so nothing is destroyed
+//!   and the merge propagates to synced peers as ordinary tombstones.
 
 use crate::item::{Item, PasswordRevision, VaultItem, MAX_PASSWORD_HISTORY};
 use crate::url::host_of;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
-/// What two logins must share to be one account, or `None` when a login has
-/// too little to tell. With a site that is the host and the username. Without
-/// one, the username alone would make "Router" and "NAS", both `admin` and
-/// neither with an address, one account, so the title must match as well.
-fn account_key(title: &str, url: &str, username: &str) -> Option<(String, String)> {
+/// How alike the logins in a group are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Likeness {
+    /// One site (or, without one, one title) and one username: the same
+    /// account saved more than once.
+    Same,
+    /// One username on different sites of one registrable domain: often one
+    /// account, sometimes not.
+    Possible,
+}
+
+/// Logins that look like one account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DuplicateGroup {
+    pub likeness: Likeness,
+    /// The login a merge keeps unless told otherwise: the newest with a
+    /// password.
+    pub keep: Uuid,
+    /// Every login in the group, `keep` included, newest first.
+    pub ids: Vec<Uuid>,
+}
+
+/// One group to merge, as someone chose it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeChoice {
+    pub keep: Uuid,
+    pub ids: Vec<Uuid>,
+}
+
+/// What two logins must share to be one account.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Account {
+    Site {
+        host: String,
+        user: String,
+    },
+    /// Without a site, the username alone would make "Router" and "NAS", both
+    /// `admin` and neither with an address, one account.
+    Titled {
+        title: String,
+        user: String,
+    },
+}
+
+/// The account an active login belongs to, or `None` when it is not one or
+/// has too little to tell.
+fn account_of(item: &Item) -> Option<Account> {
+    let VaultItem::Login {
+        title,
+        username,
+        url,
+        ..
+    } = &item.data
+    else {
+        return None;
+    };
+    if item.is_deleted() {
+        return None;
+    }
     let user = username.trim().to_lowercase();
     let host = host_of(url);
     if !host.is_empty() {
-        return Some((host, user));
+        return Some(Account::Site { host, user });
     }
     let title = title.trim().to_lowercase();
     if user.is_empty() || title.is_empty() {
         return None;
     }
-    // A leading space cannot start a host, so this never meets a site key.
-    Some((format!(" {title}"), user))
+    Some(Account::Titled { title, user })
 }
 
-/// Merge duplicate active logins in place. Returns the number of items that
-/// were merged away (soft-deleted into the Trash).
-pub fn merge_duplicate_logins(items: &mut [Item], now_unix_millis: i64) -> usize {
-    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+/// The registrable domain of a host by the Public Suffix List, so that
+/// `accounts.google.com` goes with `google.com` while `alice.github.io` and
+/// `bob.github.io` stay apart. None for IP addresses, which the list would
+/// pair by their last two numbers (`192.168.1.1` and `10.0.1.1` both give
+/// "1.1"), and for names without a registrable part, such as `localhost`.
+fn registrable_domain(host: &str) -> Option<&str> {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    psl::domain_str(host)
+}
+
+/// The login a merge keeps by default: the newest with a password, then the
+/// newest. The id settles a tie the same way on every device.
+fn default_keep(items: &[Item], idxs: &[usize]) -> usize {
+    *idxs
+        .iter()
+        .max_by_key(|&&i| {
+            let has_password = items[i].password().is_some_and(|p| !p.is_empty());
+            (has_password, items[i].modified_at, items[i].id)
+        })
+        .expect("group is non-empty")
+}
+
+/// Groups of active logins that look like one account, for review: the same
+/// account first, then possible ones, each by the kept login's title.
+///
+/// A possible group lists one login per account. An account saved more than
+/// once, a group of its own, stands there as the login that group keeps by
+/// default.
+pub fn find_duplicate_logins(items: &[Item]) -> Vec<DuplicateGroup> {
+    let mut accounts: BTreeMap<Account, Vec<usize>> = BTreeMap::new();
     for (i, item) in items.iter().enumerate() {
-        if item.is_deleted() {
-            continue;
-        }
-        if let VaultItem::Login {
-            title,
-            username,
-            url,
-            ..
-        } = &item.data
-        {
-            if let Some(key) = account_key(title, url, username) {
-                groups.entry(key).or_default().push(i);
-            }
+        if let Some(account) = account_of(item) {
+            accounts.entry(account).or_default().push(i);
         }
     }
 
-    let mut merged = 0usize;
-    for (_, idxs) in groups {
-        if idxs.len() < 2 {
-            continue;
+    let mut found: Vec<(Likeness, usize, Vec<usize>)> = Vec::new();
+    let mut by_domain: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (account, idxs) in accounts {
+        let keep = default_keep(items, &idxs);
+        if let Account::Site { host, user } = &account {
+            if let Some(domain) = registrable_domain(host) {
+                by_domain
+                    .entry((domain.to_owned(), user.clone()))
+                    .or_default()
+                    .push(keep);
+            }
         }
-        // Pick the winner: newest modified with a non-empty password, else
-        // newest modified overall.
-        let winner_idx = *idxs
-            .iter()
-            .max_by_key(|&&i| {
-                let has_pw = matches!(
-                    &items[i].data,
-                    VaultItem::Login { password, .. } if !password.is_empty()
-                );
-                (has_pw, items[i].modified_at)
-            })
-            .expect("group is non-empty");
-
-        // Collect what the losers contribute, then apply to the winner.
-        let mut adopt_totp: Option<String> = None;
-        let mut extra_notes: Vec<String> = Vec::new();
-        let mut earlier_passwords: Vec<PasswordRevision> = Vec::new();
-        let mut earliest_created = items[winner_idx].created_at;
-        for &i in &idxs {
-            if i == winner_idx {
-                continue;
-            }
-            earliest_created = earliest_created.min(items[i].created_at);
-            if let Some(password) = items[i].password().filter(|p| !p.is_empty()) {
-                earlier_passwords.push(PasswordRevision {
-                    id: items[i].revision,
-                    replaced_at: items[i].modified_at,
-                    password: password.to_owned(),
-                });
-            }
-            earlier_passwords.extend(items[i].password_history.iter().cloned());
-            if let VaultItem::Login {
-                totp_secret, notes, ..
-            } = &items[i].data
-            {
-                if adopt_totp.is_none() {
-                    if let Some(t) = totp_secret {
-                        if !t.is_empty() {
-                            adopt_totp = Some(t.clone());
-                        }
-                    }
-                }
-                if !notes.trim().is_empty() {
-                    extra_notes.push(notes.clone());
-                }
-            }
-            // Soft-delete the loser: recoverable, and syncs as a tombstone.
-            items[i].deleted_at = Some(now_unix_millis);
-            items[i].modified_at = now_unix_millis;
-            merged += 1;
+        if idxs.len() > 1 {
+            found.push((Likeness::Same, keep, idxs));
         }
+    }
+    for idxs in by_domain.into_values() {
+        if idxs.len() > 1 {
+            found.push((Likeness::Possible, default_keep(items, &idxs), idxs));
+        }
+    }
 
-        let winner = &mut items[winner_idx];
-        keep_passwords(winner, earlier_passwords);
-        winner.created_at = earliest_created;
-        winner.modified_at = now_unix_millis;
+    let title = |i: usize| items[i].data.title().to_lowercase();
+    found.sort_by_cached_key(|(likeness, keep, _)| (*likeness, title(*keep), items[*keep].id));
+    found
+        .into_iter()
+        .map(|(likeness, keep, mut idxs)| {
+            idxs.sort_by_key(|&i| (std::cmp::Reverse(items[i].modified_at), items[i].id));
+            DuplicateGroup {
+                likeness,
+                keep: items[keep].id,
+                ids: idxs.iter().map(|&i| items[i].id).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Merge every group of the same account into the login it keeps by default,
+/// without review. Returns the number of items merged away (soft-deleted into
+/// the Trash).
+pub fn merge_duplicate_logins(items: &mut [Item], now_unix_millis: i64) -> usize {
+    find_duplicate_logins(items)
+        .into_iter()
+        .filter(|group| group.likeness == Likeness::Same)
+        .map(|group| merge_logins(items, &group.ids, group.keep, now_unix_millis))
+        .sum()
+}
+
+/// Merge the active logins among `ids` into `keep`: the others go to the
+/// Trash, and their passwords, TOTP and notes as the policy above says.
+/// Returns how many were merged away; none when `keep` is not an active login.
+pub fn merge_logins(items: &mut [Item], ids: &[Uuid], keep: Uuid, now_unix_millis: i64) -> usize {
+    let mergeable =
+        |item: &Item| !item.is_deleted() && matches!(item.data, VaultItem::Login { .. });
+    let Some(winner_idx) = items
+        .iter()
+        .position(|item| item.id == keep && mergeable(item))
+    else {
+        return 0;
+    };
+    let losers: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(i, item)| *i != winner_idx && ids.contains(&item.id) && mergeable(item))
+        .map(|(i, _)| i)
+        .collect();
+    if losers.is_empty() {
+        return 0;
+    }
+
+    // Collect what the losers contribute, then apply to the winner.
+    let mut adopt_totp: Option<String> = None;
+    let mut extra_notes: Vec<String> = Vec::new();
+    let mut earlier_passwords: Vec<PasswordRevision> = Vec::new();
+    let mut earliest_created = items[winner_idx].created_at;
+    for &i in &losers {
+        earliest_created = earliest_created.min(items[i].created_at);
+        if let Some(password) = items[i].password().filter(|p| !p.is_empty()) {
+            earlier_passwords.push(PasswordRevision {
+                id: items[i].revision,
+                replaced_at: items[i].modified_at,
+                password: password.to_owned(),
+            });
+        }
+        earlier_passwords.extend(items[i].password_history.iter().cloned());
         if let VaultItem::Login {
             totp_secret, notes, ..
-        } = &mut winner.data
+        } = &items[i].data
         {
-            if totp_secret.as_deref().unwrap_or("").is_empty() {
-                if let Some(t) = adopt_totp {
-                    *totp_secret = Some(t);
+            if adopt_totp.is_none() {
+                if let Some(t) = totp_secret {
+                    if !t.is_empty() {
+                        adopt_totp = Some(t.clone());
+                    }
                 }
             }
-            for extra in extra_notes {
-                if !notes.contains(extra.trim()) {
-                    if !notes.is_empty() {
-                        notes.push('\n');
-                    }
-                    notes.push_str(&extra);
+            if !notes.trim().is_empty() {
+                extra_notes.push(notes.clone());
+            }
+        }
+        // Soft-delete the loser: recoverable, and syncs as a tombstone.
+        items[i].deleted_at = Some(now_unix_millis);
+        items[i].modified_at = now_unix_millis;
+    }
+
+    let winner = &mut items[winner_idx];
+    keep_passwords(winner, earlier_passwords);
+    winner.created_at = earliest_created;
+    winner.modified_at = now_unix_millis;
+    if let VaultItem::Login {
+        totp_secret, notes, ..
+    } = &mut winner.data
+    {
+        if totp_secret.as_deref().unwrap_or("").is_empty() {
+            if let Some(t) = adopt_totp {
+                *totp_secret = Some(t);
+            }
+        }
+        for extra in extra_notes {
+            if !notes.contains(extra.trim()) {
+                if !notes.is_empty() {
+                    notes.push('\n');
                 }
+                notes.push_str(&extra);
             }
         }
     }
-    merged
+    losers.len()
 }
 
 /// Put the passwords the merged-away logins held into the survivor's history.
@@ -341,5 +466,81 @@ mod tests {
         merge_duplicate_logins(&mut items, 100);
         let survivor = items.iter().find(|i| !i.is_deleted()).unwrap();
         assert_eq!(survivor.created_at, 5);
+    }
+
+    fn ids(items: &[Item], which: &[usize]) -> Vec<uuid::Uuid> {
+        which.iter().map(|&i| items[i].id).collect()
+    }
+
+    #[test]
+    fn finds_the_same_account_and_possible_ones_without_merging() {
+        let items = vec![
+            titled("Google", "me@x.no", "https://google.com", "a", 10),
+            titled("Google", "ME@x.no", "https://www.google.com/", "b", 20),
+            titled(
+                "Google sign-in",
+                "me@x.no",
+                "https://accounts.google.com/",
+                "c",
+                30,
+            ),
+            // Another user of the same site, and the same user elsewhere.
+            titled("Google", "other@x.no", "https://google.com", "d", 40),
+            titled("GitHub", "me@x.no", "https://github.com", "e", 50),
+        ];
+        let groups = find_duplicate_logins(&items);
+        assert_eq!(
+            groups,
+            [
+                DuplicateGroup {
+                    likeness: Likeness::Same,
+                    keep: items[1].id,
+                    ids: ids(&items, &[1, 0]),
+                },
+                // The google.com account stands here as the login it keeps.
+                DuplicateGroup {
+                    likeness: Likeness::Possible,
+                    keep: items[2].id,
+                    ids: ids(&items, &[2, 1]),
+                },
+            ]
+        );
+        assert!(items.iter().all(|i| !i.is_deleted()));
+    }
+
+    #[test]
+    fn possible_matches_follow_the_public_suffix_list_and_skip_addresses() {
+        let items = vec![
+            // Different people's pages on one hosting domain.
+            login("me", "https://alice.github.io", "a", 1),
+            login("me", "https://bob.github.io", "b", 2),
+            // A router and a NAS: the list pairs any IPs by "1.1".
+            login("admin", "http://192.168.1.1", "c", 3),
+            login("admin", "http://10.0.1.1:8080", "d", 4),
+            login("admin", "https://localhost:5173", "e", 5),
+            login("admin", "http://[::1]:3000/", "f", 6),
+        ];
+        assert_eq!(find_duplicate_logins(&items), []);
+    }
+
+    #[test]
+    fn merges_one_group_into_the_login_chosen() {
+        let mut items = vec![
+            login("frank", "https://x.com", "older-pw", 10),
+            login("frank", "https://x.com", "newer-pw", 20),
+        ];
+        // Keep the older one, although the newer is the default.
+        let (keep, other) = (items[0].id, items[1].id);
+        assert_eq!(merge_logins(&mut items, &[keep, other], keep, 100), 1);
+        assert_eq!(items[0].password(), Some("older-pw"));
+        assert!(items[1].is_deleted());
+        let kept: Vec<&str> = items[0]
+            .password_history
+            .iter()
+            .map(|h| h.password.as_str())
+            .collect();
+        assert_eq!(kept, ["newer-pw"]);
+        // Nothing left to merge: the other is in the Trash.
+        assert_eq!(merge_logins(&mut items, &[keep, other], keep, 200), 0);
     }
 }

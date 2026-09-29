@@ -30,6 +30,7 @@ use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashMap;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -937,6 +938,89 @@ impl Vault {
         let before = self.unlocked_items()?.clone();
         let merged =
             crate::dedupe::merge_duplicate_logins(self.unlocked_items_mut()?, now_unix_millis);
+        self.advance_changed(&before)?;
+        Ok(merged)
+    }
+
+    /// Logins that look like one account, for someone to review before any
+    /// are merged. See [`crate::dedupe::find_duplicate_logins`].
+    pub fn find_duplicate_logins(&self) -> Result<Vec<crate::dedupe::DuplicateGroup>> {
+        Ok(crate::dedupe::find_duplicate_logins(self.unlocked_items()?))
+    }
+
+    /// Merge the groups someone chose, in order, exactly as they were shown.
+    ///
+    /// `reviewed` holds the revision of every login that was shown. If any of
+    /// them changed or went since, nothing is merged: the choice was about
+    /// logins that are no longer there. A login merged away by an earlier
+    /// group is followed to the login it went into, so a group of the same
+    /// account and a possible group that includes it can be merged together.
+    /// Returns how many logins were merged away.
+    pub fn merge_logins(
+        &mut self,
+        choices: &[crate::dedupe::MergeChoice],
+        reviewed: &[(Uuid, Uuid)],
+        now_unix_millis: i64,
+    ) -> Result<usize> {
+        let items = self.unlocked_items()?;
+        let unchanged = reviewed.iter().all(|(id, revision)| {
+            items.iter().any(|item| {
+                item.id == *id
+                    && item.revision == *revision
+                    && !item.is_deleted()
+                    && matches!(item.data, VaultItem::Login { .. })
+            })
+        });
+        if !unchanged {
+            return Err(Error::InvalidArgument(
+                "These logins changed. Look for duplicates again before merging.",
+            ));
+        }
+        let shown = |id: &Uuid| reviewed.iter().any(|(r, _)| r == id);
+        if choices.iter().any(|choice| {
+            choice.ids.len() < 2
+                || !choice.ids.contains(&choice.keep)
+                || !choice.ids.iter().all(shown)
+        }) {
+            return Err(Error::InvalidArgument(
+                "A group to merge must be two or more of the logins shown, with the one to keep.",
+            ));
+        }
+
+        let before = items.clone();
+        let mut went_into: HashMap<Uuid, Uuid> = HashMap::new();
+        let follow = |went_into: &HashMap<Uuid, Uuid>, mut id: Uuid| {
+            while let Some(next) = went_into.get(&id) {
+                id = *next;
+            }
+            id
+        };
+        let mut merged = 0;
+        for choice in choices {
+            let keep = follow(&went_into, choice.keep);
+            let mut ids: Vec<Uuid> = choice
+                .ids
+                .iter()
+                .map(|id| follow(&went_into, *id))
+                .collect();
+            ids.sort();
+            ids.dedup();
+            merged += crate::dedupe::merge_logins(
+                self.unlocked_items_mut()?,
+                &ids,
+                keep,
+                now_unix_millis,
+            );
+            for id in ids.into_iter().filter(|id| *id != keep) {
+                went_into.insert(id, keep);
+            }
+        }
+        self.advance_changed(&before)?;
+        Ok(merged)
+    }
+
+    /// Give every item that differs from `before` a new revision.
+    fn advance_changed(&mut self, before: &[Item]) -> Result<()> {
         let changed: Vec<Uuid> = self
             .unlocked_items()?
             .iter()
@@ -946,7 +1030,7 @@ impl Vault {
         for id in changed {
             self.advance_revision(id)?;
         }
-        Ok(merged)
+        Ok(())
     }
 
     /// Insert a new item or replace an existing one with the same id.
