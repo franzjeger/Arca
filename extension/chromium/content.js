@@ -524,7 +524,7 @@
   /// finishing the job after an unlock the user asked for. The second one used
   /// to stop at re-rendering the list, which meant unlocking to autofill did
   /// everything except autofill.
-  async function fillFrom(item, anchor, isIdentifier, pwField) {
+  async function fillFrom(item, anchor, isIdentifier, pwField, picked = false) {
     let fill;
     try {
       // The desktop app only releases it for a matching origin while unlocked;
@@ -533,6 +533,10 @@
         cmd: "fill",
         id: item.id,
         url: location.href,
+        // A row the user clicked. With Arca locked it opens itself for this
+        // fill, behind one Touch ID that names the site, rather than
+        // answering "locked" and having the user pick again.
+        picked,
       });
     } catch (e) {
       openPanel(anchor, note(`Could not fill: ${String(e)}`));
@@ -550,8 +554,20 @@
     // of listing all three in one sentence. "locked" is the only one with a fix
     // from here, so it gets the button rather than a full stop.
     const reason = (cred && cred.message) || "";
+    if (reason === "unlocking") {
+      // No Touch ID: Arca's window asks for the master password. This same
+      // login fills once it is open; nobody picks twice.
+      openPanel(anchor, note("Unlock Arca to fill this login…"));
+      if (await waitForUnlock(anchor)) return fillFrom(item, anchor, isIdentifier, pwField);
+      if (anchor.isConnected) openPanel(anchor, note("Arca is still locked."));
+      return false;
+    }
+    if (reason === "unlock_cancelled") {
+      openPanel(anchor, note("Arca stayed locked."));
+      return false;
+    }
     if (reason === "locked" || reason === "not_running") {
-      openPanel(anchor, unlockPrompt(anchor, isIdentifier));
+      openPanel(anchor, unlockPrompt(anchor, isIdentifier, picked ? item : null));
       return false;
     }
     openPanel(anchor, note(fillFailureText(reason)));
@@ -617,6 +633,7 @@
             account_mismatch: "This page requested a passkey for a different account. Choose that account or switch accounts on the site.",
             request_cancelled: "The site cancelled this passkey request. Start passkey sign-in on the site again.",
             locked: "Unlock Arca, then choose your passkey again.",
+            unlock_cancelled: "Arca stayed locked.",
             passkeys_disabled: "Passkey handling is disabled in Arca settings.",
             site_never: "Passkeys are disabled for this site in the Arca extension settings.",
             timeout: "Arca did not finish the passkey request. Try passkey sign-in again.",
@@ -639,7 +656,7 @@
           closePanel();
           return;
         }
-        await fillFrom(item, anchor, isIdentifier, pwField);
+        await fillFrom(item, anchor, isIdentifier, pwField, true);
       } catch (error) {
         openPanel(anchor, note(`Could not fill: ${String(error)}`));
       }
@@ -676,7 +693,7 @@
   /// the exact moment the user had already said what they wanted by clicking
   /// the badge. Now the click brings Arca forward, it asks for Touch ID, and
   /// the suggestions appear here by themselves.
-  function unlockPrompt(anchor, isIdentifier) {
+  function unlockPrompt(anchor, isIdentifier, picked = null) {
     const wrap = document.createElement("div");
     const row = document.createElement("button");
     row.className = "sybr-row";
@@ -697,7 +714,7 @@
       // Keep the "Unlocking Arca…" panel this opens from being dismissed by
       // the very click that asked for it.
       e.stopPropagation();
-      void requestUnlock(anchor, isIdentifier);
+      void requestUnlock(anchor, isIdentifier, picked);
     });
     wrap.appendChild(row);
     return wrap;
@@ -708,7 +725,36 @@
   const UNLOCK_COOLDOWN_MS = 5000;
   let lastUnlockRequest = 0;
 
-  async function requestUnlock(anchor, isIdentifier) {
+  /// What Arca lists for this page once it answers as unlocked, or null if it
+  /// has not within `ms`, or the field left the page. Polled rather than
+  /// pushed: the unlock happens in another application, behind a prompt the
+  /// user may also ignore.
+  async function waitForUnlock(anchor, ms = 60000) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 700));
+      // Gone from the page, or the user moved on. Stop.
+      if (!anchor.isConnected) return null;
+      let probe;
+      try {
+        probe = await api.runtime.sendMessage({
+          cmd: "listLogins",
+          url: location.href,
+        });
+      } catch {
+        return null;
+      }
+      const resp = (probe && probe.ok && probe.response) || {};
+      if (resp.app_connected) {
+        cache = null;
+        lockedHintShown = false;
+        return resp;
+      }
+    }
+    return null;
+  }
+
+  async function requestUnlock(anchor, isIdentifier, picked = null) {
     const now = Date.now();
     if (now - lastUnlockRequest < UNLOCK_COOLDOWN_MS) return;
     lastUnlockRequest = now;
@@ -727,42 +773,24 @@
       return;
     }
 
-    // Poll rather than wait for a push: the unlock happens in another
-    // application, behind a biometric prompt the user may also ignore. Give up
-    // quietly after a while instead of leaving a spinner on their page.
-    const deadline = Date.now() + 60000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 700));
-      // Gone from the page, or the user moved on. Stop.
-      if (!anchor.isConnected) return;
-      let probe;
-      try {
-        probe = await api.runtime.sendMessage({
-          cmd: "listLogins",
-          url: location.href,
-        });
-      } catch {
-        return;
-      }
-      const resp = (probe && probe.ok && probe.response) || {};
-      if (resp.app_connected) {
-        cache = null;
-        lockedHintShown = false;
-        const items = Array.isArray(resp.items) ? resp.items : [];
-        // Exactly one login for this site: finish the job. You clicked "unlock
-        // to autofill" on this field — being handed a list of one to click
-        // again is asking the same question twice.
-        const only = items.filter((i) => i.kind !== "passkey");
-        if (only.length === 1) {
-          cache = { url: location.href, items };
-          const pwField = isIdentifier ? visiblePasswordField(anchor) : anchor;
-          if (await fillFrom(only[0], anchor, isIdentifier, pwField)) return;
-        }
-        await showMatches(anchor, false, isIdentifier);
-        return;
-      }
+    const resp = await waitForUnlock(anchor);
+    if (!resp) {
+      if (anchor.isConnected) openPanel(anchor, note("Arca is still locked."));
+      return;
     }
-    openPanel(anchor, note("Arca is still locked."));
+    const items = Array.isArray(resp.items) ? resp.items : [];
+    const pwField = isIdentifier ? visiblePasswordField(anchor) : anchor;
+    // The login picked before Arca was unlocked is the one wanted: fill it.
+    // With none picked but exactly one for this site, finish the job too.
+    // You clicked "unlock to autofill" on this field; being handed a list to
+    // click again is asking the same question twice.
+    const only = items.filter((i) => i.kind !== "passkey");
+    const chosen = picked ?? (only.length === 1 ? only[0] : null);
+    if (chosen) {
+      cache = { url: location.href, items };
+      if (await fillFrom(chosen, anchor, isIdentifier, pwField)) return;
+    }
+    await showMatches(anchor, false, isIdentifier);
   }
 
   /** Visible password inputs in the same form as `el`, in document order. */

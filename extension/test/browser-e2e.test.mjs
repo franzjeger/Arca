@@ -196,11 +196,13 @@ fs.writeFileSync(
         return true;
       }
       const passkey = message.url.includes('passkey');
-      const count = message.url.includes('/steps') || message.url.includes('/slow') ? 12 : 1;
+      const picking = message.url.includes('/pick-locked');
+      const count = message.url.includes('/steps') || message.url.includes('/slow') ? 12 : picking ? 2 : 1;
       setTimeout(() => reply({ ok: true, response: { type: "logins", app_connected: true,
         items: Array.from({ length: count }, (_, index) => ({ id: "login-" + index,
           kind: passkey ? "passkey" : "login", title: "Fixture", credential_id: [1,2,3,4],
-          username: "alice@example.test", url: "http://127.0.0.1" })) } }), message.url.includes('/slow') ? 450 : 0);
+          username: picking ? ["first", "second"][index] + "@example.test" : "alice@example.test",
+          url: "http://127.0.0.1" })) } }), message.url.includes('/slow') ? 450 : 0);
     } else if (message.cmd === "passkeyAvailable") {
       reply({ available: true });
     } else if (message.cmd === "passkeyGate") {
@@ -214,6 +216,19 @@ fs.writeFileSync(
             signature: [9,9,9], user_handle: [7,7] }
         : { type: 'error', message: 'not_picked' } });
     } else if (message.cmd === "fill") {
+      if (message.url.includes('/pick-locked')) {
+        // Arca with no Touch ID: the first answer to a pick is its window
+        // asking for the master password. Only a pick may get that far.
+        if (!self.windowAsked) {
+          self.windowAsked = true;
+          reply({ ok: true, response: { type: "error",
+            message: message.picked === true ? "unlocking" : "not_picked" } });
+          return true;
+        }
+        reply({ ok: true, response: { type: "credentials",
+          username: message.id + "@example.test", password: "secret-" + message.id } });
+        return true;
+      }
       reply({ ok: true, response: { type: "credentials",
         username: "alice@example.test", password: "stored-secret" } });
     } else if (message.cmd === "generatePassword") {
@@ -686,6 +701,23 @@ try {
   assert.equal(await evaluate('query("#sign-password").value'), '', 'synthetic unlock click does not fill');
   await trustedClick();
   await waitFor('query("#sign-password").value === "stored-secret"', "unlock then automatic fill");
+  // A login picked while Arca asks for its master password in its window: the
+  // same login fills once it is open, with no list to pick from again. The
+  // second of two, so neither "the only one" nor "the first" can pass for it.
+  await send("Page.navigate", { url: pageUrl + 'pick-locked' }, sessionId);
+  await waitFor('document.querySelectorAll(".sybr-badge-host").length >= 5', "picking page badges");
+  await evaluate('query("#sign-password").focus()');
+  await waitFor('[...(document.querySelector(".sybr-panel")?.shadowRoot?.querySelectorAll(".sybr-row") ?? [])].some(r => r.textContent.includes("second@example.test"))', "two logins");
+  const second = await evaluate(`(() => {
+    const row = [...document.querySelector(".sybr-panel").shadowRoot.querySelectorAll(".sybr-row")]
+      .find(r => r.textContent.includes("second@example.test"));
+    const rect = row.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`);
+  for (const type of ["mousePressed", "mouseReleased"]) {
+    await send("Input.dispatchMouseEvent", { type, x: second.x, y: second.y, button: "left", clickCount: 1 }, sessionId);
+  }
+  await waitFor('query("#sign-password").value === "secret-login-1"', "the picked login, once the window unlocked");
 } catch (error) {
   // Held, not rethrown yet: teardown runs next, and a failure THERE must not
   // replace this one. It did once — a cleanup ENOTEMPTY on CI was all that
