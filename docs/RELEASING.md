@@ -66,6 +66,29 @@ spctl --assess --type execute --verbose=2 target/release/bundle/macos/Arca.app
 You want `Authority=Developer ID Application`, `flags=0x10000(runtime)` and
 `source=Notarized Developer ID`.
 
+## Publishing
+
+```bash
+scripts/publish-release.sh             # show what would be published
+scripts/publish-release.sh --publish   # publish it
+```
+
+It publishes what `release-macos.sh` built, and only if that is this checkout:
+the app's own build info must name `HEAD`, clean, and the same CI gate must
+pass. It also checks that:
+
+- the disk image is stapled and both it and the app pass Gatekeeper;
+- `latest.json` names only files on this release, carrying the archive's
+  signature;
+- `CHANGELOG.md` has a section for the version, which becomes the notes.
+
+A tag that exists is never replaced: a published version is released again as a
+new one.
+
+Installed copies act on a release the moment it exists. So it is made as a
+draft, filled and checked, then published, and the script reads the public
+`latest.json` back to confirm what installed copies now see.
+
 ## Why a release carries restricted entitlements
 
 The App Group, shared keychain and AutoFill entitlements in
