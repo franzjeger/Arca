@@ -12,6 +12,25 @@ Current source version: **0.8.2** — see [`CHANGELOG.md`](./CHANGELOG.md)
 > reviewed this code. Read [`SECURITY.md`](./SECURITY.md) and
 > [`THREAT_MODEL.md`](./THREAT_MODEL.md) before trusting it with real secrets.
 
+## Install
+
+**macOS, Apple silicon.** Download the disk image from the
+[latest release](https://github.com/franzjeger/Arca/releases/latest), open it
+and drag Arca to Applications. It is signed with Developer ID and notarized, so
+it opens without warnings, and it carries its AutoFill extension and its browser
+host. Later releases install from Settings ▸ Updates, and only when you ask.
+
+**Browser extension.** Not in the browser stores yet. Load `extension/chromium/`
+unpacked from the release's source archive (`chrome://extensions` ▸ Developer
+mode ▸ Load unpacked). On macOS, Arca registers its browser host by itself each
+time it starts from Applications. After updating Arca, load the extension from
+the new version's source, or reload it. See
+[`extension/README.md`](./extension/README.md).
+
+**iPhone.** Through TestFlight, for its testers.
+
+**Windows and Linux.** No installer is published yet: build from source, below.
+
 ## What it does
 
 **Vault**
@@ -58,23 +77,22 @@ Current source version: **0.8.2** — see [`CHANGELOG.md`](./CHANGELOG.md)
 
 | Platform | State |
 | --- | --- |
-| **macOS** | Daily driver. Signed + notarizable releases, see [`docs/RELEASING.md`](./docs/RELEASING.md). |
+| **macOS** | Daily driver. Published releases for Apple silicon: Developer ID signed and notarized, with native AutoFill, the browser host inside, and updates from Settings ▸ Updates. See [`docs/RELEASING.md`](./docs/RELEASING.md). |
 | **Windows** | Working, including the ssh-agent named pipe. Built in CI. |
 | **Linux** | First run by a human on 2026-08-01, on CachyOS (KDE Plasma on Wayland, NVIDIA): builds from source, unlocks, saves, snapshots. The `.deb`/`.rpm` ship the native-messaging host and register it for Chromium-family browsers and Firefox, asserted by the `linux-package` job; the host-to-app handshake is verified, in-page autofill is not yet. Unlock without the master password with a USB key ([docs/KEYFILE-UNLOCK.md](docs/KEYFILE-UNLOCK.md)) — Linux's stand-in for Touch ID; the same stick also works on macOS and Windows. Still no Linux release artifact: build from source. |
-| **iOS** | Running on a phone since 2026-07-28: unlock, Face ID, search, add/edit/delete logins, passkey registration, an AutoFill provider, and Google Drive sync both ways (C ABI v21). Distributed to its testers through TestFlight. See [`docs/IOS.md`](./docs/IOS.md). |
+| **iOS** | Running on a phone since 2026-07-28: unlock, Face ID, search, add/edit/delete logins, passkey registration, an AutoFill provider, and Google Drive sync both ways (C ABI v22). Distributed to its testers through TestFlight. See [`docs/IOS.md`](./docs/IOS.md). |
 | **Android** | Not built. |
-| **System-wide macOS AutoFill** | Native passwords and passkeys, including registration, are embedded in locally development-signed builds. Requires local provisioning and enabling Arca in system settings. See [macOS setup](apps/macos/README.md) and [manual acceptance checks](docs/MACOS-PASSKEYS.md). |
+| **System-wide macOS AutoFill** | Native passwords and passkeys, including registration, in published releases and in local builds. Enable Arca under System Settings → General → AutoFill & Passwords. Local builds need development provisioning, see [macOS setup](apps/macos/README.md); manual checks are in [docs/MACOS-PASSKEYS.md](docs/MACOS-PASSKEYS.md). |
 
-**Release downloads (when published):** [GitHub releases](https://github.com/franzjeger/Arca/releases/latest). Source version and published installers may differ; check the release version before installing.
-This repository starts with a reviewed source snapshot and fresh history; the private predecessor remains an archive. No release is implied by the import.
-The macOS release process signs, notarizes and staples Apple Silicon installers.
-Windows source builds and tests run in CI; this does not imply a published
-Windows installer. Check the release's assets for your OS and architecture;
-build from source if no matching installer is listed.
+**Releases:** [GitHub releases](https://github.com/franzjeger/Arca/releases/latest)
+carry the macOS disk image, and the update archive and manifest that installed
+copies fetch. The source version on `main` can be ahead of the latest release.
+Windows source builds and tests run in CI, which does not make a published
+Windows installer; build from source where a release lists none for your system.
 
-Auto-update works from 0.3.0 onward. Copies older than that were only ever
-built on one machine and have to be replaced by hand
-([`docs/RELEASING.md`](./docs/RELEASING.md)).
+Installed copies from 0.8.0 on update themselves from Settings ▸ Updates.
+Builds from before the public repository point at its private predecessor and
+need one manual install ([`docs/RELEASING.md`](./docs/RELEASING.md)).
 
 ## Architecture
 
@@ -206,9 +224,12 @@ alongside it in `snapshots/`.
 
 ## Browser extension
 
-Load `extension/chromium/` unpacked, then install the native-messaging host so
-the extension can reach the app. Per-browser instructions are in
-[`extension/README.md`](./extension/README.md). The app must be **unlocked** for
+Load `extension/chromium/` unpacked. It reaches the app through a
+native-messaging host. On macOS that host ships inside Arca.app, and Arca
+registers it for Chrome, Brave, Edge, Chromium and Firefox each time it starts
+from Applications, so there is nothing else to install. On Linux and Windows,
+install the host as [`extension/README.md`](./extension/README.md) describes.
+Reload the extension after updating its files. The app must be **unlocked** for
 autofill to return anything.
 
 ## Continuous integration
