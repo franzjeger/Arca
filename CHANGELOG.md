@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.2 — 2026-09-30
+
+- Browser: updating a password from the save bar now takes. It updated only
+  the first stored copy of an account, so the next fill could use a second
+  copy with the old password, and the update looked as if it had never
+  happened. Every copy is updated now, each keeping the old password in its
+  history. The bar also outlived the password it offered: an Update clicked
+  after 90 seconds failed with "origin_mismatch". It keeps the password for
+  as long as it is shown, up to ten minutes, and says so plainly if it is gone.
+- Browser: a sign-in that asks for the account first and the password or
+  passkey after it takes one pick. The account picked on the first step is
+  filled on the password step without a list, and a passkey request takes the
+  passkey picked instead of Arca's window asking which account again. Only on
+  the same site, within a few minutes, and once.
+
+The browser extension is not updated by Arca: reload it from this version's
+source (chrome://extensions ▸ Reload) for the browser changes.
+
 ## 0.8.1 — 2026-09-30
 
 **The first release that installs itself.** On a Mac running 0.8.0, Settings ▸

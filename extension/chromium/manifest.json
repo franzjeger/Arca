@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Arca",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Detects login forms and autofills credentials from your Arca desktop vault.",
   "permissions": [
     "activeTab",
