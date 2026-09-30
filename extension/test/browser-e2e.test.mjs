@@ -231,6 +231,20 @@ fs.writeFileSync(
       }
       reply({ ok: true, response: { type: "credentials",
         username: "alice@example.test", password: "stored-secret" } });
+    } else if (message.cmd === "rememberPick") {
+      // Bound to the page that took it: the fixtures share one host, and a
+      // pick from one scenario must not answer the next scenario's request.
+      self.pickedAccount = { ...message, page: new URL(message.url).pathname };
+      reply({ ok: true });
+    } else if (message.cmd === "recallPick") {
+      // The worker's rule, minus the clock: one pick, one step of its kind.
+      const pick = self.pickedAccount;
+      const passkey = !!(pick && Array.isArray(pick.credentialId) && pick.credentialId.length);
+      const here = new URL(_sender.url).pathname;
+      const take = !!pick && pick.page === here && passkey === (message.kind === "passkey");
+      if (take) self.pickedAccount = null;
+      reply({ ok: true, pick: take
+        ? { id: pick.id, username: pick.username, credentialId: pick.credentialId } : null });
     } else if (message.cmd === "generatePassword") {
       reply({ ok: true, response: { type: "generated_password",
         password: "Generated-Strong-123!" } });
@@ -596,13 +610,19 @@ try {
     const shot = await send('Page.captureScreenshot', { format: 'png' }, sessionId);
     fs.writeFileSync(process.env.ARCA_AUTOFILL_SCREENSHOT, Buffer.from(shot.data, 'base64'));
   }
+  // Seen for a moment first, as a person would: only then is the pick one
+  // the password step may act on without asking.
+  await sleep(600);
   await trustedClick();
   assert.deepEqual(await evaluate("[query('#identifierId').value, query('#unrelated-password').value]"),
     ['alice@example.test', ''], 'identifier-only fill must leave unrelated passwords empty');
   await trustedClick('#next');
-  await waitFor("query('.sybr-panel .sybr-row') && query('#step-password')", 'dynamically focused password step');
-  await trustedClick();
-  await waitFor("query('#step-password').value === 'stored-secret'", 'password fill after advancing from the username step');
+  // The account picked on the username step is the one the password step
+  // gets: filled when the field appears, with no list and no second choice.
+  await waitFor("query('#step-password') && query('#step-password').value === 'stored-secret'",
+    'the picked account is filled on the password step without asking again');
+  assert.equal(await evaluate("!!query('.sybr-panel .sybr-row')"), false,
+    'no account list on the password step');
   // Cached suggestions survive the ordinary focus + click event sequence.
   await trustedClick('#address');
   await waitFor(pickerAt('#address'), 'cached picker stays open at the clicked field');

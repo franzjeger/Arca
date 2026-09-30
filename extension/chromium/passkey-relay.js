@@ -107,19 +107,43 @@
   window.__sybrPasskeyPicked = (credentialId) => {
     pick = { id: Array.from(credentialId || []), at: Date.now() };
   };
-  /// Spend the pick. True only when it is fresh and names the one credential
-  /// the request is for; taken either way, so one click approves one ceremony.
+  /// Whether a request allows credential `id`: it names no account, which
+  /// lets the user choose, or it names this one among others.
+  const allows = (allowCredentials, id) =>
+    !Array.isArray(allowCredentials) ||
+    allowCredentials.length === 0 ||
+    allowCredentials.some(
+      (want) =>
+        Array.isArray(want) &&
+        want.length === id.length &&
+        want.every((b, i) => b === id[i]),
+    );
+
+  /// Spend the pick: the credential chosen, when it is fresh and the request
+  /// allows it, or null. Taken either way, so one click approves one ceremony.
+  ///
+  /// A request that names no account used to be refused the pick, and Arca's
+  /// window then asked which account, right after the user had chosen one in
+  /// Arca's own list. The choice is theirs to make once: the request is
+  /// narrowed to it.
   const takePick = (allowCredentials) => {
     const p = pick;
     pick = null;
-    if (!p || !p.id.length || Date.now() - p.at > PICK_TTL_MS) return false;
-    if (!Array.isArray(allowCredentials) || allowCredentials.length !== 1) return false;
-    const want = allowCredentials[0];
-    return (
-      Array.isArray(want) &&
-      want.length === p.id.length &&
-      want.every((b, i) => b === p.id[i])
-    );
+    if (!p || !p.id.length || Date.now() - p.at > PICK_TTL_MS) return null;
+    return allows(allowCredentials, p.id) ? p.id : null;
+  };
+
+  /// A passkey picked in Arca's list on the sign-in's first step, the one
+  /// that asks only for the account name, often on the page before this one.
+  /// The worker kept it for this tab and host, and gives it up once.
+  const recalledPick = async (allowCredentials) => {
+    try {
+      const reply = await api.runtime.sendMessage({ cmd: "recallPick", kind: "passkey" });
+      const id = reply && reply.ok && reply.pick ? reply.pick.credentialId : null;
+      return Array.isArray(id) && id.length && allows(allowCredentials, id) ? id : null;
+    } catch (_e) {
+      return null;
+    }
   };
 
   const isBytes = (v) =>
@@ -329,7 +353,7 @@
       return;
     }
     // Before any await, so a second request cannot take this pick meanwhile.
-    const picked = d.kind === "get" && takePick(p.allowCredentials);
+    let chosen = d.kind === "get" ? takePick(p.allowCredentials) : null;
     const clientData = clientDataJSON(
       d.kind === "create" ? "webauthn.create" : "webauthn.get",
       p.challenge,
@@ -350,6 +374,7 @@
       const error = d.kind === "create"
         ? await ensureUnlocked(active, initial)
         : initial?.ok ? null : "provider_unavailable";
+      if (d.kind === "get" && !chosen) chosen = await recalledPick(p.allowCredentials);
       if (error || !active()) {
         result = failed(error || "unlock_cancelled");
       } else {
@@ -369,11 +394,13 @@
                 cmd: "passkeyGet",
                 origin: location.origin,
                 rpId: p.rpId,
-                allowCredentials: p.allowCredentials,
+                // Narrowed to the account the user chose, so Arca signs with
+                // that one instead of asking which.
+                allowCredentials: chosen ? [chosen] : p.allowCredentials,
                 clientDataHash: Array.from(
                   new Uint8Array(await crypto.subtle.digest("SHA-256", clientData)),
                 ),
-                picked,
+                picked: !!chosen,
               };
         if (active()) result = await api.runtime.sendMessage(message);
         const reason = d.kind === "get" && active() ? reasonOf(result) : null;

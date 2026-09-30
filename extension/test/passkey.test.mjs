@@ -703,7 +703,19 @@ console.log("\nA pick in Arca's picker is one approval, for one account");
   d.gesture();
   await tick();
   await d.pageCeremony("get", { challenge: [4], rpId: "example.org", allowCredentials: [] });
-  check("nor a request that names no account", LAST_NATIVE.picked, false);
+  // Arca's window used to ask which account here, right after the user had
+  // chosen one in Arca's own list.
+  check("a request that names no account takes the one picked", LAST_NATIVE.picked, true);
+  check("narrowed to it", JSON.stringify(LAST_NATIVE.allow_credentials), "[[1,2,3,4]]");
+
+  d.notePick([1, 2, 3, 4]);
+  d.gesture();
+  await tick();
+  await d.pageCeremony("get", {
+    challenge: [4], rpId: "example.org", allowCredentials: [[9, 9], [1, 2, 3, 4]],
+  });
+  check("so does one that names it among others", LAST_NATIVE.picked, true);
+  check("narrowed to it too", JSON.stringify(LAST_NATIVE.allow_credentials), "[[1,2,3,4]]");
 
   d.notePick([1, 2, 3, 4]);
   advance(16000);
@@ -711,6 +723,64 @@ console.log("\nA pick in Arca's picker is one approval, for one account");
   await tick();
   await d.pageCeremony("get", { challenge: [4], rpId: "example.org", allowCredentials: [[1, 2, 3, 4]] });
   check("and an old pick approves nothing", LAST_NATIVE.picked, false);
+  NATIVE_ANSWER = { type: "error", message: "locked" };
+}
+
+console.log("\nA passkey picked on the sign-in's first step is the one its next page uses");
+{
+  NATIVE_ANSWER = ASSERTION;
+  // The first step only takes the account name: the pick fills it, and the
+  // content script leaves the passkey with the worker for the next page.
+  const remember = (tabId, origin, credentialId = [1, 2, 3, 4]) =>
+    toWorker(
+      { cmd: "rememberPick", url: `${origin}/login`, id: "item-1", username: "frank", credentialId },
+      tabId, origin,
+    );
+  await remember(44, "https://example.org");
+  const next = makeDocument({ host: "example.org", tabId: 44 });
+  next.gesture();
+  await tick();
+  await next.pageCeremony("get", { challenge: [5], rpId: "example.org", allowCredentials: [] });
+  check("the next page's request takes it", LAST_NATIVE.picked, true);
+  check("narrowed to that passkey", JSON.stringify(LAST_NATIVE.allow_credentials), "[[1,2,3,4]]");
+  next.gesture();
+  await tick();
+  await next.pageCeremony("get", { challenge: [6], rpId: "example.org", allowCredentials: [] });
+  check("once", LAST_NATIVE.picked, false);
+
+  await remember(45, "https://example.org");
+  const elsewhere = makeDocument({ host: "evil.example", tabId: 45 });
+  elsewhere.gesture();
+  await tick();
+  await elsewhere.pageCeremony("get", { challenge: [7], rpId: "evil.example", allowCredentials: [] });
+  check("never on another host", LAST_NATIVE.picked, false);
+
+  await remember(46, "https://example.org");
+  const narrow = makeDocument({ host: "example.org", tabId: 46 });
+  narrow.gesture();
+  await tick();
+  await narrow.pageCeremony("get", { challenge: [8], rpId: "example.org", allowCredentials: [[9, 9]] });
+  check("nor for a request that names another account", LAST_NATIVE.picked, false);
+
+  await toWorker(
+    { cmd: "rememberPick", url: "https://example.org/login", id: "item-2", username: "frank", credentialId: null },
+    47, "https://example.org",
+  );
+  const passwordPick = makeDocument({ host: "example.org", tabId: 47 });
+  passwordPick.gesture();
+  await tick();
+  await passwordPick.pageCeremony("get", { challenge: [9], rpId: "example.org", allowCredentials: [] });
+  check("and a password pick is not a passkey", LAST_NATIVE.picked, false);
+  const left = await toWorker({ cmd: "recallPick", kind: "password" }, 47, "https://example.org");
+  check("it is left for the password step", left?.pick?.id, "item-2");
+
+  await remember(48, "https://example.org");
+  advance(3 * 60 * 1000 + 1000);
+  const late = makeDocument({ host: "example.org", tabId: 48 });
+  late.gesture();
+  await tick();
+  await late.pageCeremony("get", { challenge: [10], rpId: "example.org", allowCredentials: [] });
+  check("nor after a few minutes", LAST_NATIVE.picked, false);
   NATIVE_ANSWER = { type: "error", message: "locked" };
 }
 
