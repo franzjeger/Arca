@@ -77,10 +77,19 @@ they are local verification artifacts, not signed/published release installers.
    success on `6237924` is not evidence for later commits.
 2. **Review remaining Cargo advisories.** `glib` 0.18.5 comes through Tauri's
    Linux GTK3 stack; 0.17.10 is also present in the all-target lockfile through
-   robius-authentication. Both report
-   [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html).
-   Updating to the fixed 0.20+ API is not a compatible lockfile-only change to
-   these dependency chains. Seven unmaintained-package warnings remain for
+   robius-authentication (gio and polkit). Both report
+   [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html)
+   (Dependabot alert 1): the `Iterator` impls of `glib::VariantStrIter` are
+   unsound. Updating to the fixed 0.20+ API is not a compatible lockfile-only
+   change to these dependency chains. Reachability was checked on 2026-09-30
+   against the source of every crate in the lockfile that depends on glib (atk,
+   cairo-rs, gdk, gdk-pixbuf, gdkx11, gio 0.17 and 0.18, gtk, javascriptcore-rs,
+   libappindicator, pango, polkit, soup3, webkit2gtk) and Arca's own code:
+   nothing outside glib itself makes a `VariantStrIter` or calls
+   `Variant::array_iter_str`, and Arca does not use glib directly. The alert is
+   dismissed as not used. Check again whenever a dependency on that side
+   changes, and drop this note once Tauri's stack moves to glib 0.20.
+   Seven unmaintained-package warnings remain for
    bincode, proc-macro-error and five unic crates. They have not been suppressed
    or declared harmless. Assess reachability and the upstream migration path;
    changing bincode requires explicit vault-format compatibility review.
