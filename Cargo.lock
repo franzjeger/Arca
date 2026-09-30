@@ -6368,6 +6368,7 @@ name = "vault-desktop"
 version = "0.7.0"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "csv",
  "hmac 0.13.0",
  "interprocess",

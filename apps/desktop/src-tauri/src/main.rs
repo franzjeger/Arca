@@ -7,6 +7,10 @@ mod backups;
 mod biometric;
 mod bookmarks;
 mod bridge;
+// Built on every Unix so its tests run on Linux CI too; only macOS calls it.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod browser_host;
 mod clipboard;
 mod commands;
 mod conflicts;
@@ -202,6 +206,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // means autofill is unavailable this session.
     if let Err(e) = bridge::start(app.handle().clone(), &data_dir) {
         eprintln!("autofill bridge unavailable: {e}");
+    }
+    // The browsers start the host inside this app, so an update never leaves
+    // an older host speaking to a newer bridge.
+    #[cfg(target_os = "macos")]
+    if let Ok(home) = app.path().home_dir() {
+        std::thread::spawn(move || browser_host::register(&home));
     }
 
     // ssh-agent: expose vault SSH keys to ssh/git (Unix socket).

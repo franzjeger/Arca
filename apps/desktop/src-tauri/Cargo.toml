@@ -68,6 +68,8 @@ tauri-plugin-single-instance = "2"
 tempfile = "3"
 # Tests make the key files they import (none are checked in).
 ssh-key = { workspace = true, features = ["ed25519", "getrandom"] }
+# The Chromium extension's ID is checked against its manifest's key.
+base64 = "0.22"
 
 [lints]
 workspace = true
