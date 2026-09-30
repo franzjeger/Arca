@@ -6,64 +6,122 @@ notarized and stapled, or Gatekeeper refuses to open it.
 
 ```bash
 scripts/release-macos.sh                 # build, sign, notarize, staple
-scripts/release-macos.sh --no-notarize   # sign only, to check the build
+scripts/release-macos.sh --no-notarize   # build and sign only, to check the build
 ```
+
+Both start with `scripts/check-release.sh`: a clean checkout whose exact commit
+passed a full, manually dispatched CI run.
 
 ## One-time setup
 
-Notarization needs your Apple credentials. Create the keychain profile
-yourself — no script or tool here ever sees the password:
-
-1. Make an **app-specific password** at <https://appleid.apple.com> →
-   *Sign-In and Security* → *App-Specific Passwords*.
-2. Store it:
-
 ```bash
-xcrun notarytool store-credentials "arca-notary" --apple-id "<your-apple-id>" --team-id LY6LJ395B8
+scripts/setup-macos-signing.sh           # make what is missing
+scripts/setup-macos-signing.sh --check   # read only: what exists
 ```
 
-Check `security find-identity -v -p codesigning` for a usable Developer ID
-Application identity. Local Apple Development signing does not provide one.
-A certificate download does not restore its private key; restore both from a
-backup or manage replacement explicitly through Apple Developer.
+It works through the App Store Connect API key that `release-ios.sh` already
+uses, and makes:
 
-## Why release builds carry no entitlements
+- a **Developer ID Application** identity, with its private key generated on
+  this Mac, in a keychain of its own (`arca-developer-id.keychain`);
+- **Developer ID profiles** for the app and its AutoFill extension, which grant
+  the App Group, shared keychain and AutoFill capabilities on every Mac;
+- **notarization credentials** named `arca-notary`, from the same API key, so no
+  Apple ID password or app-specific password is involved.
 
-The App Group and shared-keychain entitlements in
-`apps/desktop/src-tauri/Entitlements.plist` are **restricted**: macOS (AMFI)
-kills an app that carries them without a provisioning profile that authorizes
-them — the "error 163" that stopped us for hours. They are therefore *not* in
-`tauri.conf.json`. A plain `tauri build` produces a clean bundle that Developer
-ID signing and notarization accept, while `install-app-macos.sh` re-applies them
-locally with matching profiles for native AutoFill, shared keychain access and
-App Group migration. The release script currently does not embed the native
-AutoFill extension; development-install capability checks do not validate a
-distribution bundle.
+Apple lets only the Account Holder create a Developer ID certificate, and not
+through an API key. The first run therefore stops with the steps for the
+developer portal and the signing request to upload there. In the portal, choose
+**G2 Sub-CA**: the preselected "Previous Sub-CA" issues certificates that all
+expire on 2027-02-01. Run the script again afterwards. It finds the new
+certificate by its key, so there is nothing to download.
 
-Verify a release build with:
+**Back up `~/.arca/signing/`** with the updater key and the `.p8`. A lost
+Developer ID key means a new certificate, and Apple caps how many a team may
+hold; what is already signed and notarized keeps working either way.
+
+## What a release is
+
+The same app the everyday install builds, assembled by the same script
+(`scripts/assemble-app-macos.sh`), with:
+
+- the **AutoFill extension** inside, so updating from the everyday build keeps
+  native AutoFill;
+- the **browser host** inside, beside the app's executable. Arca registers it
+  with the browsers when it starts, so an update replaces both halves of the
+  bridge together;
+- a **Developer ID signature** on the browser host, the extension and the app,
+  in that order, each with the hardened runtime and a secure timestamp.
+
+The app is notarized and stapled first, so the ticket travels inside it. The
+disk image is built from that app, then signed, notarized and stapled itself.
+
+Check a build with:
 
 ```bash
 codesign -dv --verbose=2 target/release/bundle/macos/Arca.app 2>&1 | grep -E 'Authority|flags='
+spctl --assess --type execute --verbose=2 target/release/bundle/macos/Arca.app
 ```
 
-You want `Authority=Developer ID Application` and `flags=0x10000(runtime)`.
+You want `Authority=Developer ID Application`, `flags=0x10000(runtime)` and
+`source=Notarized Developer ID`.
 
-## The stranded-vault guard
+## Publishing
 
-`release-macos.sh` refuses to build while the App Group container holds a
-**newer** vault than app data. A release build has no entitlement to read that
-container, so installing it would silently open the older copy and lose
-everything since. Launch the locally installed dev build once (it migrates the
-vault back), then release. The guard reads only file timestamps, which is
-allowed even though the contents are not.
+```bash
+scripts/publish-release.sh             # show what would be published
+scripts/publish-release.sh --publish   # publish it
+```
+
+It publishes what `release-macos.sh` built, and only if that is this checkout:
+the app's own build info must name `HEAD`, clean, and the same CI gate must
+pass. It also checks that:
+
+- the disk image is stapled and both it and the app pass Gatekeeper;
+- `latest.json` names only files on this release, carrying the archive's
+  signature;
+- `CHANGELOG.md` has a section for the version, which becomes the notes.
+
+A tag that exists is never replaced: a published version is released again as a
+new one.
+
+Installed copies act on a release the moment it exists. So it is made as a
+draft, filled and checked, then published, and the script reads the public
+`latest.json` back to confirm what installed copies now see.
+
+## Why a release carries restricted entitlements
+
+The App Group, shared keychain and AutoFill entitlements in
+`apps/desktop/src-tauri/Entitlements.plist` are **restricted**: macOS (AMFI)
+kills an app that carries them without a provisioning profile that authorizes
+them, the "error 163" that once stopped us for hours. They are therefore not in
+`tauri.conf.json`. Both install paths apply them after the build, each with its
+own profiles: development profiles that name this Mac, or Developer ID profiles
+that name none. `prepare-autofill-signing.py` refuses to mix the two.
+
+Release builds used to carry none of them, and could not read the App Group
+container, so `release-macos.sh` refused to build while the container held a
+newer vault than app data. A release now has the App Group, migrates a newer
+container vault itself as the everyday build does, and that guard is gone.
 
 ## Auto-update
 
 The app includes the updater plugin, public key and GitHub release endpoint.
-`release-macos.sh` requires the local updater private key, asks Tauri for signed
-updater artifacts, and writes `latest.json`. It fails if the signed archive is
-missing. Publishing those artifacts and the manifest is still a release step;
-a local build does not publish an update.
+`release-macos.sh` makes the update archive from the finished, stapled app
+(`Arca_<version>_aarch64.app.tar.gz`). The updater unpacks everything under the
+archive's first folder in place of the running app, so the archive holds
+`Arca.app/` alone, without AppleDouble `._` entries. The script signs it with the
+updater key, bound to the version, and writes `latest.json`.
+
+Tauri's own updater archive is not used on macOS: it would hold the app as it
+was before the extension, the host and the notarization ticket went in.
+
+The manifest is not signed, only the archive is. So the app requires the
+archive's signature to name the version the manifest announces
+(`requireSignedVersion`). Otherwise whoever could serve a manifest could pair a
+new version number with an older, validly signed archive, and install copies
+back onto an old release. No release was published before this was on, so
+every signature installed copies can meet carries its version.
 
 The default private-key path is `~/.arca/arca-updater.key`, overridable with
 `ARCA_UPDATER_KEY`. Keep the key outside Git and retain a secure backup. Apple
@@ -92,7 +150,8 @@ update once. Never embed a GitHub token to make that private endpoint work.
 
 | Platform | Updatable | Artifact |
 |---|---|---|
-| macOS | yes | `Arca.app.tar.gz` + `.sig` |
+| macOS, Apple silicon | yes | `Arca_<version>_aarch64.app.tar.gz` + `.sig` |
+| macOS, Intel | not built | the release is arm64 only |
 | Linux, AppImage | yes | `*.AppImage` + `.sig` |
 | Linux, `.deb`/`.rpm` | **no** | installed by the package manager |
 | Windows | not built | no release pipeline yet |
@@ -110,7 +169,7 @@ script merges its own entry with `scripts/update-manifest.py` rather than
 writing the file:
 
 ```
-scripts/release-macos.sh     # adds darwin-aarch64, darwin-x86_64
+scripts/release-macos.sh     # adds darwin-aarch64
 scripts/release-linux.sh     # adds linux-x86_64 (or linux-aarch64)
 ```
 
@@ -124,3 +183,7 @@ it claims.
 Before this merging existed each script wrote the whole file, so releasing one
 platform silently deleted the other's entry and stopped those installs from
 updating.
+
+The merge also refuses a signature by a key the installed copies do not trust,
+or one bound to another version. Either would offer an update every client then
+refuses, and nobody would notice until someone wondered why no update came.

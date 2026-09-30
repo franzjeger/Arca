@@ -61,6 +61,7 @@
       "endpoints": [
         "https://github.com/franzjeger/Arca/releases/latest/download/latest.json"
       ],
+      "requireSignedVersion": true,
       "windows": {
         "installMode": "passive"
       }
