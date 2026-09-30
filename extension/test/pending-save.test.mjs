@@ -113,6 +113,10 @@ check(!refusedClaim.ok, "and cannot claim it");
 
 const claim = await send({ cmd: "claimPending" }, from("https://example.test"));
 check(claim.ok, "the page that offers it claims it");
+check(
+  typeof session.get(KEY)?.claimedAt === "number",
+  "claiming starts the bar's own lifetime",
+);
 const again = await send({ cmd: "peekPending" }, from("https://example.test"));
 check(again.candidate === null, "so no later page offers it a second time");
 
@@ -163,6 +167,37 @@ const expired = await send({ cmd: "peekPending" }, from("https://example.test", 
 check(
   expired.candidate === null && !session.has("pendingSave:55"),
   "a candidate past the TTL is dropped instead of being revived",
+);
+
+// Once a page shows the save bar, the password lives as long as the bar can
+// be answered. The 90 seconds used to keep running under it, and an Update
+// clicked after them was refused with "origin_mismatch".
+const claimedEntry = (claimedAgo) => ({
+  candidate: { url: "https://example.test/login", username: "carol", password: "pw3" },
+  ts: Date.now() - claimedAgo - 30000,
+  origin: "https://example.test",
+  claimedBy: "https://example.test",
+  claimedAt: Date.now() - claimedAgo,
+});
+session.set("pendingSave:60", claimedEntry(4 * 60 * 1000));
+native.length = 0;
+await send(
+  { cmd: "saveLogin", pending: true, url: "https://example.test/login" },
+  from("https://example.test", 60),
+);
+check(
+  native[0]?.type === "save_login" && native[0].password === "pw3",
+  "an Update clicked minutes after the sign-in still saves",
+);
+session.set("pendingSave:61", claimedEntry(11 * 60 * 1000));
+native.length = 0;
+const late = await send(
+  { cmd: "saveLogin", pending: true, url: "https://example.test/login" },
+  from("https://example.test", 61),
+);
+check(
+  late?.ok === false && native.length === 0,
+  "but not after the bar's own ten minutes",
 );
 
 // The eviction case. A previous worker generation captured this; the Map in
