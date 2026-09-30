@@ -360,8 +360,30 @@ const sessionStore = api.storage && api.storage.session;
 // is cleared when the browser closes and is never written to disk) but it
 // outlives the worker, so the candidate does as well. Same pattern, and same
 // reasoning, as the gesture ledger below.
-const pendingSaves = new Map(); // tabId -> { candidate, ts }
+const pendingSaves = new Map(); // tabId -> { candidate, ts, claimedBy?, claimedAt? }
+// How long a submitted login waits for a page that can offer to save it.
 const PENDING_TTL_MS = 90000;
+// How long it then lives once a page shows the save bar. The 90 seconds used
+// to run on under the bar: an Update clicked after them found nothing, and
+// the page said "origin_mismatch" about a password that was gone.
+const CLAIMED_TTL_MS = 10 * 60 * 1000;
+/** Whether a pending entry may still be offered or saved. */
+function pendingFresh(entry, now = Date.now()) {
+  if (!entry) return false;
+  return entry.claimedBy
+    ? now - (entry.claimedAt ?? entry.ts) < CLAIMED_TTL_MS
+    : now - entry.ts < PENDING_TTL_MS;
+}
+/** Wipe the plaintext once the entry has outlived `ms`, if it has. The timer
+    dies with the worker, so the freshness check on read is the real guarantee
+    and this is just prompt cleanup. */
+function dropWhenStale(tabId, ms) {
+  const timer = setTimeout(async () => {
+    const entry = await readPending(tabId);
+    if (entry && !pendingFresh(entry)) await dropPending(tabId);
+  }, ms + 500);
+  if (typeof timer?.unref === "function") timer.unref();
+}
 const pendingKey = (tabId) => `pendingSave:${tabId}`;
 
 async function putPending(tabId, entry) {
@@ -602,9 +624,10 @@ const refused = (sendResponse) => {
 async function saveCandidate(msg, sender, tabId) {
   if (!msg.pending) return fromPage(sender, msg.url) ? msg : null;
   const entry = await readPending(tabId);
-  const fresh = entry && Date.now() - entry.ts < PENDING_TTL_MS;
   const claimant = pageOrigin(sender);
-  return fresh && claimant && entry.claimedBy === claimant ? entry.candidate : null;
+  return pendingFresh(entry) && claimant && entry.claimedBy === claimant
+    ? entry.candidate
+    : null;
 }
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -636,17 +659,8 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         origin: pageOrigin(sender),
       }).then(() => sendResponse({ ok: true }));
       // Actively wipe the stored plaintext password after the TTL, so an
-      // abandoned SPA login doesn't retain it indefinitely. The timer dies
-      // with the worker, so the freshness check on read is the real guarantee
-      // and this is just prompt cleanup.
-      const timer = setTimeout(
-        async () => {
-          const e = await readPending(tabId);
-          if (e && Date.now() - e.ts >= PENDING_TTL_MS) await dropPending(tabId);
-        },
-        PENDING_TTL_MS + 500,
-      );
-      if (typeof timer?.unref === "function") timer.unref();
+      // abandoned SPA login doesn't retain it indefinitely.
+      dropWhenStale(tabId, PENDING_TTL_MS);
       return true;
     }
 
@@ -658,7 +672,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "peekPending":
     case "claimPending":
       readPending(tabId).then(async (entry) => {
-        const fresh = entry && Date.now() - entry.ts < PENDING_TTL_MS;
+        const fresh = pendingFresh(entry);
         if (entry && !fresh) await dropPending(tabId);
         const origin = pageOrigin(sender);
         const releasable =
@@ -673,7 +687,8 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (msg.cmd === "claimPending") {
           // Offered here, so no later page offers it again; the saves this
           // page sends may now refer to it.
-          await putPending(tabId, { ...entry, claimedBy: origin });
+          await putPending(tabId, { ...entry, claimedBy: origin, claimedAt: Date.now() });
+          dropWhenStale(tabId, CLAIMED_TTL_MS);
           sendResponse({ ok: true });
           return;
         }
