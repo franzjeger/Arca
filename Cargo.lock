@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "arca-cli"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "dirs 5.0.1",
  "serde_json",
@@ -6312,14 +6312,14 @@ dependencies = [
 
 [[package]]
 name = "vault-appgroup"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "vault-bridge"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "getrandom 0.4.3",
  "hmac 0.13.0",
@@ -6331,7 +6331,7 @@ dependencies = [
 
 [[package]]
 name = "vault-core"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "argon2",
  "bincode",
@@ -6358,14 +6358,14 @@ dependencies = [
 
 [[package]]
 name = "vault-credstore"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "vault-desktop"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -6404,7 +6404,7 @@ dependencies = [
 
 [[package]]
 name = "vault-ffi"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "ciborium",
  "data-encoding",
@@ -6419,7 +6419,7 @@ dependencies = [
 
 [[package]]
 name = "vault-native-host"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -6429,7 +6429,7 @@ dependencies = [
 
 [[package]]
 name = "vault-secmem"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "region",
  "zeroize",
@@ -6437,7 +6437,7 @@ dependencies = [
 
 [[package]]
 name = "vault-sharedkey"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "cc",
  "zeroize",
@@ -6445,7 +6445,7 @@ dependencies = [
 
 [[package]]
 name = "vault-store"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "data-encoding",
  "fs2",
@@ -6461,7 +6461,7 @@ dependencies = [
 
 [[package]]
 name = "vault-sync"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "data-encoding",
  "getrandom 0.4.3",
@@ -6475,7 +6475,7 @@ dependencies = [
 
 [[package]]
 name = "vault-winhello"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "windows 0.58.0",
 ]
