@@ -250,6 +250,109 @@ fn a_save_that_never_reached_the_disk_is_rolled_back_out_of_memory() {
     ));
 }
 
+/// Two entries for one account are one account. An update that reached only
+/// the first left the other on the old password, and the next fill that
+/// picked it made the update look as if it had never happened.
+#[test]
+fn an_update_reaches_every_copy_of_the_account() {
+    let dir = TempDir::new().unwrap();
+    let state = unlocked_state(&dir);
+    let mut authed = Session::Authed;
+    let request =
+        |req, authed: &mut Session| handle_request(req, &state, "t", authed, None, &mut allow());
+    let site = "https://github.com/settings/password";
+    let first = add(&state, "GitHub", "frank", "old-pw", "https://github.com");
+    let copy = add(
+        &state,
+        "GitHub (2)",
+        "Frank",
+        "old-pw",
+        "https://github.com/login",
+    );
+    add(
+        &state,
+        "GitHub",
+        "someone-else",
+        "theirs",
+        "https://github.com",
+    );
+    let passwords = |user: &str| -> Vec<String> {
+        let st = state.lock().unwrap();
+        let mut found: Vec<String> = st
+            .vault
+            .as_ref()
+            .unwrap()
+            .active_items()
+            .unwrap()
+            .filter_map(|item| match &item.data {
+                VaultItem::Login {
+                    username, password, ..
+                } if username.eq_ignore_ascii_case(user) => Some(password.clone()),
+                _ => None,
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    let probe = |password: &str, authed: &mut Session| match request(
+        Request::SaveProbe {
+            url: site.into(),
+            username: "frank".into(),
+            password: password.into(),
+        },
+        authed,
+    ) {
+        Response::SaveDecision { action, .. } => action,
+        other => panic!("not a decision: {other:?}"),
+    };
+    let save = |password: &str, authed: &mut Session| {
+        request(
+            Request::SaveLogin {
+                url: site.into(),
+                username: "frank".into(),
+                password: password.into(),
+            },
+            authed,
+        )
+    };
+
+    assert_eq!(probe("new-pw", &mut authed), "update");
+    assert_eq!(save("new-pw", &mut authed), Response::Saved);
+    assert_eq!(passwords("frank"), ["new-pw", "new-pw"], "both copies");
+    assert_eq!(passwords("someone-else"), ["theirs"], "not another account");
+    assert_eq!(probe("new-pw", &mut authed), "known");
+    {
+        let st = state.lock().unwrap();
+        let vault = st.vault.as_ref().unwrap();
+        for id in [&first, &copy] {
+            let item = vault.get_item(id.parse().unwrap()).unwrap();
+            assert!(
+                item.password_history.iter().any(|h| h.password == "old-pw"),
+                "the old password is kept in each copy's history"
+            );
+        }
+    }
+
+    // One copy changed by hand since, the other still on the password
+    // before: the update is still offered, and it reaches the stale copy.
+    do_upsert_item(
+        &state,
+        LoginInput {
+            id: Some(copy),
+            title: "GitHub (2)".into(),
+            username: "Frank".into(),
+            password: "newest-pw".into(),
+            url: "https://github.com/login".into(),
+            totp_secret: None,
+            notes: String::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(probe("newest-pw", &mut authed), "update");
+    assert_eq!(save("newest-pw", &mut authed), Response::Saved);
+    assert_eq!(passwords("frank"), ["newest-pw", "newest-pw"]);
+}
+
 /// The same trade for every other bridge write: a create that failed must
 /// leave nothing behind, and a delete that failed must not hide an item the
 /// disk still has. A vault that disagrees with its file always resolves the
