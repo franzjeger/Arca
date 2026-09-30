@@ -16,7 +16,73 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+use std::sync::{Mutex, PoisonError};
+
 use zeroize::Zeroize;
+
+/// Every page locked for a live buffer, with how many buffers need it and the
+/// guard that unlocks it.
+///
+/// The OS locks and unlocks whole pages, and one page can hold several small
+/// buffers. Unlocking the pages of the first buffer dropped put the secrets of
+/// the others on those pages back within reach of swap, and on Windows the
+/// next buffer's unlock then failed on a page no longer locked. So a page is
+/// locked by the first buffer on it and unlocked when the last one goes, by
+/// dropping `region`'s guard: the only way to unlock without `unsafe`, and it
+/// unlocks each page exactly once.
+type Pages = BTreeMap<usize, (usize, region::LockGuard)>;
+static LOCKED_PAGES: Mutex<Pages> = Mutex::new(BTreeMap::new());
+
+fn locked_pages() -> std::sync::MutexGuard<'static, Pages> {
+    // A panic elsewhere must not stop a later drop from unlocking.
+    LOCKED_PAGES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The first address of each page `buf` touches.
+fn pages(buf: &[u8]) -> impl Iterator<Item = usize> {
+    let size = region::page::size();
+    let start = buf.as_ptr() as usize;
+    (start / size * size..start + buf.len()).step_by(size)
+}
+
+/// Locks the pages of `buf` that no other buffer holds. All or nothing: if the
+/// OS refuses a page, the pages counted for `buf` so far are released again.
+fn lock_pages(buf: &[u8]) -> bool {
+    let mut locked = locked_pages();
+    let mut taken = Vec::new();
+    for page in pages(buf) {
+        if let Some((count, _)) = locked.get_mut(&page) {
+            *count += 1;
+        } else if let Ok(guard) = region::lock(
+            std::ptr::without_provenance::<u8>(page),
+            region::page::size(),
+        ) {
+            locked.insert(page, (1, guard));
+        } else {
+            release(&mut locked, taken);
+            return false;
+        }
+        taken.push(page);
+    }
+    true
+}
+
+fn unlock_pages(buf: &[u8]) {
+    release(&mut locked_pages(), pages(buf));
+}
+
+fn release(locked: &mut Pages, pages: impl IntoIterator<Item = usize>) {
+    for page in pages {
+        if let Some((count, _)) = locked.get_mut(&page) {
+            *count -= 1;
+            if *count == 0 {
+                // Dropping the guard unlocks the page.
+                locked.remove(&page);
+            }
+        }
+    }
+}
 
 /// A fixed-size, mlock'd, zeroize-on-drop secret buffer.
 pub struct SecretBytes {
@@ -31,19 +97,7 @@ impl SecretBytes {
     /// A zero-filled buffer of `len` bytes, locked into RAM if the OS allows.
     pub fn zeroed(len: usize) -> Self {
         let buf = vec![0u8; len].into_boxed_slice();
-        // We take the lock but immediately `forget` the guard, then unlock
-        // ourselves in `Drop` with the error ignored. `region`'s guard panics
-        // if the OS refuses the unlock (VirtualUnlock on Windows can, under
-        // working-set pressure), and a panic in a drop aborts the process —
-        // so we must never let its guard run.
-        let locked = if buf.is_empty() {
-            false
-        } else if let Ok(guard) = region::lock(buf.as_ptr(), buf.len()) {
-            core::mem::forget(guard);
-            true
-        } else {
-            false
-        };
+        let locked = !buf.is_empty() && lock_pages(&buf);
         Self { buf, locked }
     }
 
@@ -86,11 +140,10 @@ impl Clone for SecretBytes {
 
 impl Drop for SecretBytes {
     fn drop(&mut self) {
-        // Wipe the secret while the pages are still locked, then unlock. Errors
-        // are ignored (best-effort) so drop can never panic/abort.
+        // Wipe the secret while the pages are still locked, then give them up.
         self.buf.zeroize();
         if self.locked {
-            let _ = region::unlock(self.buf.as_ptr(), self.buf.len());
+            unlock_pages(&self.buf);
         }
     }
 }
@@ -150,5 +203,50 @@ mod tests {
         let s = SecretBytes::zeroed(0);
         assert!(s.is_empty());
         assert!(!s.is_locked());
+    }
+
+    /// The first whole page inside `buf`, which no other allocation, such as
+    /// another test's running alongside, can share.
+    fn owned_page(buf: &[u8]) -> usize {
+        let size = region::page::size();
+        (buf.as_ptr() as usize / size + 1) * size
+    }
+
+    fn count(page: usize) -> Option<usize> {
+        locked_pages().get(&page).map(|(count, _)| *count)
+    }
+
+    #[test]
+    fn a_page_stays_locked_until_the_last_buffer_on_it_goes() {
+        let size = region::page::size();
+        let backing = vec![0u8; 3 * size];
+        let page = owned_page(&backing);
+        let at = page - backing.as_ptr() as usize;
+        let (first, second) = (&backing[at..at + 16], &backing[at + 64..at + 80]);
+        // Where the OS refuses to lock anything there is nothing to count.
+        if !lock_pages(first) {
+            return;
+        }
+        assert!(lock_pages(second));
+        assert_eq!(count(page), Some(2));
+        unlock_pages(first);
+        assert_eq!(count(page), Some(1), "still locked for the second buffer");
+        unlock_pages(second);
+        assert_eq!(count(page), None, "unlocked with the last buffer");
+    }
+
+    #[test]
+    fn a_buffer_across_two_pages_holds_both() {
+        let size = region::page::size();
+        let backing = vec![0u8; 4 * size];
+        let page = owned_page(&backing);
+        let at = page - backing.as_ptr() as usize;
+        let across = &backing[at + size / 2..at + size + size / 2];
+        if !lock_pages(across) {
+            return;
+        }
+        assert_eq!((count(page), count(page + size)), (Some(1), Some(1)));
+        unlock_pages(across);
+        assert_eq!((count(page), count(page + size)), (None, None));
     }
 }
