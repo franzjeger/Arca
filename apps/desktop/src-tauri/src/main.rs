@@ -46,24 +46,47 @@ const KEYCHAIN_ACCOUNT: &str = "default-vault";
 pub(crate) const APP_GROUP: &str = "group.no.sybr.vault";
 
 /// Last-modified time, or `None` when the file is missing/unreadable.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn modified_at(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+/// Whether the App Group copy should replace the app-data vault: it is the
+/// only one, or it is newer AND says something else.
+///
+/// Every save writes the vault and then its mirror in the container, so the
+/// mirror is always the newer of the two by a moment. Comparing times alone
+/// "migrated" identical bytes on the first launch after every save, and the
+/// snapshot taken first each time pushed a real one out of the window that
+/// snapshot pruning keeps.
+#[cfg(any(target_os = "macos", test))]
+fn container_copy_wins(shared: &Path, local: &Path) -> bool {
+    match (modified_at(shared), modified_at(local)) {
+        (Some(_), None) => true,
+        (Some(shared_time), Some(local_time)) if shared_time > local_time => {
+            match (std::fs::read(shared), std::fs::read(local)) {
+                (Ok(shared), Ok(local)) => shared != local,
+                // Unreadable: the copy reports it, as it always has.
+                _ => true,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Resolve where the vault file lives: always the app-data directory.
 ///
-/// The vault briefly lived in the shared App Group container so the macOS
-/// AutoFill extension could read it. That extension is shelved, and the
-/// container is a liability without it: reaching it at all requires a
-/// provisioned entitlement, so if the profile lapses or the app is re-signed
-/// without one, `container_path` returns `None` — and the app would silently
-/// open a STALE app-data copy while the user keeps adding entries to it. A
-/// password manager must never quietly serve the wrong vault.
+/// The vault briefly lived in the shared App Group container, where the macOS
+/// AutoFill extension reads it. The container is a liability as the home of
+/// the vault: reaching it at all requires a provisioned entitlement, so if the
+/// profile lapses or the app is re-signed without one, `container_path`
+/// returns `None` — and the app would silently open a STALE app-data copy
+/// while the user keeps adding entries to it. A password manager must never
+/// quietly serve the wrong vault.
 ///
-/// So the app-data path is canonical, and a *newer* container copy is migrated
-/// back down once (snapshotting whatever it replaces). The container copy is
-/// left in place as an extra off-path backup.
+/// So the app-data path is canonical and the container holds a mirror of it
+/// for the extension (`VaultStore::with_mirror`). A newer container copy that
+/// differs is migrated back down once, snapshotting whatever it replaces.
 fn resolve_vault_path(app: &tauri::App, data_dir: &Path) -> PathBuf {
     let app_data_vault = data_dir.join("default.vault");
     #[cfg(target_os = "macos")]
@@ -73,12 +96,7 @@ fn resolve_vault_path(app: &tauri::App, data_dir: &Path) -> PathBuf {
         // to the container. A hardcoded path is denied with EPERM.
         if let Some(container) = vault_appgroup::container_path(APP_GROUP) {
             let shared_vault = container.join("default.vault");
-            let shared_is_newer = match (modified_at(&shared_vault), modified_at(&app_data_vault)) {
-                (Some(shared), Some(local)) => shared > local,
-                (Some(_), None) => true, // only the container has a vault
-                _ => false,
-            };
-            if shared_is_newer {
+            if container_copy_wins(&shared_vault, &app_data_vault) {
                 // Never overwrite without a rollback point.
                 let _ = vault_store::snapshot::capture(&app_data_vault);
                 match std::fs::copy(&shared_vault, &app_data_vault) {
@@ -466,5 +484,55 @@ mod tests {
             serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
         assert!(updater.require_signed_version);
         assert!(!updater.allow_downgrades);
+    }
+
+    #[test]
+    fn the_container_copy_wins_only_when_it_is_newer_and_different() {
+        use std::path::Path;
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("container.vault");
+        let local = dir.path().join("app-data.vault");
+        let written_at = |path: &Path, seconds: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        };
+
+        assert!(
+            !super::container_copy_wins(&shared, &local),
+            "no vault at all"
+        );
+        std::fs::write(&shared, b"vault").unwrap();
+        assert!(
+            super::container_copy_wins(&shared, &local),
+            "only the container has one"
+        );
+
+        // What every save leaves behind: the mirror, newer by a moment.
+        std::fs::write(&local, b"vault").unwrap();
+        written_at(&local, 1_000);
+        written_at(&shared, 1_001);
+        assert!(
+            !super::container_copy_wins(&shared, &local),
+            "the same bytes, newer"
+        );
+
+        // What an older build left in the container: newer, and different.
+        std::fs::write(&shared, b"a newer vault").unwrap();
+        written_at(&shared, 1_001);
+        assert!(
+            super::container_copy_wins(&shared, &local),
+            "newer and different"
+        );
+
+        written_at(&shared, 999);
+        assert!(
+            !super::container_copy_wins(&shared, &local),
+            "older never wins"
+        );
     }
 }
