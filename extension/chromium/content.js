@@ -1667,6 +1667,13 @@
           (result && result.response && result.response.message) ||
           (result && result.error) ||
           "";
+        if (reason === "origin_mismatch") {
+          // The worker no longer holds this password: the bar outlived it, or
+          // the browser restarted. Nothing a retry here could send remains.
+          text.textContent = "Arca no longer holds this password. Sign in again to save it.";
+          yes.remove();
+          return;
+        }
         // The probe and the click are separate moments. If the vault locks in
         // between them, the old code swallowed this response, closed the bar
         // and claimed success while writing nothing. Keep the candidate (and

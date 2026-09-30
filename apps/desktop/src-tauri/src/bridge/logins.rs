@@ -85,48 +85,47 @@ pub(super) fn save_failure_reason(e: &vault_store::Error) -> String {
     }
 }
 
-pub(super) fn find_login_for_save(
+/// The stored logins a save for `username` on `requested_url` is about, as
+/// (id, stored username, stored password).
+///
+/// Every login on the site with that username, not the first: two entries for
+/// one account are one account. Updating only the first left the other with
+/// the old password, and the next fill that picked it made the update look
+/// as if it had never happened. With no username on the page (a token reset)
+/// only the site's single login qualifies; with several it is ambiguous, and
+/// the save is offered as a new login instead.
+pub(super) fn logins_for_save(
     vault: &vault_core::Vault,
     requested_url: &str,
     username: &str,
-) -> Option<(Uuid, String, String)> {
-    if !username.is_empty() {
-        for item in vault.active_items().ok()? {
-            if let VaultItem::Login {
-                url,
-                username: stored,
-                password,
-                ..
-            } = &item.data
-            {
-                // Saving has to use the same trust boundary as filling. A host
-                // can serve unrelated applications on :443, :9443, :8006, …;
-                // host-only matching silently updated the wrong credential.
-                if domain_matches(url, requested_url) && stored.eq_ignore_ascii_case(username) {
-                    return Some((item.id, stored.clone(), password.clone()));
-                }
-            }
-        }
-        return None;
-    }
-    let mut only: Option<(Uuid, String, String)> = None;
-    for item in vault.active_items().ok()? {
-        if let VaultItem::Login {
+) -> Vec<(Uuid, String, String)> {
+    let Ok(items) = vault.active_items() else {
+        return Vec::new();
+    };
+    let on_site = items.filter_map(|item| match &item.data {
+        // Saving has to use the same trust boundary as filling. A host can
+        // serve unrelated applications on :443, :9443, :8006, …; host-only
+        // matching silently updated the wrong credential.
+        VaultItem::Login {
             url,
-            username: un,
+            username: stored,
             password,
             ..
-        } = &item.data
-        {
-            if domain_matches(url, requested_url) {
-                if only.is_some() {
-                    return None; // ambiguous: more than one login for this origin
-                }
-                only = Some((item.id, un.clone(), password.clone()));
-            }
+        } if domain_matches(url.as_str(), requested_url) => {
+            Some((item.id, stored.clone(), password.clone()))
         }
+        _ => None,
+    });
+    if username.is_empty() {
+        let mut only: Vec<_> = on_site.take(2).collect();
+        if only.len() > 1 {
+            only.clear();
+        }
+        return only;
     }
-    only
+    on_site
+        .filter(|(_, stored, _)| stored.eq_ignore_ascii_case(username))
+        .collect()
 }
 
 pub(super) fn list_matches(ctx: &mut Ctx, url: String) -> Response {
@@ -338,10 +337,14 @@ pub(super) fn save_probe(
             username: None,
         };
     }
-    let (action, target) = match find_login_for_save(vault, &url, &username) {
-        None => ("new", None),
-        Some((_, _, cur)) if cur == password => ("known", None),
-        Some((_, stored, _)) => ("update", Some(stored)),
+    let matches = logins_for_save(vault, &url, &username);
+    // "known" only when every copy of the account already has it: one stale
+    // duplicate is exactly the update that went missing before.
+    let stale = matches.iter().find(|(_, _, cur)| *cur != password);
+    let (action, target) = match (matches.is_empty(), stale) {
+        (true, _) => ("new", None),
+        (false, None) => ("known", None),
+        (false, Some((_, stored, _))) => ("update", Some(stored.clone())),
     };
     Response::SaveDecision {
         action: action.into(),
@@ -376,86 +379,75 @@ pub(super) fn save_login(
         let Some(vault) = vault.as_mut().filter(|v| v.is_unlocked()) else {
             return error("locked");
         };
-        match find_login_for_save(vault, &url, &username) {
-            // Already stored with this password: nothing to do.
-            Some((_, _, cur)) if cur == password => return Response::Saved,
-            // Same site + username, new password: update in place.
-            Some((id, _, _)) => {
-                let Ok(current) = vault.get_item(id) else {
+        let matches = logins_for_save(vault, &url, &username);
+        if matches.is_empty() {
+            // Brand-new login for this site.
+            let item = Item::new(
+                VaultItem::Login {
+                    title: host.clone(),
+                    username,
+                    password,
+                    url,
+                    totp_secret: None,
+                    notes: String::new(),
+                },
+                crate::state::now_millis(),
+            );
+            let new_id = item.id;
+            if vault.upsert_item(item).is_err() {
+                return error("internal");
+            }
+            if let Err(e) = store.save_synced(vault) {
+                // An entry that never reached the disk must not sit in memory
+                // claiming the site is already saved. Purged rather than
+                // soft-deleted — it was never a vault entry, and it must not
+                // surface in the Trash as something the user could restore.
+                let _ = vault.purge_item(new_id, crate::state::now_millis());
+                return error(save_failure_reason(&e));
+            }
+        } else {
+            // Same site and username, new password: every copy of the
+            // account that does not have it yet, updated in place. The old
+            // password goes to each one's history.
+            let stale: Vec<Uuid> = matches
+                .into_iter()
+                .filter(|(_, _, current)| *current != password)
+                .map(|(id, _, _)| id)
+                .collect();
+            if stale.is_empty() {
+                // Already stored with this password: nothing to do.
+                return Response::Saved;
+            }
+            let mut before = Vec::with_capacity(stale.len());
+            for id in stale {
+                let Ok(mut item) = vault.get_item(id) else {
+                    put_back(vault, before);
                     return error("internal");
                 };
+                before.push(item.clone());
                 if let VaultItem::Login {
-                    title,
-                    username: un,
-                    url: u,
-                    totp_secret,
-                    notes,
-                    ..
-                } = &current.data
+                    password: stored, ..
+                } = &mut item.data
                 {
-                    let item = Item {
-                        id: current.id,
-                        created_at: current.created_at,
-                        modified_at: crate::state::now_millis(),
-                        deleted_at: None,
-                        revision: current.revision,
-                        revision_ancestors: current.revision_ancestors.clone(),
-                        password_history: current.password_history.clone(),
-                        sync_conflict: current.sync_conflict.clone(),
-                        data: VaultItem::Login {
-                            title: title.clone(),
-                            username: un.clone(),
-                            url: u.clone(),
-                            password,
-                            totp_secret: totp_secret.clone(),
-                            notes: notes.clone(),
-                        },
-                    };
-                    if vault.upsert_item(item).is_err() {
-                        return error("internal");
-                    }
-                    if let Err(e) = store.save_synced(vault) {
-                        // Put the OLD password back. The disk still has
-                        // it, so leaving the new one in memory makes the
-                        // two disagree, and the vault is the copy the
-                        // user is shown: the next probe answers "known"
-                        // (no save bar, nothing to click again) and the
-                        // next save returns Saved, while the password
-                        // that was actually typed exists nowhere after
-                        // the app quits. An honest failure the browser
-                        // can retry is worth more than a lost secret.
-                        let _ = vault.upsert_item(current);
-                        return error(save_failure_reason(&e));
-                    }
+                    stored.clone_from(&password);
                 }
-            }
-            // Brand-new login for this site.
-            None => {
-                let item = Item::new(
-                    VaultItem::Login {
-                        title: host.clone(),
-                        username,
-                        password,
-                        url,
-                        totp_secret: None,
-                        notes: String::new(),
-                    },
-                    crate::state::now_millis(),
-                );
-                let new_id = item.id;
+                item.modified_at = crate::state::now_millis();
                 if vault.upsert_item(item).is_err() {
+                    put_back(vault, before);
                     return error("internal");
                 }
-                if let Err(e) = store.save_synced(vault) {
-                    // Same trade as the update branch, from the other
-                    // side: an entry that never reached the disk must
-                    // not sit in memory claiming the site is already
-                    // saved. Purged rather than soft-deleted — it was
-                    // never a vault entry, and it must not surface in
-                    // the Trash as something the user could restore.
-                    let _ = vault.purge_item(new_id, crate::state::now_millis());
-                    return error(save_failure_reason(&e));
-                }
+            }
+            if let Err(e) = store.save_synced(vault) {
+                // Put the OLD passwords back. The disk still has them, so
+                // leaving the new one in memory makes the two disagree, and
+                // the vault is the copy the user is shown: the next probe
+                // answers "known" (no save bar, nothing to click again) and
+                // the next save returns Saved, while the password that was
+                // actually typed exists nowhere after the app quits. An
+                // honest failure the browser can retry is worth more than a
+                // lost secret.
+                put_back(vault, before);
+                return error(save_failure_reason(&e));
             }
         }
     }
@@ -464,6 +456,14 @@ pub(super) fn save_login(
         let _ = app.emit("login-saved", host);
     }
     Response::Saved
+}
+
+/// Logins as they were before a save that went no further, newest change
+/// undone first.
+fn put_back(vault: &mut vault_core::Vault, items: Vec<Item>) {
+    for item in items.into_iter().rev() {
+        let _ = vault.upsert_item(item);
+    }
 }
 
 /// A generator request over the bridge. Clamped rather than refused: a site
