@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.1 — 2026-09-30
+
+**The first release that installs itself.** On a Mac running 0.8.0, Settings ▸
+Updates finds it and installs it on the second click. Vault files are unchanged.
+
+- Security: keys that share a page of memory stay out of swap until the last
+  of them is gone. Arca locks the memory holding keys so the system never
+  writes it to disk, but locking works on whole pages, which small keys share:
+  releasing one key unlocked its page while another key on it was still in
+  use. On Windows, releasing that second key then failed.
+- Snapshots: starting Arca after a save no longer takes a snapshot of a vault
+  that has not changed. Every save leaves the copy AutoFill reads a moment
+  newer than the vault, and the first launch afterwards took it for newer
+  changes: it snapshotted the vault and copied the same bytes over it, and
+  each such snapshot pushed a real one out of the recent history kept for
+  recovery.
+- Desktop: the interface runs on React 19 and is built with Vite 8.
+
 ## 0.8.0 — 2026-09-29
 
 **The first published Mac release.** It is signed with Developer ID and

@@ -5,7 +5,7 @@ Linux**. All security-critical logic lives in a small Rust core built only from
 well-reviewed crates; the desktop app is a [Tauri 2](https://v2.tauri.app/) shell
 over it, and the browser extension talks to that app over a local bridge.
 
-Current source version: **0.8.0** — see [`CHANGELOG.md`](./CHANGELOG.md)
+Current source version: **0.8.1** — see [`CHANGELOG.md`](./CHANGELOG.md)
 
 > ⚠️ **Not independently audited.** The cryptography composes well-reviewed
 > RustCrypto crates and there is a written threat model, but no third party has

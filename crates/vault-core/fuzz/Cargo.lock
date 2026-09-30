@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "vault-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "argon2",
  "bincode",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "vault-secmem"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "region",
  "zeroize",
