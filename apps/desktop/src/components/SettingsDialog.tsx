@@ -22,6 +22,14 @@ import { SshImportDialog } from "./SshKeyDialog";
 import { BackupRestoreDialog } from "./BackupRestoreDialog";
 import { toastError, type ToastMessage } from "../lib/toast";
 
+/** Settings ▸ Updates for a copy that has no updater: how to update it. */
+const UPDATED_ELSEWHERE = {
+  source:
+    "This copy was built from source, so it cannot replace itself. Update it from the Git checkout: git pull, then scripts/install-linux.sh --restart.",
+  packageManager:
+    "This copy was installed from a .deb or .rpm, so it cannot replace itself. Install the newer package to update it.",
+} as const;
+
 const AUTO_LOCK_OPTIONS = [
   { label: "Never", value: 0 },
   { label: "1 minute", value: 60 },
@@ -619,45 +627,49 @@ export function SettingsDialog({
             <Row
               label="Updates"
               hint={
-                update
-                  ? `Version ${update.version} is available. Installing restarts Arca, so the vault locks and any unsaved edit is lost.`
-                  : updateError
-                    ? `Could not check for updates: ${updateError}`
-                    : updateChecked
-                      ? "Arca is up to date."
-                      : "Check whether a newer signed build is available. Nothing installs without your say-so."
+                info && info.updates !== "inApp"
+                  ? UPDATED_ELSEWHERE[info.updates]
+                  : update
+                    ? `Version ${update.version} is available. Installing restarts Arca, so the vault locks and any unsaved edit is lost.`
+                    : updateError
+                      ? `Could not check for updates: ${updateError}`
+                      : updateChecked
+                        ? "Arca is up to date."
+                        : "Check whether a newer signed build is available. Nothing installs without your say-so."
               }
             >
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  setBusy(true);
-                  if (update) {
-                    installUpdate().catch((e) => {
-                      onToast(toastError(errorMessage(e)));
-                      setBusy(false);
-                    });
-                    return; // on success the app relaunches
-                  }
-                  setUpdateChecked(false);
-                  setUpdateError(null);
-                  checkForUpdate()
-                    .then((u) => {
-                      setUpdate(u);
-                      setUpdateChecked(true);
-                      if (!u) onToast("Arca is up to date");
-                    })
-                    .catch((e) => {
-                      setUpdateError(errorMessage(e));
-                      onToast(toastError(errorMessage(e)));
-                    })
-                    .finally(() => setBusy(false));
-                }}
-                className="rounded-lg border border-hairline px-3 py-1.5 text-[13px] text-neutral-200 hover:bg-fill/5 disabled:opacity-50"
-              >
-                {update ? `Install ${update.version}` : "Check…"}
-              </button>
+              {info?.updates === "inApp" && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true);
+                    if (update) {
+                      installUpdate().catch((e) => {
+                        onToast(toastError(errorMessage(e)));
+                        setBusy(false);
+                      });
+                      return; // on success the app relaunches
+                    }
+                    setUpdateChecked(false);
+                    setUpdateError(null);
+                    checkForUpdate()
+                      .then((u) => {
+                        setUpdate(u);
+                        setUpdateChecked(true);
+                        if (!u) onToast("Arca is up to date");
+                      })
+                      .catch((e) => {
+                        setUpdateError(errorMessage(e));
+                        onToast(toastError(errorMessage(e)));
+                      })
+                      .finally(() => setBusy(false));
+                  }}
+                  className="rounded-lg border border-hairline px-3 py-1.5 text-[13px] text-neutral-200 hover:bg-fill/5 disabled:opacity-50"
+                >
+                  {update ? `Install ${update.version}` : "Check…"}
+                </button>
+              )}
             </Row>
             <Row
               label="Earlier versions"
