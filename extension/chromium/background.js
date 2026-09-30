@@ -401,6 +401,52 @@ async function readPending(tabId) {
   return entry;
 }
 
+// The account the user picked in Arca's list on a sign-in's first step, the
+// one that asks only for the account name. The step after it asks for the
+// password or the passkey, often on a new page, and without this it asked
+// which account all over again: the page had forgotten, and Arca's window
+// then asked too. Kept per TAB, bound to the host that took the pick, for a
+// few minutes, and used once. Only the extension's content script can put
+// one here, after a real click on a row of Arca's own list.
+const PICKED_ACCOUNT_TTL_MS = 3 * 60 * 1000;
+const pickedAccounts = new Map(); // tabId -> { id, username, credentialId, origin, ts }
+const pickedKey = (tabId) => `pickedAccount:${tabId}`;
+
+async function putPicked(tabId, entry) {
+  pickedAccounts.set(tabId, entry);
+  try {
+    await sessionStore?.set({ [pickedKey(tabId)]: entry });
+  } catch (_e) {
+    /* the Map holds it for this worker's life */
+  }
+}
+
+/** Take the pick for `kind` ("password" or "passkey") if the page asking is
+    on the host that made it and it is fresh. Taken, not read: one pick, one
+    step. A pick of the other kind is left for its own step. */
+async function takePicked(tabId, origin, kind) {
+  if (tabId == null || !origin) return null;
+  let entry = pickedAccounts.get(tabId) || null;
+  if (!entry) {
+    try {
+      entry = (await sessionStore?.get(pickedKey(tabId)))?.[pickedKey(tabId)] || null;
+    } catch (_e) {
+      entry = null;
+    }
+  }
+  if (!entry) return null;
+  const fresh = Date.now() - entry.ts < PICKED_ACCOUNT_TTL_MS;
+  const isPasskey = Array.isArray(entry.credentialId) && entry.credentialId.length > 0;
+  if (fresh && isPasskey !== (kind === "passkey")) return null;
+  pickedAccounts.delete(tabId);
+  try {
+    await sessionStore?.remove(pickedKey(tabId));
+  } catch (_e) {
+    /* nothing to undo */
+  }
+  return fresh && sameHost(entry.origin, origin) ? entry : null;
+}
+
 // ── The passkey gate ────────────────────────────────────────────────────────
 //
 // A WebAuthn ceremony often does not run in the document the user clicked in.
@@ -694,6 +740,33 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "gesture":
       recordGesture(tabId).then(() => sendResponse({ ok: true }));
+      return true;
+
+    case "rememberPick":
+      // From the content script, on a trusted click in Arca's own list, on a
+      // page that named itself. What the next step needs, and nothing secret.
+      if (tabId == null || !fromPage(sender, msg.url) || typeof msg.id !== "string") {
+        return refused(sendResponse);
+      }
+      putPicked(tabId, {
+        id: msg.id,
+        username: typeof msg.username === "string" ? msg.username : "",
+        credentialId: Array.isArray(msg.credentialId) ? msg.credentialId : null,
+        origin: pageOrigin(sender),
+        ts: Date.now(),
+      }).then(() => sendResponse({ ok: true }));
+      return true;
+
+    case "recallPick":
+      takePicked(tabId, pageOrigin(sender), msg.kind === "passkey" ? "passkey" : "password")
+        .then((entry) =>
+          sendResponse({
+            ok: true,
+            pick: entry
+              ? { id: entry.id, username: entry.username, credentialId: entry.credentialId }
+              : null,
+          }),
+        );
       return true;
 
     case "passkeyProviderAvailable":

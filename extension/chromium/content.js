@@ -524,6 +524,41 @@
   /// finishing the job after an unlock the user asked for. The second one used
   /// to stop at re-rendering the list, which meant unlocking to autofill did
   /// everything except autofill.
+  /** The account picked on a sign-in's first step, for the step after it (a
+      password or a passkey, often on a new page), which then uses it rather
+      than asking which account all over again. Only after a real click on a
+      row of Arca's own list; the worker keeps it for this tab and host. */
+  function rememberPick(item) {
+    api.runtime
+      .sendMessage({
+        cmd: "rememberPick",
+        url: location.href,
+        id: item.id,
+        username: item.username || "",
+        credentialId:
+          item.kind === "passkey" ? Array.from(item.credential_id || []) : null,
+      })
+      .catch(() => {});
+  }
+
+  /** Take the account picked on the step before this password field, if any. */
+  async function recallPick() {
+    try {
+      const reply = await api.runtime.sendMessage({ cmd: "recallPick", kind: "password" });
+      return reply && reply.ok && reply.pick ? reply.pick : null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /** On a password step, the account named on the step before comes first. */
+  function namedFirst(items) {
+    const named = rememberedIdentifier().toLowerCase();
+    if (!named) return items;
+    const isNamed = (it) => (it.username || "").toLowerCase() === named;
+    return [...items.filter(isNamed), ...items.filter((it) => !isNamed(it))];
+  }
+
   async function fillFrom(item, anchor, isIdentifier, pwField, picked = false) {
     let fill;
     try {
@@ -602,13 +637,15 @@
       // document dismisser would close the panel this handler just put up
       // (the "Signing in with your passkey…" note never appeared).
       e.stopPropagation();
+      // Read before anything below replaces this row. A pick the next step
+      // acts on without asking is an approval, so it only counts for a row
+      // the browser showed unobscured and unfaded for a moment first.
+      const seen = seenLongEnough(row);
       try {
         // A passkey is not typed into a field — it signs the site's own
         // WebAuthn challenge. Showing one that cannot be used is worse than
         // not showing it.
         if (isPasskey) {
-          // Read before the note below replaces this row.
-          const seen = seenLongEnough(row);
           openPanel(anchor, note("Signing in with your passkey…"));
           // This trusted click on a row the browser vouched was visible,
           // recorded in the world the page cannot reach, is the only thing
@@ -624,8 +661,10 @@
           }
           if (used.reason === "no_request" && isIdentifier && !visiblePasswordField(anchor)) {
             // The site's first step needs an account name before it can ask
-            // for a passkey. No password is requested or filled here.
+            // for a passkey. No password is requested or filled here. When
+            // it does ask, this is the passkey it gets.
             if (item.username) setNativeValue(anchor, item.username);
+            if (seen) rememberPick(item);
             closePanel();
             return;
           }
@@ -651,8 +690,9 @@
         if (isIdentifier && !pwField) {
           // Pure identifier step (no password field yet): fill just the
           // username. It's metadata already in `item`; no credential request
-          // is made.
+          // is made. The password step fills this same account.
           if (item.username) setNativeValue(anchor, item.username);
+          if (seen) rememberPick(item);
           closePanel();
           return;
         }
@@ -785,7 +825,9 @@
     // You clicked "unlock to autofill" on this field; being handed a list to
     // click again is asking the same question twice.
     const only = items.filter((i) => i.kind !== "passkey");
-    const chosen = picked ?? (only.length === 1 ? only[0] : null);
+    const chosen = picked
+      ? only.find((i) => i.id === picked.id) ?? picked
+      : only.length === 1 ? only[0] : null;
     if (chosen) {
       cache = { url: location.href, items };
       if (await fillFrom(chosen, anchor, isIdentifier, pwField)) return;
@@ -962,7 +1004,7 @@
   /** Render the (filtered, ranked) picker. On an identifier field, filter by
       what's typed so far; empty result closes the panel. */
   function renderPicker(anchor, items, isIdentifier) {
-    const filtered = isIdentifier ? rank(items, anchor.value) : items;
+    const filtered = isIdentifier ? rank(items, anchor.value) : namedFirst(items);
     const offerGenerate = isNewPasswordField(anchor);
     if (filtered.length === 0 && !offerGenerate) {
       closePanel();
@@ -1032,10 +1074,15 @@
     suggestionAnchor = anchor;
     const current = () => request === matchRequest && location.href === url &&
       anchor.isConnected && isShown(anchor);
+    // The account picked on the step before this password field: it is filled
+    // here, with no list and no second choice.
+    const continuing =
+      !isIdentifier && !isNewPasswordField(anchor) ? await recallPick() : null;
     // Filter from cache without a round-trip when we already have the page's
     // matches (this is the type-ahead path).
     const have = cachedItems();
     if (have) {
+      if (continuing && (await continuePick(continuing, have, anchor))) return;
       renderPicker(anchor, have, isIdentifier);
       bindTypeAhead(anchor, isIdentifier);
       return;
@@ -1074,6 +1121,14 @@
       const items = Array.isArray(resp.items) ? resp.items : [];
 
       if (items.length === 0) {
+        if (!resp.app_connected && continuing) {
+          // Locked. The account is already chosen, so the one click here opens
+          // Arca and fills it, rather than listing the accounts once it is open.
+          openPanel(anchor, unlockPrompt(anchor, false, {
+            id: continuing.id, username: continuing.username, kind: "login",
+          }));
+          return;
+        }
         if (!resp.app_connected) {
           // Locked / not running. We only nag automatically once per page load.
           // identifierFields requires strong login signals (autocomplete=username
@@ -1100,9 +1155,20 @@
       }
 
       cache = { url, items };
+      if (continuing && (await continuePick(continuing, items, anchor))) return;
       renderPicker(anchor, items, isIdentifier);
       bindTypeAhead(anchor, isIdentifier);
     } catch (_) { if (current()) closePanel(); }
+  }
+
+  /** Fill the account picked on the step before into this password field.
+      False when that account is not among this page's matches, and the usual
+      list is shown instead. */
+  async function continuePick(pick, items, anchor) {
+    const item = items.find((it) => it.id === pick.id && it.kind !== "passkey");
+    if (!item || !isShown(anchor)) return false;
+    await fillFrom(item, anchor, false, anchor);
+    return true;
   }
 
   /** Re-filter the picker as the user types in an identifier/username field. */
