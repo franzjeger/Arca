@@ -1,6 +1,6 @@
 # Coordinated release and validation
 
-Arca 0.8.0 uses authenticated `SYBRVLT7` containers and C ABI v22. Desktop,
+Arca 0.8.1 uses authenticated `SYBRVLT7` containers and C ABI v22. Desktop,
 Apple targets and the browser extension advertise the same application version;
 `scripts/check-versions.py` prevents accidental divergence. The desktop About
 row includes the Git build identifier to distinguish locally built binaries.
@@ -52,7 +52,7 @@ results, and pass/fail evidence. Automated tests do not close these rows.
 | iPhone updated from an older build | Install over the previous build with quick unlock on. The first unlock asks for the master password once if the vault predates authenticated containers, with no repeated Face ID prompt; after it has synced, Face ID opens the vault again. |
 | Synced devices | After every device has synced, desktop Settings and iOS Options → Synced devices list each one, with a recent time and this device marked. |
 | Mac release from the disk image | On a Mac with Apple silicon, download the disk image from the release page, drag Arca to Applications and open it: no warning. Unlock with the master password, then with Touch ID. Arca is listed under System Settings → General → AutoFill & Passwords and fills a login in Safari. The browser extension fills a login and signs in with a passkey in Chrome. |
-| Update from the everyday build | On a Mac with the locally installed 0.7.0, Settings → Updates finds the release and installs it on the second click. After the restart the vault, Touch ID, AutoFill and the browser extension work with nothing set up again, and the browser's `no.sybr.vault.json` names the host inside `/Applications/Arca.app`. |
+| Update in the app | On a Mac running the previous release, or a locally installed build of an earlier version, Settings → Updates finds the release and installs it on the second click. After the restart the vault, Touch ID, AutoFill and the browser extension work with nothing set up again, and the browser's `no.sybr.vault.json` names the host inside `/Applications/Arca.app`. |
 | One Touch ID from the browser | With Arca locked, pick a login in the extension's list: one Touch ID sheet naming the site, then the fill. The same for a passkey sign-in. Declining leaves Arca locked and says so. |
 | Duplicates on desktop and iPhone | Review and merge a group of synthetic duplicates; choose the login to keep; the others' passwords appear in its history. A login edited during the review is not merged. |
 | Autofill/platform release | On physical Linux, exercise in-page fill with the installed native host and extension in the browsers actually used, including wrong-origin and locked-vault refusal. On physical iOS, run the linked release checks for the matching sideloaded build. Test Windows install/update and autofill before claiming release readiness there. |
