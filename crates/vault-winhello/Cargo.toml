@@ -15,12 +15,15 @@ repository.workspace = true
 publish.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+# The version Tauri's own Windows stack uses, so one copy is built.
+windows = { version = "0.62", features = [
     "Foundation",
     "Security_Credentials_UI",
     "Win32_Foundation",
     "Win32_System_WinRT",
 ] }
+# The WinRT async types (IAsyncOperation) left `windows` for this crate.
+windows-future = "0.3"
 
 # Not the workspace's lints, which forbid `unsafe`: this crate calls Windows
 # Hello's WinRT API, so nothing else has to.

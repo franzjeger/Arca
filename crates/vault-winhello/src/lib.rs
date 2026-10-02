@@ -27,17 +27,17 @@
 pub fn verify(hwnd: isize, reason: &str) -> Result<(), String> {
     use windows::{
         core::{factory, HSTRING},
-        Foundation::IAsyncOperation,
         Security::Credentials::UI::{
             UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
         },
         Win32::{Foundation::HWND, System::WinRT::IUserConsentVerifierInterop},
     };
+    use windows_future::IAsyncOperation;
 
     // Without this pre-check, RequestVerification hangs on machines where Hello
     // is not set up (documented behaviour, observed by everyone who skips it).
     let availability = UserConsentVerifier::CheckAvailabilityAsync()
-        .and_then(|op| op.get())
+        .and_then(|op| op.join())
         .map_err(|e| format!("Windows Hello availability check failed: {e}"))?;
     match availability {
         UserConsentVerifierAvailability::Available => {}
@@ -70,7 +70,7 @@ pub fn verify(hwnd: isize, reason: &str) -> Result<(), String> {
     // Blocks THIS thread until the user answers — which is the whole reason the
     // caller must not be the UI thread.
     let result = operation
-        .get()
+        .join()
         .map_err(|e| format!("Windows Hello did not answer: {e}"))?;
 
     match result {

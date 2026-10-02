@@ -114,7 +114,7 @@ export function SyncConflictsDialog({ items, onClose, onResolved }: {
                   <input type="radio" name={`conflict-${field.key}`} aria-label={`${labels[field.key] ?? field.key}: ${fromCopy ? "conflict copy" : "original"}`}
                     checked={selected.has(field.key) === fromCopy} disabled={busy}
                     onChange={() => setSelected((old) => { const next = new Set(old); if (fromCopy) next.add(field.key); else next.delete(field.key); return next; })} />
-                  <span className="max-h-36 overflow-auto whitespace-pre-wrap break-words text-neutral-300">{(revealed[field.key]?.[index] ?? (fromCopy ? field.copy : field.original)) || "Not set"}</span>
+                  <span className="max-h-36 overflow-auto whitespace-pre-wrap wrap-break-word text-neutral-300">{(revealed[field.key]?.[index] ?? (fromCopy ? field.copy : field.original)) || "Not set"}</span>
                 </label>
               </td>)}
             </tr>)}</tbody>

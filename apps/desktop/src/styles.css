@@ -1,6 +1,88 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+/* The theme is driven by the CSS variables below, swapped on
+   <html data-theme="…"> (see src/lib/theme.ts). `dark:` utilities still
+   follow a `.dark` class, as they did in Tailwind 3. */
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  /* Apple-Passwords-ish surfaces (values per theme below). canvas, accent,
+     fill and line are RGB triples so `/opacity` modifiers (bg-accent/90,
+     bg-fill/5, ring-line/10) work; fill and line are the theme-aware
+     overlays: white on dark, black on light. */
+  --color-canvas: rgb(var(--canvas-rgb));
+  --color-sidebar: var(--sidebar);
+  --color-panel: var(--panel);
+  --color-hairline: var(--hairline);
+  --color-accent: rgb(var(--accent-rgb));
+  --color-fill: rgb(var(--fill-rgb));
+  --color-line: rgb(var(--line-rgb));
+
+  /* The default palette colors Arca uses, at their Tailwind 3 values.
+     Tailwind 4 redefined its palette in OKLCH, which makes status text
+     (Unlocked, Strong, warnings, errors) visibly more saturated, more so
+     on a Mac's wide-gamut display. Moving to Tailwind 4 is not a redesign. */
+  --color-red-100: #fee2e2;
+  --color-red-200: #fecaca;
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+  --color-red-950: #450a0a;
+  --color-amber-300: #fcd34d;
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-green-300: #86efac;
+  --color-green-400: #4ade80;
+  --color-green-500: #22c55e;
+  --color-gray-200: #e5e7eb;
+  --color-gray-400: #9ca3af;
+
+  /* Tailwind's neutral scale, remapped to variables: in dark mode they match
+     Tailwind's defaults; in light mode they invert by prominence, so
+     `text-neutral-100` stays the primary text color. */
+  --color-neutral-50: var(--n-50);
+  --color-neutral-100: var(--n-100);
+  --color-neutral-200: var(--n-200);
+  --color-neutral-300: var(--n-300);
+  --color-neutral-400: var(--n-400);
+  --color-neutral-500: var(--n-500);
+  --color-neutral-600: var(--n-600);
+  --color-neutral-700: var(--n-700);
+  --color-neutral-800: var(--n-800);
+  --color-neutral-900: var(--n-900);
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, Segoe UI, Inter, system-ui, sans-serif;
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+
+  /* Tailwind 4 dims placeholders to half the text color; 3 used gray-400. */
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
+  }
+
+  /* Tailwind 4 gives buttons the default arrow; 3 gave them the hand. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
 
 /*
  * Theme tokens. Dark is the default (:root). Light applies either when the user

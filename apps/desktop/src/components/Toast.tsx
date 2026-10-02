@@ -73,7 +73,7 @@ export function Toast({
       className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center"
     >
       <div
-        className={`flex max-w-[min(32rem,90vw)] items-center gap-2 rounded-full px-4 py-2 text-[13px] shadow-lg ring-1 backdrop-blur ${
+        className={`flex max-w-[min(32rem,90vw)] items-center gap-2 rounded-full px-4 py-2 text-[13px] shadow-lg ring-1 backdrop-blur-sm ${
           isError
             ? "bg-red-950/95 text-red-100 ring-red-500/30"
             : "bg-neutral-800 text-neutral-100 ring-line/10"

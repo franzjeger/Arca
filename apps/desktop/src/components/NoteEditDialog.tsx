@@ -100,14 +100,14 @@ export function NoteEditDialog({
               autoFocus
               placeholder="Title"
               onChange={(e) => setTitle(e.target.value)}
-              className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[14px] font-medium text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+              className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[14px] font-medium text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
               spellCheck={false}
             />
             <textarea
               value={body}
               placeholder="Write anything — recovery codes, secrets, notes… encrypted like everything else."
               onChange={(e) => setBody(e.target.value)}
-              className="min-h-[220px] flex-1 resize-none rounded-lg bg-fill/5 px-3 py-2 text-[13px] leading-relaxed text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+              className="min-h-[220px] flex-1 resize-none rounded-lg bg-fill/5 px-3 py-2 text-[13px] leading-relaxed text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
             />
             {error && <p className="text-[12px] text-red-400">{error}</p>}
           </div>

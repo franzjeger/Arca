@@ -53,7 +53,7 @@ export function Sidebar({
             value={search}
             onChange={(e) => onSearch(e.target.value)}
             placeholder="Search"
-            className="w-full bg-transparent text-[13px] text-neutral-100 placeholder-neutral-500 outline-none"
+            className="w-full bg-transparent text-[13px] text-neutral-100 placeholder-neutral-500 outline-hidden"
             spellCheck={false}
           />
         </div>

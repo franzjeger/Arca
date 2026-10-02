@@ -115,14 +115,14 @@ export function BookmarkEditDialog({
               autoFocus
               placeholder="Title (defaults to the website)"
               onChange={(event) => setTitle(event.target.value)}
-              className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[14px] text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+              className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[14px] text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
             />
             <input
               value={url}
               inputMode="url"
               placeholder="https://example.com"
               onChange={(event) => setUrl(event.target.value)}
-              className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[14px] text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+              className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[14px] text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
               spellCheck={false}
             />
             <div>
@@ -131,7 +131,7 @@ export function BookmarkEditDialog({
                 list={folderListId}
                 placeholder="Folder, e.g. Work/Projects (optional)"
                 onChange={(event) => setFolder(event.target.value)}
-                className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[14px] text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+                className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[14px] text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
                 spellCheck={false}
               />
               <datalist id={folderListId}>
@@ -147,7 +147,7 @@ export function BookmarkEditDialog({
               value={notes}
               placeholder="Notes (optional)"
               onChange={(event) => setNotes(event.target.value)}
-              className="min-h-[110px] resize-none rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+              className="min-h-[110px] resize-none rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
             />
             {error && <p className="text-[12px] text-red-400">{error}</p>}
           </div>

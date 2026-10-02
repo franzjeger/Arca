@@ -28,7 +28,7 @@ export function Dialog({ label, onClose, dismissible = true, children, className
       ref={dialog}
       aria-label={label}
       aria-modal="true"
-      className={`arca-dialog flex items-center justify-center bg-black/50 p-6 backdrop-blur-sm ${className}`}
+      className={`arca-dialog flex items-center justify-center bg-black/50 p-6 backdrop-blur-xs ${className}`}
       onKeyDown={(event) => {
         if (event.key !== "Tab" || !event.currentTarget.contains(event.target as Node)) return;
         event.stopPropagation();

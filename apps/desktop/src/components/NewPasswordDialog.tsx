@@ -65,7 +65,7 @@ export function NewPasswordDialog({
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="New master password"
-            className="w-full rounded-lg border border-hairline bg-canvas px-3 py-2.5 text-[14px] text-neutral-100 outline-none focus:border-accent"
+            className="w-full rounded-lg border border-hairline bg-canvas px-3 py-2.5 text-[14px] text-neutral-100 outline-hidden focus:border-accent"
           />
           {error && <p className="mt-2 text-[12px] text-red-400">{error}</p>}
           <div className="mt-4 flex gap-2">

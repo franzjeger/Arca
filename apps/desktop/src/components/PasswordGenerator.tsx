@@ -38,9 +38,9 @@ export function PasswordGenerator({ onUse }: { onUse: (pw: string) => void }) {
   const enabledCount = TOGGLES.filter((t) => opts[t.key]).length;
 
   return (
-    <div className="mt-2 rounded-lg border border-hairline bg-fill/[0.03] p-3">
+    <div className="mt-2 rounded-lg border border-hairline bg-fill/3 p-3">
       <div className="flex items-center gap-2">
-        <code className="flex-1 truncate rounded bg-black/30 px-2 py-1.5 font-mono text-[13px] text-neutral-100">
+        <code className="flex-1 truncate rounded-sm bg-black/30 px-2 py-1.5 font-mono text-[13px] text-neutral-100">
           {preview || "…"}
         </code>
         <button

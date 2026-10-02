@@ -149,7 +149,7 @@ export function EditDialog({
                     type={showPw ? "text" : "password"}
                     value={form.password}
                     onChange={(e) => set("password", e.target.value)}
-                    className="w-full bg-transparent px-3 py-2 font-mono text-[13px] text-neutral-100 outline-none"
+                    className="w-full bg-transparent px-3 py-2 font-mono text-[13px] text-neutral-100 outline-hidden"
                   />
                   <button
                     type="button"
@@ -203,7 +203,7 @@ export function EditDialog({
                 value={form.notes}
                 onChange={(e) => set("notes", e.target.value)}
                 rows={2}
-                className="w-full resize-none rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-none ring-1 ring-line/10 focus:ring-accent/60"
+                className="w-full resize-none rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-hidden ring-1 ring-line/10 focus:ring-accent/60"
               />
             </div>
 
@@ -262,7 +262,7 @@ function LabeledInput({
         autoFocus={autoFocus}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className={`w-full rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60 ${
+        className={`w-full rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60 ${
           mono ? "font-mono" : ""
         }`}
         spellCheck={false}

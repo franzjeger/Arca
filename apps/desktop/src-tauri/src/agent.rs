@@ -241,7 +241,7 @@ mod transport {
 #[cfg(windows)]
 mod transport {
     use super::{serve, AppHandle};
-    use interprocess::local_socket::LocalSocketListener;
+    use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
     use std::path::PathBuf;
 
     /// The named pipe the Windows OpenSSH client connects to by default.
@@ -258,7 +258,13 @@ mod transport {
     /// is unavailable until that service is stopped.
     pub fn start(app: AppHandle) {
         std::thread::spawn(move || {
-            let listener = match LocalSocketListener::bind(PIPE_NAME) {
+            // A `\\.\pipe\` path is a named pipe name as it stands, which is
+            // what the OpenSSH client looks for. No overwrite: when the
+            // Windows ssh-agent service holds the pipe, binding fails.
+            let listener = match PIPE_NAME
+                .to_fs_name::<GenericFilePath>()
+                .and_then(|name| ListenerOptions::new().name(name).create_sync())
+            {
                 Ok(l) => l,
                 Err(e) => {
                     eprintln!(

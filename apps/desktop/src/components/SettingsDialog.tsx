@@ -494,7 +494,7 @@ export function SettingsDialog({
                   value={newPw}
                   autoFocus
                   onChange={(e) => setNewPw(e.target.value)}
-                  className="rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+                  className="rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
                 />
                 <input
                   type="password"
@@ -502,7 +502,7 @@ export function SettingsDialog({
                   value={confirmPw}
                   onChange={(e) => setConfirmPw(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && void changePassword()}
-                  className="rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+                  className="rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
                 />
                 <button
                   type="button"
@@ -804,7 +804,7 @@ function SelectRow({
         aria-label={label}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="rounded-lg bg-fill/5 px-2.5 py-1.5 text-[13px] text-neutral-100 outline-none ring-1 ring-line/10 focus:ring-accent/60"
+        className="rounded-lg bg-fill/5 px-2.5 py-1.5 text-[13px] text-neutral-100 outline-hidden ring-1 ring-line/10 focus:ring-accent/60"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value} className="bg-panel">

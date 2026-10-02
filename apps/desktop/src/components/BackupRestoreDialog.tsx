@@ -88,7 +88,7 @@ export function BackupRestoreDialog({
             onChange={(event) => { setPassword(event.target.value); setVerified(false); }}
             aria-label="Backup master password"
             onKeyDown={(event) => event.key === "Enter" && void restore()}
-            className="w-full rounded-lg bg-fill/5 px-3 py-2 text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+            className="w-full rounded-lg bg-fill/5 px-3 py-2 text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
           />
           {verified && <p role="status" className="text-[12px] text-green-400">Backup verified: password and encrypted contents are valid. Your current vault is unchanged.</p>}
           {error && <p className="text-[12px] text-red-400">{error}</p>}
