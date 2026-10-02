@@ -642,66 +642,79 @@
       // the browser showed unobscured and unfaded for a moment first.
       const seen = seenLongEnough(row);
       try {
-        // A passkey is not typed into a field — it signs the site's own
-        // WebAuthn challenge. Showing one that cannot be used is worse than
-        // not showing it.
-        if (isPasskey) {
-          openPanel(anchor, note("Signing in with your passkey…"));
-          // This trusted click on a row the browser vouched was visible,
-          // recorded in the world the page cannot reach, is the only thing
-          // that lets the relay tell the desktop the user picked this account.
-          // Without it the ceremony still runs, and the desktop asks.
-          if (seen && typeof window.__sybrPasskeyPicked === "function") {
-            window.__sybrPasskeyPicked(item.credential_id);
-          }
-          const used = await usePasskey(item.credential_id);
-          if (used.ok) {
-            closePanel();
-            return;
-          }
-          if (used.reason === "no_request" && isIdentifier && !visiblePasswordField(anchor)) {
-            // The site's first step needs an account name before it can ask
-            // for a passkey. No password is requested or filled here. When
-            // it does ask, this is the passkey it gets.
-            if (item.username) setNativeValue(anchor, item.username);
-            if (seen) rememberPick(item);
-            closePanel();
-            return;
-          }
-          const failures = {
-            account_mismatch: "This page requested a passkey for a different account. Choose that account or switch accounts on the site.",
-            request_cancelled: "The site cancelled this passkey request. Start passkey sign-in on the site again.",
-            locked: "Unlock Arca, then choose your passkey again.",
-            unlock_cancelled: "Arca stayed locked.",
-            passkeys_disabled: "Passkey handling is disabled in Arca settings.",
-            site_never: "Passkeys are disabled for this site in the Arca extension settings.",
-            timeout: "Arca did not finish the passkey request. Try passkey sign-in again.",
-          };
-          openPanel(
-            anchor,
-            note(failures[used.reason] || (used.reason === "no_request"
-              ? 'Choose “Sign in with a passkey” on this site to start its passkey request.'
-              : "Arca could not complete passkey sign-in. Start it again on the site.")),
-          );
-          return;
-        }
-
-        const pwField = isIdentifier ? visiblePasswordField(anchor) : anchor;
-        if (isIdentifier && !pwField) {
-          // Pure identifier step (no password field yet): fill just the
-          // username. It's metadata already in `item`; no credential request
-          // is made. The password step fills this same account.
-          if (item.username) setNativeValue(anchor, item.username);
-          if (seen) rememberPick(item);
-          closePanel();
-          return;
-        }
-        await fillFrom(item, anchor, isIdentifier, pwField, true);
+        await useItem(item, anchor, isIdentifier, seen);
       } catch (error) {
         openPanel(anchor, note(`Could not fill: ${String(error)}`));
       }
     });
     return row;
+  }
+
+  /// Do what picking `item` in Arca's list does: sign in with a passkey, fill
+  /// just the account name on a first step, or fill the login. True when it
+  /// did; otherwise the panel says why.
+  ///
+  /// Clicking a row, and finishing the job after an unlock the user asked for
+  /// from this field, are the same act and take the same path. `seen`: the
+  /// click landed on a row of Arca's that the browser showed unobscured and
+  /// unfaded for a moment first. Only then may the next step, or the desktop
+  /// app, act on the pick without asking again.
+  async function useItem(item, anchor, isIdentifier, seen) {
+    // A passkey is not typed into a field — it signs the site's own
+    // WebAuthn challenge. Showing one that cannot be used is worse than
+    // not showing it.
+    if (item.kind === "passkey") {
+      openPanel(anchor, note("Signing in with your passkey…"));
+      // This trusted click on a row the browser vouched was visible,
+      // recorded in the world the page cannot reach, is the only thing
+      // that lets the relay tell the desktop the user picked this account.
+      // Without it the ceremony still runs, and the desktop asks.
+      if (seen && typeof window.__sybrPasskeyPicked === "function") {
+        window.__sybrPasskeyPicked(item.credential_id);
+      }
+      const used = await usePasskey(item.credential_id);
+      if (used.ok) {
+        closePanel();
+        return true;
+      }
+      if (used.reason === "no_request" && isIdentifier && !visiblePasswordField(anchor)) {
+        // The site's first step needs an account name before it can ask
+        // for a passkey. No password is requested or filled here. When
+        // it does ask, this is the passkey it gets.
+        if (item.username) setNativeValue(anchor, item.username);
+        if (seen) rememberPick(item);
+        closePanel();
+        return true;
+      }
+      const failures = {
+        account_mismatch: "This page requested a passkey for a different account. Choose that account or switch accounts on the site.",
+        request_cancelled: "The site cancelled this passkey request. Start passkey sign-in on the site again.",
+        locked: "Unlock Arca, then choose your passkey again.",
+        unlock_cancelled: "Arca stayed locked.",
+        passkeys_disabled: "Passkey handling is disabled in Arca settings.",
+        site_never: "Passkeys are disabled for this site in the Arca extension settings.",
+        timeout: "Arca did not finish the passkey request. Try passkey sign-in again.",
+      };
+      openPanel(
+        anchor,
+        note(failures[used.reason] || (used.reason === "no_request"
+          ? 'Choose “Sign in with a passkey” on this site to start its passkey request.'
+          : "Arca could not complete passkey sign-in. Start it again on the site.")),
+      );
+      return false;
+    }
+
+    const pwField = isIdentifier ? visiblePasswordField(anchor) : anchor;
+    if (isIdentifier && !pwField) {
+      // Pure identifier step (no password field yet): fill just the
+      // username. It's metadata already in `item`; no credential request
+      // is made. The password step fills this same account.
+      if (item.username) setNativeValue(anchor, item.username);
+      if (seen) rememberPick(item);
+      closePanel();
+      return true;
+    }
+    return fillFrom(item, anchor, isIdentifier, pwField, true);
   }
 
   /// Plain words for the app's failure code.
@@ -754,7 +767,7 @@
       // Keep the "Unlocking Arca…" panel this opens from being dismissed by
       // the very click that asked for it.
       e.stopPropagation();
-      void requestUnlock(anchor, isIdentifier, picked);
+      void requestUnlock(anchor, isIdentifier, picked, seenLongEnough(row));
     });
     wrap.appendChild(row);
     return wrap;
@@ -794,7 +807,9 @@
     return null;
   }
 
-  async function requestUnlock(anchor, isIdentifier, picked = null) {
+  /// `seen`: the unlock row was clicked after the browser had shown it plainly
+  /// for a moment, so what follows the unlock may count as the user's pick.
+  async function requestUnlock(anchor, isIdentifier, picked = null, seen = false) {
     const now = Date.now();
     if (now - lastUnlockRequest < UNLOCK_COOLDOWN_MS) return;
     lastUnlockRequest = now;
@@ -819,18 +834,19 @@
       return;
     }
     const items = Array.isArray(resp.items) ? resp.items : [];
-    const pwField = isIdentifier ? visiblePasswordField(anchor) : anchor;
-    // The login picked before Arca was unlocked is the one wanted: fill it.
-    // With none picked but exactly one for this site, finish the job too.
-    // You clicked "unlock to autofill" on this field; being handed a list to
-    // click again is asking the same question twice.
-    const only = items.filter((i) => i.kind !== "passkey");
+    // The login picked before Arca was unlocked is the one wanted: use it.
+    // With none picked but one account for this site, finish the job too: its
+    // login, or its passkey when a passkey is all the site has. You clicked
+    // "unlock to autofill" on this field and gave your fingerprint; being
+    // handed a list with one row to click is asking the same question twice.
+    const logins = items.filter((i) => i.kind !== "passkey");
     const chosen = picked
-      ? only.find((i) => i.id === picked.id) ?? picked
-      : only.length === 1 ? only[0] : null;
+      ? logins.find((i) => i.id === picked.id) ?? picked
+      : logins.length === 1 ? logins[0]
+      : items.length === 1 ? items[0] : null;
     if (chosen) {
       cache = { url: location.href, items };
-      if (await fillFrom(chosen, anchor, isIdentifier, pwField)) return;
+      if (await useItem(chosen, anchor, isIdentifier, seen)) return;
     }
     await showMatches(anchor, false, isIdentifier);
   }

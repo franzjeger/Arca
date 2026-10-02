@@ -548,6 +548,35 @@ console.log("\nPicking a passkey in Arca's own list answers the live request");
   check("browser prompt is aborted after Arca answers", d.browserAborts(), 1);
 }
 
+console.log("\nA passkey picked after a slow unlock still answers the live request");
+{
+  // "Unlock Arca" from the field: the click, a fingerprint that takes longer
+  // than the in-document window, then the site's one passkey, used without a
+  // list to click. The pick content.js records then is the gesture.
+  const d = makeDocument({ host: "example.org", tabId: 22 });
+  NATIVE_ANSWER = {
+    type: "passkey_assertion",
+    credential_id: [1, 2, 3, 4],
+    authenticator_data: Array.from({ length: 37 }, (_, i) => (i === 32 ? 0x05 : i)),
+    signature: [9, 9, 9],
+    user_handle: [7, 7],
+  };
+  const ceremony = d.get("conditional");
+  await tick();
+  d.gesture();
+  await tick();
+  advance(4000);
+  check("the click alone is stale by now", await d.postUse([1, 2, 3, 4]), false);
+  check("the pick is the gesture", await d.pickPasskey([1, 2, 3, 4]), true);
+  check("the page received a credential", (await ceremony).type, "public-key");
+  check("and the desktop was told the user picked it", LAST_NATIVE?.picked, true);
+
+  const reg = makeDocument({ host: "example.org", tabId: 23 });
+  reg.notePick([1, 2, 3, 4]);
+  await reg.create();
+  check("a pick does not buy a registration", reg.fellBackTo(), "create_needs_local_gesture");
+}
+
 console.log("\nConditional passkeys respect account restrictions and cancellation");
 {
   const d = makeDocument({ host: "example.org", tabId: 31 });
