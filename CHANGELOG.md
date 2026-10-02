@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.3 — 2026-10-02
+
+- Passkeys: signing in with Arca locked takes one fingerprint. On a Mac,
+  picking the account in Arca's list was followed by a second Touch ID for
+  the sign-in itself; the pick is the approval now, as it already was on
+  Windows and Linux and as Settings says. A fingerprint that opened the
+  vault for a sign-in settles a site's only account without Arca's window
+  asking which, and "Unlock Arca" in the page signs in with the site's only
+  passkey instead of listing it to click. On Microsoft, the account picked
+  on login.microsoftonline.com is the one login.microsoft.com signs with.
+  "Ask for the master password on every passkey use" still asks each time:
+  with Touch ID on a Mac.
+- Linux: a copy built from source, or installed from a .deb or .rpm, no
+  longer offers an update check that could only fail. Settings ▸ Updates
+  says how to update it instead; only an AppImage replaces itself.
+
+The browser extension is not updated by Arca: reload it from this version's
+source (chrome://extensions ▸ Reload) for the browser changes.
+
 ## 0.8.2 — 2026-09-30
 
 - Browser: updating a password from the save bar now takes. It updated only

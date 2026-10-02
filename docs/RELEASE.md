@@ -1,6 +1,6 @@
 # Coordinated release and validation
 
-Arca 0.8.2 uses authenticated `SYBRVLT7` containers and C ABI v22. Desktop,
+Arca 0.8.3 uses authenticated `SYBRVLT7` containers and C ABI v22. Desktop,
 Apple targets and the browser extension advertise the same application version;
 `scripts/check-versions.py` prevents accidental divergence. The desktop About
 row includes the Git build identifier to distinguish locally built binaries.
