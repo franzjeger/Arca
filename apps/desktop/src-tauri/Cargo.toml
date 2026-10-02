@@ -79,7 +79,7 @@ workspace = true
 [target.'cfg(windows)'.dependencies]
 # ssh-agent named-pipe transport (\\.\pipe\openssh-ssh-agent). Safe wrapper, so
 # the crate-wide #![forbid(unsafe_code)] still holds.
-interprocess = "1.2"
+interprocess = "2.4"
 # Windows Hello parented to Arca's real HWND, no focus tricks. Its own crate
 # because the interop is unsafe and this crate forbids unsafe code.
 vault-winhello = { path = "../../../crates/vault-winhello" }
