@@ -71,8 +71,10 @@ custom primitives are implemented.
   header carries a `format_version` so the layout can evolve. Each encrypted
   **item payload** is serialized with **CBOR** (self-describing, variant-tagged
   by name), so the `VaultItem` schema can gain or reorder variants without
-  misreading existing data — a positional codec such as bincode could not
-  guarantee this. (The thin outer container framing remains bincode.)
+  misreading existing data — a positional codec could not guarantee this.
+  The thin outer container framing is positional: Arca's own encoding in
+  `vault-core/src/wire.rs`, byte for byte what bincode 1 wrote with fixed-width
+  integers, which every vault so far was written with.
 
 ## Persistence & keychain
 

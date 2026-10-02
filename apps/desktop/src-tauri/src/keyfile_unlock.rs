@@ -13,7 +13,7 @@
 //! re-derives that key and unwraps: no prompt, no password.
 //!
 //! WHY THE WRAP LIVES IN THE SIDECAR, NOT THE HEADER. The header already has
-//! one device slot, it is bincode-serialised (a new field is a format bump for
+//! one device slot, it is encoded positionally (a new field is a format bump for
 //! every client), and it travels with the vault. The sidecar is local and
 //! never syncs, so the key file coexists with the biometric slot instead of
 //! competing for it, and each machine binds the same stick with its own pepper

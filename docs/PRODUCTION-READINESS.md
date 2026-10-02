@@ -93,6 +93,12 @@ they are local verification artifacts, not signed/published release installers.
    bincode, proc-macro-error and five unic crates. They have not been suppressed
    or declared harmless. Assess reachability and the upstream migration path;
    changing bincode requires explicit vault-format compatibility review.
+   *Update 2026-10-02:* bincode is gone. The container is encoded by
+   `vault-core/src/wire.rs`, which writes the same bytes: the released 0.6.2
+   and 0.7.0 vaults encode back byte for byte, and a differential run against
+   bincode 1.3.3 (20 000 random bodies, 160 000 corrupted ones) found no
+   difference. The unic crates are no longer in the lockfile;
+   proc-macro-error comes with glib's GTK3 stack, as above.
 3. **Run physical-device acceptance.** Use the exact candidate and synthetic
    vaults for signed install/update/rollback, clipboard expiry and locking,
    protected quick unlock, browser autofill, backup/restore and concurrent

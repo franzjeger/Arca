@@ -2,9 +2,10 @@
 //! another local process — must not get past the container tag by relabelling
 //! the file as an older, unauthenticated format. No password is needed for
 //! any of these edits, so each one has to be refused on unlock.
-use bincode::Options;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use vault_core::crypto::AeadBlob;
+use vault_core::wire;
 use vault_core::{Item, KdfParams, Vault, VaultHeader, VaultItem};
 
 const AUTH_LEN: usize = 32;
@@ -30,18 +31,20 @@ fn login(title: &str) -> Item {
     )
 }
 
-fn codec() -> impl Options {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .allow_trailing_bytes()
-}
-
 /// A current file's header, and the bytes after it (items and purges, whose
-/// encoding every format shares).
-fn split(file: &[u8]) -> (VaultHeader, &[u8]) {
-    let header: VaultHeader = codec().deserialize(&file[8..]).unwrap();
-    let len = codec().serialized_size(&header).unwrap() as usize;
-    (header, &file[8 + len..file.len() - AUTH_LEN])
+/// encoding every format shares). The format is positional, so the body reads
+/// as any struct with its fields in order, and the tail encodes back to the
+/// bytes it came from.
+fn split(file: &[u8]) -> (VaultHeader, Vec<u8>) {
+    #[derive(Deserialize)]
+    struct Body {
+        header: VaultHeader,
+        items: Vec<(Uuid, AeadBlob)>,
+        purges: Vec<(Uuid, i64)>,
+    }
+    let body: Body = wire::decode(&file[8..file.len() - AUTH_LEN], usize::MAX).unwrap();
+    let rest = wire::encode(&(body.items, body.purges), usize::MAX).unwrap();
+    (body.header, rest)
 }
 
 /// `header` in the layout V4 containers use, which ends at `rewrap_epoch`.
@@ -54,15 +57,14 @@ fn as_v4(header: &VaultHeader) -> Vec<u8> {
         device_wrapped_vault_key: &'a Option<AeadBlob>,
         rewrap_epoch: u64,
     }
-    codec()
-        .serialize(&HeaderV4 {
-            format_version: 4,
-            kdf: &header.kdf,
-            master_wrapped_vault_key: &header.master_wrapped_vault_key,
-            device_wrapped_vault_key: &header.device_wrapped_vault_key,
-            rewrap_epoch: header.rewrap_epoch,
-        })
-        .unwrap()
+    let v4 = HeaderV4 {
+        format_version: 4,
+        kdf: &header.kdf,
+        master_wrapped_vault_key: &header.master_wrapped_vault_key,
+        device_wrapped_vault_key: &header.device_wrapped_vault_key,
+        rewrap_epoch: header.rewrap_epoch,
+    };
+    wire::encode(&v4, usize::MAX).unwrap()
 }
 
 fn opens(file: &[u8], password: &str) -> bool {
@@ -84,7 +86,7 @@ fn relabelling_as_v4_does_not_strip_the_tag() {
 
     // The body re-encoded as a genuine V4 file would be.
     let (header, rest) = split(&file);
-    let v4 = [b"SYBRVLT4".as_slice(), &as_v4(&header), rest].concat();
+    let v4 = [b"SYBRVLT4".as_slice(), &as_v4(&header), &rest].concat();
     let mut relabelled = Vault::from_bytes(&v4).unwrap();
     assert!(relabelled.unlock("pw").is_err());
 }
@@ -102,16 +104,16 @@ fn an_old_header_cannot_bring_back_an_old_password() {
     let (_, new_rest) = split(&after);
 
     // Relabelled as V4, without a tag to check.
-    let v4 = [b"SYBRVLT4".as_slice(), &as_v4(&old_header), new_rest].concat();
+    let v4 = [b"SYBRVLT4".as_slice(), &as_v4(&old_header), &new_rest].concat();
     assert!(!opens(&v4, "leaked"));
     assert!(!opens(&v4, "changed"));
 
     // Kept current, with the current file's tag.
-    let old_header = codec().serialize(&old_header).unwrap();
+    let old_header = wire::encode(&old_header, usize::MAX).unwrap();
     let current = [
         &after[..8],
         &old_header,
-        new_rest,
+        &new_rest,
         &after[after.len() - AUTH_LEN..],
     ]
     .concat();

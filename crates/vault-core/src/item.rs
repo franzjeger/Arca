@@ -33,8 +33,8 @@ pub enum ItemKind {
 /// variant *name* (e.g. `{"type":"Login", ...}`) rather than by a positional
 /// index. Combined with the self-describing CBOR encoding used for the at-rest
 /// item payload (see [`crate::vault`]), the format stays stable when variants
-/// are reordered or new ones are appended — a guarantee a positional codec
-/// such as bincode does NOT provide.
+/// are reordered or new ones are appended — a guarantee a positional codec,
+/// such as the container's own (see [`crate::vault`]), does NOT provide.
 ///
 /// `Debug` is implemented by hand (below) so secret fields (passwords, TOTP
 /// secrets, notes, private keys) are redacted rather than printed — a derived
