@@ -136,9 +136,13 @@
   /// A passkey picked in Arca's list on the sign-in's first step, the one
   /// that asks only for the account name, often on the page before this one.
   /// The worker kept it for this tab and host, and gives it up once.
-  const recalledPick = async (allowCredentials) => {
+  const recalledPick = async (allowCredentials, rpId) => {
     try {
-      const reply = await api.runtime.sendMessage({ cmd: "recallPick", kind: "passkey" });
+      const reply = await api.runtime.sendMessage({
+        cmd: "recallPick",
+        kind: "passkey",
+        rpId: typeof rpId === "string" ? rpId : "",
+      });
       const id = reply && reply.ok && reply.pick ? reply.pick.credentialId : null;
       return Array.isArray(id) && id.length && allows(allowCredentials, id) ? id : null;
     } catch (_e) {
@@ -284,12 +288,19 @@
         localGesture > 0 && Date.now() - localGesture <= GESTURE_WINDOW_MS;
       if (fresh) localGesture = 0; // one gesture, one ceremony
       const kind = d.payload && d.payload.isCreate ? "create" : "get";
+      // A passkey just picked in Arca's own list is this document's gesture
+      // for a sign-in, even when the click is older than the window above:
+      // "Unlock Arca" from the field waits for a fingerprint before it signs
+      // in with the site's one passkey, and a fingerprint can take longer.
+      // Only content.js records a pick, on a trusted click; the get it lets
+      // through is narrowed to that passkey and spends it.
+      const picked = kind === "get" && !!pick && Date.now() - pick.at <= PICK_TTL_MS;
       let res = null;
       try {
         res = await api.runtime.sendMessage({
           cmd: "passkeyGate",
           host: location.hostname,
-          localGesture: fresh,
+          localGesture: fresh || picked,
           // A create is judged more strictly than a get: it may only ride a
           // carried gesture when this document is a fresh arrival nobody has
           // touched — Microsoft navigates to login.microsoft.com/…/fido/create
@@ -374,7 +385,7 @@
       const error = d.kind === "create"
         ? await ensureUnlocked(active, initial)
         : initial?.ok ? null : "provider_unavailable";
-      if (d.kind === "get" && !chosen) chosen = await recalledPick(p.allowCredentials);
+      if (d.kind === "get" && !chosen) chosen = await recalledPick(p.allowCredentials, p.rpId);
       if (error || !active()) {
         result = failed(error || "unlock_cancelled");
       } else {

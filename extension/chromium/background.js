@@ -427,11 +427,12 @@ async function readPending(tabId) {
 // one that asks only for the account name. The step after it asks for the
 // password or the passkey, often on a new page, and without this it asked
 // which account all over again: the page had forgotten, and Arca's window
-// then asked too. Kept per TAB, bound to the host that took the pick, for a
-// few minutes, and used once. Only the extension's content script can put
-// one here, after a real click on a row of Arca's own list.
+// then asked too. Kept per TAB, bound to the host that took the pick (or, for
+// a passkey, to its relying party), for a few minutes, and used once. Only the
+// extension's content script can put one here, after a real click on a row of
+// Arca's own list.
 const PICKED_ACCOUNT_TTL_MS = 3 * 60 * 1000;
-const pickedAccounts = new Map(); // tabId -> { id, username, credentialId, origin, ts }
+const pickedAccounts = new Map(); // tabId -> { id, username, credentialId, rpId, origin, ts }
 const pickedKey = (tabId) => `pickedAccount:${tabId}`;
 
 async function putPicked(tabId, entry) {
@@ -445,8 +446,14 @@ async function putPicked(tabId, entry) {
 
 /** Take the pick for `kind` ("password" or "passkey") if the page asking is
     on the host that made it and it is fresh. Taken, not read: one pick, one
-    step. A pick of the other kind is left for its own step. */
-async function takePicked(tabId, origin, kind) {
+    step. A pick of the other kind is left for its own step.
+
+    A passkey is also taken by a request for its own relying party (`rpId`)
+    from a page on that relying party's host or under it: Microsoft lists the
+    account on login.microsoftonline.com and signs on login.microsoft.com, and
+    the host rule alone dropped the pick there, so Arca's window asked which
+    account again. The desktop app judges the origin again before signing. */
+async function takePicked(tabId, origin, kind, rpId = "") {
   if (tabId == null || !origin) return null;
   let entry = pickedAccounts.get(tabId) || null;
   if (!entry) {
@@ -466,7 +473,23 @@ async function takePicked(tabId, origin, kind) {
   } catch (_e) {
     /* nothing to undo */
   }
-  return fresh && sameHost(entry.origin, origin) ? entry : null;
+  return fresh && (sameHost(entry.origin, origin) || forItsRelyingParty(entry, origin, kind, rpId))
+    ? entry
+    : null;
+}
+
+/** A passkey pick asked for by its own relying party, from a page WebAuthn
+    lets use it: the relying party's host or one under it. */
+function forItsRelyingParty(entry, origin, kind, rpId) {
+  const rp = String(rpId || "").toLowerCase();
+  if (kind !== "passkey" || !entry.rpId || entry.rpId !== rp) return false;
+  let host = "";
+  try {
+    host = new URL(origin).hostname.toLowerCase();
+  } catch (_e) {
+    return false;
+  }
+  return host === rp || host.endsWith(`.${rp}`);
 }
 
 // ── The passkey gate ────────────────────────────────────────────────────────
@@ -767,13 +790,19 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         id: msg.id,
         username: typeof msg.username === "string" ? msg.username : "",
         credentialId: Array.isArray(msg.credentialId) ? msg.credentialId : null,
+        rpId: typeof msg.rpId === "string" ? msg.rpId.toLowerCase() : "",
         origin: pageOrigin(sender),
         ts: Date.now(),
       }).then(() => sendResponse({ ok: true }));
       return true;
 
     case "recallPick":
-      takePicked(tabId, pageOrigin(sender), msg.kind === "passkey" ? "passkey" : "password")
+      takePicked(
+        tabId,
+        pageOrigin(sender),
+        msg.kind === "passkey" ? "passkey" : "password",
+        typeof msg.rpId === "string" ? msg.rpId : "",
+      )
         .then((entry) =>
           sendResponse({
             ok: true,
