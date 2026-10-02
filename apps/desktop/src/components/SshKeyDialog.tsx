@@ -72,7 +72,7 @@ export function SshKeyDialog({
                   placeholder="frank@macbook"
                   onChange={(e) => setComment(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && void generate()}
-                  className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-none ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
+                  className="w-full rounded-lg bg-fill/5 px-3 py-2 text-[13px] text-neutral-100 outline-hidden ring-1 ring-line/10 placeholder-neutral-600 focus:ring-accent/60"
                   spellCheck={false}
                 />
               </div>

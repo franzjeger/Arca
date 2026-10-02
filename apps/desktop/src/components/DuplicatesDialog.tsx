@@ -58,7 +58,11 @@ function Group({
         />
         Merge {group.logins.length} logins for {name}
       </label>
-      <fieldset className="mt-2 space-y-1.5" disabled={disabled}>
+      {/* mt-3.5: the gap Tailwind 3 drew here. Its `space-y` put a top margin
+          on every child after the first, and the first is the sr-only legend,
+          so the first login sat 6px lower than `mt-2` alone; Tailwind 4's
+          `space-y` puts a bottom margin on all but the last instead. */}
+      <fieldset className="mt-3.5 space-y-1.5" disabled={disabled}>
         <legend className="sr-only">Login to keep for {name}</legend>
         {group.logins.map((login: DuplicateLogin) => (
           <label

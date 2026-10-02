@@ -43,7 +43,7 @@ function StrengthPill({ strength }: { strength: PasswordStrength }) {
   const s = STRENGTH_STYLE[strength];
   return (
     <span
-      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${s.cls}`}
+      className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium ${s.cls}`}
       title="Estimated password strength"
     >
       {s.label}
@@ -172,7 +172,7 @@ export function DetailPane({
       </div>
 
       {/* fields */}
-      <div className="mx-8 rounded-xl bg-fill/[0.03] px-4 ring-1 ring-line/5">
+      <div className="mx-8 rounded-xl bg-fill/3 px-4 ring-1 ring-line/5">
         {detail.kind === "login" && (
           <>
             <Row label="User name">
@@ -256,7 +256,7 @@ export function DetailPane({
 
             {detail.notes && (
               <Row label="Notes">
-                <p className="whitespace-pre-wrap break-words">
+                <p className="whitespace-pre-wrap wrap-break-word">
                   {detail.notes}
                 </p>
               </Row>
@@ -337,7 +337,7 @@ export function DetailPane({
 
             {detail.notes && (
               <Row label="Notes">
-                <p className="whitespace-pre-wrap break-words">
+                <p className="whitespace-pre-wrap wrap-break-word">
                   {detail.notes}
                 </p>
               </Row>
@@ -370,7 +370,7 @@ export function DetailPane({
             )}
             {detail.notes && (
               <Row label="Notes">
-                <p className="whitespace-pre-wrap break-words">
+                <p className="whitespace-pre-wrap wrap-break-word">
                   {detail.notes}
                 </p>
               </Row>
@@ -386,7 +386,7 @@ export function DetailPane({
           <Row label="Note">
             {detail.notes ? (
               <div className="flex items-start justify-between gap-2">
-                <p className="min-w-0 whitespace-pre-wrap break-words">
+                <p className="min-w-0 whitespace-pre-wrap wrap-break-word">
                   {detail.notes}
                 </p>
                 <IconButton
@@ -409,7 +409,7 @@ export function DetailPane({
 
         {detail.kind === "unknown" && (
           <Row label="Not readable here">
-            <p className="min-w-0 whitespace-pre-wrap break-words text-neutral-400">
+            <p className="min-w-0 whitespace-pre-wrap wrap-break-word text-neutral-400">
               This entry was created by a newer version of Arca. It is stored
               safely and left exactly as it was — updating this device will show
               it.

@@ -164,7 +164,7 @@ export function EntryList({
 
       {/* Bulk-action bar: appears once one or more items are checked. */}
       {selectionActive && (
-        <div className="flex items-center gap-2 border-y border-hairline bg-fill/[0.03] px-3 py-2 text-[12px]">
+        <div className="flex items-center gap-2 border-y border-hairline bg-fill/3 px-3 py-2 text-[12px]">
           <span className="font-semibold text-neutral-100">
             {selCount} selected
           </span>

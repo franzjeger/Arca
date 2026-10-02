@@ -162,7 +162,7 @@ export function SshImportPanel({
                       onChange={(e) =>
                         setPassphrases({ ...passphrases, [k.file]: e.target.value })
                       }
-                      className="mt-2 w-full rounded-lg bg-fill/5 px-3 py-1.5 text-[13px] text-neutral-100 outline-none ring-1 ring-line/10 focus:ring-accent/60"
+                      className="mt-2 w-full rounded-lg bg-fill/5 px-3 py-1.5 text-[13px] text-neutral-100 outline-hidden ring-1 ring-line/10 focus:ring-accent/60"
                     />
                   )}
                 </li>

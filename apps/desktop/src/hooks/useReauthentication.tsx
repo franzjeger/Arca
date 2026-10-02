@@ -74,7 +74,7 @@ export function useReauthentication() {
       <label className="block text-[12px] text-neutral-300">Current master password
         <input autoFocus type="password" autoComplete="current-password" value={password} disabled={busy}
           onChange={(event) => setPassword(event.target.value)}
-          className="mt-2 w-full rounded-lg bg-fill/5 px-3 py-2 text-neutral-100 outline-none ring-1 ring-line/10 focus:ring-accent/60" />
+          className="mt-2 w-full rounded-lg bg-fill/5 px-3 py-2 text-neutral-100 outline-hidden ring-1 ring-line/10 focus:ring-accent/60" />
       </label>
       {error && <p role="alert" className="text-[12px] text-red-400">{error}</p>}
       <div className="flex justify-end gap-2">
