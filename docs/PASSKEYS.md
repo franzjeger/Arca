@@ -112,6 +112,10 @@ person was present) and **UV** (that person was verified). Arca's stance:
   A ceremony the page started itself gets the desktop chooser instead — one
   button per matching account, one account = one button — and choosing *is*
   approving. Registration gets a single "Create passkey" button.
+- **A fingerprint that opened the vault for this sign-in settles one
+  account.** With the vault locked, the prompt names the site ("sign in to
+  github.com"); when the site allows one account, that is the one, and the
+  chooser is not shown. Several accounts still get it.
 - **The same on a Mac.** macOS used to ask for Touch ID on top of the pick,
   so a sign-in that had to open the vault first asked for two fingerprints:
   one to unlock, one to sign in with the account just picked. Touch ID is

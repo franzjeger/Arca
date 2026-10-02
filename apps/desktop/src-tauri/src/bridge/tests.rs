@@ -2521,3 +2521,23 @@ fn a_passkey_picked_on_an_open_vault_signs_without_asking_again() {
     assert_eq!(asked, 1, "the per-use prompt is asked for");
 }
 
+/// One account, and the user already said which: by picking it in Arca's list,
+/// or with the fingerprint that opened the vault for this very sign-in. Arca's
+/// window used to ask anyway, with a single button. A request nobody approved
+/// still goes to the window, whose click is the approval; several accounts
+/// always do.
+#[test]
+fn one_account_the_user_already_approved_needs_no_chooser() {
+    let approved = Chooser::Settled { approved: true };
+    assert_eq!(chooser(1, true, false, true), approved);
+    assert_eq!(chooser(1, false, true, true), approved);
+    assert_eq!(chooser(1, false, false, true), Chooser::Window);
+    // Headless: the one account, approved by the injected consent.
+    assert_eq!(
+        chooser(1, false, false, false),
+        Chooser::Settled { approved: false }
+    );
+    for (picked, verified) in [(false, false), (true, false), (false, true), (true, true)] {
+        assert_eq!(chooser(2, picked, verified, true), Chooser::Window);
+    }
+}
