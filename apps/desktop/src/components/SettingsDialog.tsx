@@ -514,7 +514,7 @@ export function SettingsDialog({
             />
             <ToggleRow
               label="Ask for the master password on every passkey use"
-              hint="Off: an unlocked vault plus one click in Arca (the account you pick) signs you in. On: every passkey sign-in and registration also asks for your master password."
+              hint="Off: an unlocked vault plus one click in Arca (the account you pick) signs you in. On: every passkey sign-in and registration asks again, with Touch ID on a Mac and your master password elsewhere."
               checked={settings.passkeyReprompt}
               onChange={(v) => apply({ passkeyReprompt: v })}
             />

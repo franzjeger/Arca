@@ -783,8 +783,8 @@ pub(super) fn log_line(state: &Mutex<AppState>, rest: &str) {
 /// A sign-in then needs presence — one deliberate click that names the site
 /// and the account — not a second password. That is what 1Password and Apple
 /// Passwords do; it is what the double prompt was standing in the way of. The
-/// setting restores the old per-use password for people who want it, and
-/// macOS keeps Touch ID because it is one touch and genuinely biometric.
+/// setting restores the per-use prompt for people who want it: Touch ID on a
+/// Mac, the master password elsewhere.
 pub(super) fn approve_passkey_inner(
     rp_id: &str,
     is_create: bool,
@@ -793,6 +793,13 @@ pub(super) fn approve_passkey_inner(
     confirmed: bool,
     require_password: bool,
 ) -> Option<bool> {
+    // The click that chose this account in Arca's own UI is the approval, on
+    // every platform. macOS used to ask for Touch ID on top of it, so a
+    // sign-in that opened the vault first asked twice: once to unlock, and
+    // again to sign in with the account the user had just picked.
+    if confirmed && !require_password {
+        return Some(true);
+    }
     // The reason string the user reads — clearly different for registering a new
     // passkey vs signing in, so a create can't be mistaken for a login.
     let reason = if is_create {
@@ -817,13 +824,8 @@ pub(super) fn approve_passkey_inner(
     // (the very secret that unlocks the vault), so we may honestly set UV=1.
     #[cfg(not(target_os = "macos"))]
     if let Some(app) = app {
-        if confirmed && !require_password {
-            return Some(true);
-        }
         return request_passkey_verification(app, rp_id, is_create, require_password);
     }
-    #[cfg(target_os = "macos")]
-    let _ = (confirmed, require_password);
     // Tests / headless (no AppHandle): the injected consent closure provides
     // user presence only (user_verified = false).
     let _ = app;

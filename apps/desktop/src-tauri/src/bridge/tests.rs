@@ -2434,3 +2434,90 @@ fn a_passkey_sign_in_while_locked_asks_once_unless_the_password_is_required() {
     assert!(matches!(r, Response::PasskeyAssertion { .. }), "{r:?}");
     assert_eq!(asked, 1, "the master password is still asked for");
 }
+
+/// A passkey for `user` on `rp_id`, registered from `origin`; its credential id.
+fn register_passkey(
+    state: &Mutex<AppState>,
+    authed: &mut Session,
+    (origin, rp_id): (&str, &str),
+    (user, handle): (&str, u8),
+) -> Vec<u8> {
+    match handle_request(
+        Request::PasskeyCreate {
+            origin: origin.into(),
+            rp_id: rp_id.into(),
+            user_name: user.into(),
+            user_handle: vec![handle],
+            exclude_credentials: vec![],
+        },
+        state,
+        "t",
+        authed,
+        None,
+        &mut allow(),
+    ) {
+        Response::PasskeyCredential { credential_id, .. } => credential_id,
+        other => panic!("expected a credential, got {other:?}"),
+    }
+}
+
+/// Picking the account in Arca's own list, on a vault already open, is the
+/// approval: the sign-in asks nothing more. A Mac used to ask for Touch ID on
+/// top of it, which after "unlock Arca" made one sign-in two fingerprints.
+/// With the per-use prompt turned on, the pick no longer stands in for it.
+#[test]
+fn a_passkey_picked_on_an_open_vault_signs_without_asking_again() {
+    let dir = TempDir::new().unwrap();
+    let state = unlocked_state(&dir);
+    let mut authed = Session::Authed;
+    let site = ("https://github.com", "github.com");
+    let cred_id = register_passkey(&state, &mut authed, site, ("frank", 9));
+    let get = || Request::PasskeyGet {
+        origin: "https://github.com/login".into(),
+        rp_id: "github.com".into(),
+        client_data_hash: vec![3u8; 32],
+        allow_credentials: vec![cred_id.clone()],
+        picked: true,
+    };
+
+    let mut prompts = Vec::new();
+    let r = dispatch_with(
+        get(),
+        &state,
+        "t",
+        &mut authed,
+        None,
+        &mut |_: &ConsentContext| panic!("the pick already approved this sign-in"),
+        &mut fingerprint(&state, &mut prompts),
+    );
+    let Response::PasskeyAssertion {
+        authenticator_data, ..
+    } = r
+    else {
+        panic!("expected an assertion, got {r:?}");
+    };
+    // User present and verified: the open vault is the verification.
+    assert_eq!(authenticator_data[32] & 0x05, 0x05);
+    assert!(
+        prompts.is_empty(),
+        "an open vault asks nothing: {prompts:?}"
+    );
+
+    state.lock().unwrap().settings.passkey_reprompt = true;
+    let mut asked = 0;
+    let r = dispatch_with(
+        get(),
+        &state,
+        "t",
+        &mut authed,
+        None,
+        &mut |_: &ConsentContext| {
+            asked += 1;
+            true
+        },
+        &mut fingerprint(&state, &mut prompts),
+    );
+    assert!(matches!(r, Response::PasskeyAssertion { .. }), "{r:?}");
+    assert_eq!(asked, 1, "the per-use prompt is asked for");
+}
+
