@@ -40,7 +40,7 @@ and the wrap is stored **in the sidecar, not in the vault header**. Unlock
 reads the file, re-derives the key and unwraps (`unlock_with_wrapped_key`).
 
 Why the sidecar and not the header's device slot: the header has exactly one
-such slot, it is bincode-serialised (a new field is a format bump for every
+such slot, it is encoded positionally (a new field is a format bump for every
 client, iOS included), and it travels with the vault. Keeping the wrap local
 means the key file coexists with Touch ID / Hello / the Linux keyring instead
 of taking their slot, every computer binds the same stick with its own pepper

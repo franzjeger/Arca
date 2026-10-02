@@ -216,6 +216,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let mut app_state = AppState::new(store, vault, clipboard);
     // Restore persisted (non-secret) settings, if any.
     app_state.settings = state::load_settings(app_state.store.path());
+    // A passkey log is kept only while it is turned on; this also removes the
+    // one earlier versions kept for everyone.
+    if !app_state.settings.log_passkey_requests {
+        bridge::discard_passkey_log(app_state.store.path());
+    }
     app.manage(Mutex::new(app_state));
     // Shared map of in-flight autofill-consent prompts (used only when
     // the confirm-autofill setting is on).

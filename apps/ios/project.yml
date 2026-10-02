@@ -33,7 +33,7 @@ settings:
     # the phone's app, its extension and the Mac app all have to share one team.
     DEVELOPMENT_TEAM: LY6LJ395B8
     CODE_SIGN_STYLE: Automatic
-    MARKETING_VERSION: "0.8.4"
+    MARKETING_VERSION: "0.8.5"
     CURRENT_PROJECT_VERSION: "1"
     TARGETED_DEVICE_FAMILY: "1,2"
     # vault-ffi (Rust) linkage, shared by both targets, and deliberately the same

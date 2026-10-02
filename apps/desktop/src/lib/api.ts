@@ -284,6 +284,9 @@ export interface Settings {
   /** Ask for the master password on every passkey use (stricter than the
    *  default of "unlocked vault + one click"). */
   passkeyReprompt: boolean;
+  /** Keep passkey-requests.log beside the vault, for troubleshooting. Off by
+   *  default: it lists the sites you sign in to, unencrypted. */
+  logPasskeyRequests: boolean;
 }
 
 /** Payload of a `fill-consent-request` event: what the app is asking to fill. */

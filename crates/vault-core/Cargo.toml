@@ -27,7 +27,6 @@ ssh-key.workspace = true
 psl.workspace = true
 vault-secmem.workspace = true
 serde.workspace = true
-bincode.workspace = true
 ciborium.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
