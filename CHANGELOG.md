@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.5 — 2026-10-02
+
+- Privacy: Arca no longer keeps a log of passkey sign-ins unless you ask it
+  to. Every passkey request used to be written to passkey-requests.log beside
+  the vault, which made it a plaintext list of the sites you sign in to,
+  outside the encrypted vault and in every backup of the folder. It is now a
+  setting, "Keep a log of passkey requests", off by default and meant for
+  troubleshooting; turning it off deletes the log, and the log earlier
+  versions kept is deleted the first time this version starts.
+- macOS: Arca says it needs macOS 14, which its AutoFill extension and its
+  interface do. On an older Mac, macOS now says so plainly instead of Arca
+  opening without AutoFill and with an interface it cannot draw.
+- Vault files: the container is written by Arca's own code instead of
+  bincode, which is no longer maintained. The bytes are the same as before,
+  so there is nothing to migrate: the files 0.6.2 and 0.7.0 wrote come back
+  byte for byte, and a comparison with bincode over 180,000 generated and
+  corrupted vault bodies found no difference.
+
+The browser extension has no changes in this version.
+
 ## 0.8.4 — 2026-10-02
 
 - Under the hood: Tauri 2.12, Tailwind CSS 4, TypeScript 7 and Vitest 5,
