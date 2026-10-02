@@ -70,10 +70,30 @@ if [ -z "${ARCA_GOOGLE_CLIENT_SECRET:-}" ]; then
      ARCA_GOOGLE_CLIENT_SECRET. See docs/SYNC.md."
 fi
 
+# The signing identity and the notary credentials live in that keychain, and
+# it locks again at every restart: codesign and notarytool then stop with "The
+# ... keychain is locked". setup-macos-signing.sh gave it a password of its
+# own, kept beside the signing key for exactly this.
+KEYCHAIN_PASSWORD_FILE="${ARCA_KEYCHAIN_PASSWORD_FILE:-$HOME/.arca/signing/developer-id-keychain-password}"
+if [ -r "$KEYCHAIN_PASSWORD_FILE" ]; then
+  security unlock-keychain -p "$(cat "$KEYCHAIN_PASSWORD_FILE")" "$NOTARY_KEYCHAIN" \
+    || die "could not unlock $NOTARY_KEYCHAIN with the password in $KEYCHAIN_PASSWORD_FILE"
+fi
+
 # Asked before building rather than after: the build takes minutes, and this
 # is the step most likely to be missing on a new Mac.
 if [ "$NOTARIZE" = 1 ]; then
   if ! NOTARY_ERROR="$(xcrun notarytool history "${NOTARY[@]}" 2>&1 >/dev/null)"; then
+    # Apple turns notarization off for the whole team whenever it updates the
+    # Program License Agreement, until the Account Holder accepts it. Setting
+    # the credentials up again would not help.
+    case "$NOTARY_ERROR" in
+      *"required agreement"*)
+        die "Apple refuses to notarize until the Account Holder accepts its updated agreement:
+     ${NOTARY_ERROR%%$'\n'*}
+     Accept it at https://developer.apple.com/account; it took about ten minutes
+     to apply on 2026-10-02." ;;
+    esac
     die "notarytool cannot use the credentials named '$NOTARY_PROFILE' in $NOTARY_KEYCHAIN:
      ${NOTARY_ERROR%%$'\n'*}
      Run scripts/setup-macos-signing.sh."
