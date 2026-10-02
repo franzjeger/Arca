@@ -14,7 +14,7 @@ Current source version: **0.8.4** — see [`CHANGELOG.md`](./CHANGELOG.md)
 
 ## Install
 
-**macOS, Apple silicon.** Download the disk image from the
+**macOS 14 or later, Apple silicon.** Download the disk image from the
 [latest release](https://github.com/franzjeger/Arca/releases/latest), open it
 and drag Arca to Applications. It is signed with Developer ID and notarized, so
 it opens without warnings, and it carries its AutoFill extension and its browser
