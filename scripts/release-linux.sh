@@ -56,6 +56,11 @@ command -v xdg-open >/dev/null 2>&1 || die "xdg-open is missing (package: xdg-ut
 
 VERSION="$(python3 -c "import json;print(json.load(open('$REPO/apps/desktop/src-tauri/tauri.conf.json'))['version'])")"
 
+# What ships is what package-lock.json says, not whatever the checkout last
+# installed; the build below bundles the frontend from node_modules.
+step "Frontend dependencies, exactly as the lockfile has them"
+(cd "$REPO/apps/desktop" && npm ci)
+
 step "Building the Linux bundles ($BUNDLES)"
 # createUpdaterArtifacts is passed HERE rather than in tauri.conf.json for the
 # same reason the macOS script does it: in the shared config every local dev
