@@ -810,6 +810,30 @@ console.log("\nA passkey picked on the sign-in's first step is the one its next 
   await tick();
   await late.pageCeremony("get", { challenge: [10], rpId: "example.org", allowCredentials: [] });
   check("nor after a few minutes", LAST_NATIVE.picked, false);
+
+  // Microsoft lists the account on login.microsoftonline.com; the passkey is
+  // for login.microsoft.com, and that is where its ceremony runs. The pick is
+  // kept for the relying party, not only for the host it was made on.
+  const rememberMicrosoft = (tabId) =>
+    toWorker(
+      { cmd: "rememberPick", url: "https://login.microsoftonline.com/", id: "item-3",
+        username: "frank", credentialId: [1, 2, 3, 4], rpId: "login.microsoft.com" },
+      tabId, "https://login.microsoftonline.com",
+    );
+  await rememberMicrosoft(49);
+  const entra = makeDocument({ host: "login.microsoft.com", tabId: 49 });
+  entra.gesture();
+  await tick();
+  await entra.pageCeremony("get", { challenge: [11], rpId: "login.microsoft.com", allowCredentials: [] });
+  check("the relying party's own host takes it", LAST_NATIVE.picked, true);
+  check("narrowed to that passkey too", JSON.stringify(LAST_NATIVE.allow_credentials), "[[1,2,3,4]]");
+
+  await rememberMicrosoft(50);
+  const claimant = makeDocument({ host: "evil.example", tabId: 50 });
+  claimant.gesture();
+  await tick();
+  await claimant.pageCeremony("get", { challenge: [12], rpId: "login.microsoft.com", allowCredentials: [] });
+  check("a page that only names the relying party does not", LAST_NATIVE.picked, false);
   NATIVE_ANSWER = { type: "error", message: "locked" };
 }
 

@@ -226,6 +226,10 @@ struct LoginMatch {
     /// Identifies the exact passkey selected in the browser's account picker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     credential_id: Vec<u8>,
+    /// The relying party of a passkey, so a pick made on one host of a
+    /// sign-in reaches the ceremony on the next. Empty for passwords.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    rp_id: String,
     title: String,
     username: String,
     url: String,
@@ -767,6 +771,7 @@ fn decode_login_matches(resp: serde_json::Value, url: &str) -> Option<Vec<LoginM
             .map(|item| LoginMatch {
                 id: item.id,
                 credential_id: item.credential_id,
+                rp_id: item.rp_id,
                 title: item.title,
                 username: item.username,
                 url: url.to_string(),
@@ -942,7 +947,8 @@ mod tests {
                 "type": "logins", "items": [
                     {"id": "password", "title": "Example", "username": "alice"},
                     {"id": "passkey", "title": "Example", "username": "bob",
-                     "kind": "passkey", "credential_id": [1, 2, 255]}
+                     "kind": "passkey", "credential_id": [1, 2, 255],
+                     "rp_id": "example.test"}
                 ]
             }),
             "https://example.test/login",
@@ -951,7 +957,11 @@ mod tests {
         let browser = serde_json::to_value(items).unwrap();
         assert_eq!(browser[0]["kind"], "password");
         assert!(browser[0].get("credential_id").is_none());
+        assert!(browser[0].get("rp_id").is_none());
         assert_eq!(browser[1]["credential_id"], serde_json::json!([1, 2, 255]));
+        // The relying party reaches the browser, for a pick to follow the
+        // sign-in to that relying party's own host.
+        assert_eq!(browser[1]["rp_id"], "example.test");
         assert_eq!(browser[1]["url"], "https://example.test/login");
     }
 

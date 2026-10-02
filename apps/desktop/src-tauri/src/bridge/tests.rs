@@ -1201,8 +1201,12 @@ fn match_labels_passwords_and_passkeys_by_kind() {
             assert_eq!(items.len(), 2);
             assert!(items
                 .iter()
-                .any(|i| i.kind == "password" && i.username == "frank"));
-            assert!(items.iter().any(|i| i.kind == "passkey"));
+                .any(|i| i.kind == "password" && i.username == "frank" && i.rp_id.is_empty()));
+            // A passkey names its relying party, so a pick made here can
+            // follow the sign-in to that relying party's own host.
+            assert!(items
+                .iter()
+                .any(|i| i.kind == "passkey" && i.rp_id == "github.com"));
         }
         other => panic!("expected logins, got {other:?}"),
     }

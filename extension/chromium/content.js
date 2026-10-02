@@ -537,6 +537,10 @@
         username: item.username || "",
         credentialId:
           item.kind === "passkey" ? Array.from(item.credential_id || []) : null,
+        // Where the passkey signs. Microsoft lists the account on one host and
+        // asks for the passkey on another; the pick is kept for this, not the
+        // host it was made on.
+        rpId: item.kind === "passkey" ? item.rp_id || "" : "",
       })
       .catch(() => {});
   }

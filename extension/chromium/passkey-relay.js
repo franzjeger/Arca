@@ -136,9 +136,13 @@
   /// A passkey picked in Arca's list on the sign-in's first step, the one
   /// that asks only for the account name, often on the page before this one.
   /// The worker kept it for this tab and host, and gives it up once.
-  const recalledPick = async (allowCredentials) => {
+  const recalledPick = async (allowCredentials, rpId) => {
     try {
-      const reply = await api.runtime.sendMessage({ cmd: "recallPick", kind: "passkey" });
+      const reply = await api.runtime.sendMessage({
+        cmd: "recallPick",
+        kind: "passkey",
+        rpId: typeof rpId === "string" ? rpId : "",
+      });
       const id = reply && reply.ok && reply.pick ? reply.pick.credentialId : null;
       return Array.isArray(id) && id.length && allows(allowCredentials, id) ? id : null;
     } catch (_e) {
@@ -381,7 +385,7 @@
       const error = d.kind === "create"
         ? await ensureUnlocked(active, initial)
         : initial?.ok ? null : "provider_unavailable";
-      if (d.kind === "get" && !chosen) chosen = await recalledPick(p.allowCredentials);
+      if (d.kind === "get" && !chosen) chosen = await recalledPick(p.allowCredentials, p.rpId);
       if (error || !active()) {
         result = failed(error || "unlock_cancelled");
       } else {
