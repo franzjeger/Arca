@@ -43,6 +43,7 @@ pub mod sync;
 pub mod totp;
 pub mod url;
 pub mod vault;
+pub mod wire;
 
 pub use devices::Device;
 pub use edit::{Change, LoginEdit, NoteEdit, WifiEdit};
@@ -209,7 +210,7 @@ mod tests {
         let mut bytes = vault.to_bytes().unwrap();
 
         // The body now ends with the purge list, which is empty here and so is
-        // exactly bincode's 8-byte length. The byte before that is the last
+        // exactly its 8-byte count. The byte before that is the last
         // byte of the item ciphertext. Flipping the length instead would break
         // the parse rather than the AEAD, which is a different claim.
         let last_ciphertext_byte = bytes.len() - 9;

@@ -3,13 +3,16 @@
 //! On-disk layout produced by [`Vault::to_bytes`]:
 //! ```text
 //! "SYBRVLT7"            (8-byte magic; V6 down to V1 remain readable)
-//! bincode(VaultBody {   (cleartext header + per-item ciphertext)
+//! wire(VaultBody {      (cleartext header + per-item ciphertext)
 //!     header,
 //!     items: [ { id, AeadBlob }, ... ],
 //!     purges: [ { id, at }, ... ],
 //! })
-//! HMAC-SHA256(tag_key, context || bincode(body))
+//! HMAC-SHA256(tag_key, context || wire(body))
 //! ```
+//! `wire` is the positional encoding in [`crate::wire`]: byte for byte what
+//! bincode 1 wrote with fixed-width integers, which every Arca vault was
+//! written with.
 //! The header is cleartext (public KDF params + wrapped keys); every item is
 //! sealed individually with the items key, with the item id bound as AAD. The
 //! items key and the tag key are derived from the vault key (HKDF-SHA256), so
@@ -25,7 +28,6 @@
 //! [`crate::sync::Purge`].
 
 use crate::VaultItem;
-use bincode::Options;
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -270,22 +272,15 @@ impl Sealed {
     }
 }
 
-/// The one bincode configuration every container body is read and written with.
-fn body_codec() -> impl Options {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .reject_trailing_bytes()
-        .with_limit((MAX_VAULT_BYTES - MAGIC.len() - AUTH_LEN) as u64)
-}
+/// The most a container body may take: the file's limit, less its magic and tag.
+const BODY_LIMIT: usize = MAX_VAULT_BYTES - MAGIC.len() - AUTH_LEN;
 
 fn encode_body<T: Serialize>(body: &T) -> Result<Vec<u8>> {
-    body_codec()
-        .serialize(body)
-        .map_err(|_| Error::Serialization)
+    crate::wire::encode(body, BODY_LIMIT).map_err(|_| Error::Serialization)
 }
 
 fn decode_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    body_codec().deserialize(bytes).map_err(|_| Error::Format)
+    crate::wire::decode(bytes, BODY_LIMIT).map_err(|_| Error::Format)
 }
 
 /// A password vault. Create a new one with [`Vault::create`], or load an
@@ -1456,7 +1451,7 @@ fn container_mac(key: &SymmetricKey, version: u16) -> Hmac<Sha256> {
 /// CBOR is self-describing and tags enum variants by name, so the persisted
 /// `VaultItem` schema can evolve — variants may be reordered or appended —
 /// without misreading existing data. (The outer container in
-/// [`Vault::to_bytes`] uses bincode; only this inner, encrypted payload needs
+/// [`Vault::to_bytes`] is positional; only this inner, encrypted payload needs
 /// schema stability.) Generic so the round-trip test can exercise the exact
 /// codec used on disk.
 fn encode_item_payload<T: serde::Serialize>(value: &T) -> Result<Zeroizing<Vec<u8>>> {
@@ -1518,8 +1513,30 @@ mod tests {
 
     // Proves the on-disk item-payload codec is stable against variant
     // reordering *and* a newly appended variant — the property a positional
-    // codec (bincode) would violate. We round-trip through the real
+    // codec (the container's) would violate. We round-trip through the real
     // encode/decode helpers used by `encrypt_items`/`decrypt_items`.
+    /// The two files released Arca wrote (`tests/fixtures`), decoded and encoded
+    /// again, come back byte for byte. Arca's own container codec writes what
+    /// bincode 1 did, which is what wrote them; the tag over these bytes would
+    /// not survive a single one changing.
+    #[test]
+    fn released_containers_encode_back_byte_for_byte() {
+        fn body(file: &[u8]) -> &[u8] {
+            &file[MAGIC.len()..file.len() - AUTH_LEN]
+        }
+        let v5 = body(include_bytes!("../tests/fixtures/v5-from-0.6.2.vault"));
+        let parsed: BodyV6 = decode_body(v5).unwrap();
+        assert!(!parsed.items.is_empty());
+        assert_eq!(encode_body(&parsed).unwrap(), v5);
+
+        let v7 = body(include_bytes!("../tests/fixtures/v7-from-0.7.0.vault"));
+        let parsed: VaultBody = decode_body(v7).unwrap();
+        assert!(!parsed.items.is_empty());
+        assert!(parsed.header.device_wrapped_vault_key.is_some());
+        assert!(parsed.header.sealed_meta.is_some());
+        assert_eq!(encode_body(&parsed).unwrap(), v7);
+    }
+
     #[test]
     fn item_payload_survives_variant_reorder_and_append() {
         // The layout in effect when some item was written to disk.
@@ -1791,7 +1808,7 @@ mod tests {
         body.header.kdf.m_cost_kib = KdfParams::MAX_M_COST_KIB + 1;
 
         let mut forged = MAGIC.to_vec();
-        forged.extend_from_slice(&bincode::serialize(&body).unwrap());
+        forged.extend_from_slice(&encode_body(&body).unwrap());
         forged.extend_from_slice(&[0; AUTH_LEN]);
         // Refused as newer, not garbage: a later build may raise the limits.
         assert!(matches!(
@@ -2062,7 +2079,7 @@ mod tests {
         }
         let mut old = MAGIC_V2.to_vec();
         let header = (&legacy_header(&vault, "pw", 3)).into();
-        old.extend_from_slice(&bincode::serialize(&OldBody { header, items }).unwrap());
+        old.extend_from_slice(&encode_body(&OldBody { header, items }).unwrap());
 
         let mut reloaded = Vault::from_bytes(&old).unwrap();
         reloaded.unlock("pw").unwrap();
@@ -2441,7 +2458,7 @@ mod tests {
             items: vec![],
         };
         let mut bytes = b"SYBRVLT1".to_vec();
-        bytes.extend_from_slice(&bincode::serialize(&old).unwrap());
+        bytes.extend_from_slice(&encode_body(&old).unwrap());
         let mut loaded = Vault::from_bytes(&bytes).unwrap();
         assert_eq!(loaded.header().rewrap_epoch, 0);
         loaded.unlock("pw").unwrap();
@@ -2524,7 +2541,7 @@ mod tests {
                 _ => body.header.master_wrapped_vault_key.ciphertext[0] ^= 1,
             }
             let mut forged = MAGIC.to_vec();
-            forged.extend(bincode::serialize(&body).unwrap());
+            forged.extend(encode_body(&body).unwrap());
             forged.extend_from_slice(&original[original.len() - AUTH_LEN..]);
             assert!(matches!(
                 local.merge_remote(&forged),

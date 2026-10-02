@@ -183,7 +183,7 @@ impl VaultHeader {
     /// v2: item payloads encoded with self-describing, name-tagged CBOR so the
     ///     `VaultItem` schema can evolve safely.
     /// v3: header gains `rewrap_epoch` (new `SYBRVLT2` container magic — the
-    ///     outer bincode framing is positional, so the header change needs its
+    ///     outer framing is positional, so the header change needs its
     ///     own container version; v2 files are still read transparently).
     /// v4: item payloads carry encrypted revision ancestry; `SYBRVLT4` prevents
     ///     older clients from silently accepting and then stripping it.
@@ -212,7 +212,7 @@ impl VaultHeader {
 }
 
 /// The v2 header layout exactly as `SYBRVLT1` containers serialized it
-/// (bincode is positional: the legacy struct must match field-for-field).
+/// (the container is positional: the legacy struct must match field-for-field).
 #[derive(Deserialize)]
 pub(crate) struct LegacyHeaderV2 {
     pub format_version: u16,
@@ -236,7 +236,7 @@ impl From<LegacyHeaderV2> for VaultHeader {
 }
 
 /// The header as `SYBRVLT2` to `SYBRVLT6` containers serialized it: every
-/// field up to `rewrap_epoch` (bincode is positional, so each layout needs its
+/// field up to `rewrap_epoch` (the container is positional, so each layout needs its
 /// own type).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HeaderV6 {
