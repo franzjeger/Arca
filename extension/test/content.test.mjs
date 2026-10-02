@@ -247,10 +247,15 @@ check(
   /trackVisibility: true/.test(source) && /if \(!entry\.isVisible\) seenSince\.delete/.test(source),
   "picker rows must be watched with IntersectionObserver v2 visibility, not mere intersection",
 );
+// Two clicks reach it: a row of the list, and "Unlock Arca", which then uses
+// the site's one account. Each passes on what the browser saw of its own row.
 check(
-  /const seen = seenLongEnough\(row\);[\s\S]{0,700}if \(seen && typeof window\.__sybrPasskeyPicked === "function"\)/.test(
+  /async function useItem\(item, anchor, isIdentifier, seen\)[\s\S]{0,800}if \(seen && typeof window\.__sybrPasskeyPicked === "function"\)/.test(
     source,
-  ),
+  ) &&
+    /const seen = seenLongEnough\(row\);[\s\S]{0,200}await useItem\(item, anchor, isIdentifier, seen\)/.test(source) &&
+    /requestUnlock\(anchor, isIdentifier, picked, seenLongEnough\(row\)\)/.test(source) &&
+    /await useItem\(chosen, anchor, isIdentifier, seen\)/.test(source),
   "a passkey pick must be recorded only for a row the browser reported visible",
 );
 

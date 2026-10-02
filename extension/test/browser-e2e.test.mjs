@@ -169,7 +169,7 @@ const server = http.createServer((request, response) => {
     "cache-control": "no-store",
     ...(request.url.startsWith('/steps') ? { 'content-security-policy': "style-src 'nonce-arca-fixture'" } : {}),
   });
-  response.end(request.url.startsWith("/passkey") ? passkeyFixture : request.url.startsWith("/steps") || request.url.startsWith("/slow") ? stepFixture : fixture);
+  response.end(request.url.startsWith("/passkey") || request.url.startsWith("/locked-passkey") ? passkeyFixture : request.url.startsWith("/steps") || request.url.startsWith("/slow") ? stepFixture : fixture);
 });
 await new Promise((resolve, reject) => {
   server.once("error", reject);
@@ -185,13 +185,17 @@ fs.cpSync(extensionSource, extensionDir, { recursive: true });
 fs.mkdirSync(profileDir);
 fs.writeFileSync(
   path.join(extensionDir, "background.js"),
-  `let unlocked = false;
+  `// When each page's unlock completes. The passkey page's takes four seconds,
+  // as a fingerprint can: longer than the gesture window of the click.
+  const openAt = new Map();
   chrome.runtime.onMessage.addListener((message, _sender, reply) => {
     if (message.cmd === "requestUnlock") {
-      unlocked = true;
+      const page = new URL(_sender.url).pathname;
+      openAt.set(page, Date.now() + (page.includes('passkey') ? 4000 : 0));
       reply({ ok: true, response: { type: "unlock_requested" } });
     } else if (message.cmd === "listLogins") {
-      if (message.url.includes('/locked') && !unlocked) {
+      const page = new URL(message.url).pathname;
+      if (message.url.includes('/locked') && !(Date.now() >= (openAt.get(page) ?? Infinity))) {
         reply({ ok: true, response: { type: "logins", app_connected: false, items: [] } });
         return true;
       }
@@ -738,6 +742,18 @@ try {
     await send("Input.dispatchMouseEvent", { type, x: second.x, y: second.y, button: "left", clickCount: 1 }, sessionId);
   }
   await waitFor('query("#sign-password").value === "secret-login-1"', "the picked login, once the window unlocked");
+  // Locked, and the site's one account is a passkey: unlocking from the field
+  // signs in with it. No list with one row to click afterwards, and no second
+  // approval; the stub desktop signs only a passkey the relay saw picked.
+  await send("Page.navigate", { url: pageUrl + 'locked-passkey' }, sessionId);
+  await waitFor('query("#pk-user")', "locked passkey page");
+  await evaluate('query("#pk-user").focus()');
+  await waitFor('query(".sybr-panel .sybr-row")?.textContent.includes("Start / unlock")', "unlock action on a passkey page");
+  await sleep(800);
+  await trustedClick();
+  await sleep(4500);
+  await waitFor("query('#passkey-result').textContent === 'Signed in with passkey'", "one unlock signs in with the only passkey");
+  assert.equal(await evaluate("!!query('.sybr-panel .sybr-kind-passkey')"), false, 'no list was shown to pick from');
 } catch (error) {
   // Held, not rethrown yet: teardown runs next, and a failure THERE must not
   // replace this one. It did once — a cleanup ENOTEMPTY on CI was all that

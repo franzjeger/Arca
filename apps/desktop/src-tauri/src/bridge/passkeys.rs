@@ -318,28 +318,20 @@ pub(super) fn passkey_get(
         return error("not_found");
     }
     // Who chooses, and whether choosing already counts as approving.
-    //
-    // Picked in Arca's in-page picker: the user clicked a row that named
-    // this account, in Arca's own UI, a moment ago. Asking "which
-    // account?" again — or "really?" — is the double prompt this exists
-    // to remove. Anything else goes through the desktop chooser, whose
-    // click IS the approval: one account shows one button, several show
-    // several. (Headless/tests: no app, so a single match is selected
-    // outright and the injected consent closure approves, as before.)
-    let (selected, confirmed) = match (choices.len(), app) {
-        (1, _) if picked => (choices[0].id.clone(), true),
-        (1, None) => (choices[0].id.clone(), false),
-        (_, None) => {
-            return error("account_selection_required");
-        }
-        (_, Some(app)) => {
-            let Some(id) = request_passkey_choice(app, &rp_id, &choices) else {
-                log_passkey_outcome(state, &rp_id, "declined_in_chooser");
-                return error("account_selection_cancelled");
-            };
-            (id, true)
-        }
-    };
+    let (selected, confirmed) =
+        match chooser(choices.len(), picked, verified_by_unlock, app.is_some()) {
+            Chooser::Settled { approved } => (choices[0].id.clone(), approved),
+            Chooser::Window => {
+                let Some(app) = app else {
+                    return error("account_selection_required");
+                };
+                let Some(id) = request_passkey_choice(app, &rp_id, &choices) else {
+                    log_passkey_outcome(state, &rp_id, "declined_in_chooser");
+                    return error("account_selection_cancelled");
+                };
+                (id, true)
+            }
+        };
     let Some(choice) = choices.iter().find(|c| c.id == selected) else {
         return error("account_selection_cancelled");
     };
@@ -405,6 +397,40 @@ pub(super) fn passkey_get(
         authenticator_data,
         signature,
         user_handle,
+    }
+}
+
+/// Who decides which account a sign-in uses.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Chooser {
+    /// Nobody needs to: the site allows one account. `approved` when the user
+    /// has approved it already.
+    Settled { approved: bool },
+    /// Arca's window asks which, one button per account; choosing is approving.
+    Window,
+}
+
+/// `accounts` the site allows; `picked`: the user chose one in Arca's in-page
+/// list; `verified_by_unlock`: the fingerprint that opened the vault a moment
+/// ago was for this sign-in, on this site; `window`: there is one to ask in.
+///
+/// Asking "which account?" after either of those, with one account to offer,
+/// is asking the same question twice: Arca's window used to do it with a
+/// single button, after the user had picked the account in the page or given
+/// the fingerprint that named the site. A request nobody approved still gets
+/// the window, whose click is the approval, however many accounts there are.
+/// (Headless/tests: no window, so a single match is selected outright and the
+/// injected consent closure approves.)
+pub(super) fn chooser(
+    accounts: usize,
+    picked: bool,
+    verified_by_unlock: bool,
+    window: bool,
+) -> Chooser {
+    match accounts {
+        1 if picked || verified_by_unlock => Chooser::Settled { approved: true },
+        1 if !window => Chooser::Settled { approved: false },
+        _ => Chooser::Window,
     }
 }
 
@@ -783,8 +809,8 @@ pub(super) fn log_line(state: &Mutex<AppState>, rest: &str) {
 /// A sign-in then needs presence — one deliberate click that names the site
 /// and the account — not a second password. That is what 1Password and Apple
 /// Passwords do; it is what the double prompt was standing in the way of. The
-/// setting restores the old per-use password for people who want it, and
-/// macOS keeps Touch ID because it is one touch and genuinely biometric.
+/// setting restores the per-use prompt for people who want it: Touch ID on a
+/// Mac, the master password elsewhere.
 pub(super) fn approve_passkey_inner(
     rp_id: &str,
     is_create: bool,
@@ -793,6 +819,13 @@ pub(super) fn approve_passkey_inner(
     confirmed: bool,
     require_password: bool,
 ) -> Option<bool> {
+    // The click that chose this account in Arca's own UI is the approval, on
+    // every platform. macOS used to ask for Touch ID on top of it, so a
+    // sign-in that opened the vault first asked twice: once to unlock, and
+    // again to sign in with the account the user had just picked.
+    if confirmed && !require_password {
+        return Some(true);
+    }
     // The reason string the user reads — clearly different for registering a new
     // passkey vs signing in, so a create can't be mistaken for a login.
     let reason = if is_create {
@@ -817,13 +850,8 @@ pub(super) fn approve_passkey_inner(
     // (the very secret that unlocks the vault), so we may honestly set UV=1.
     #[cfg(not(target_os = "macos"))]
     if let Some(app) = app {
-        if confirmed && !require_password {
-            return Some(true);
-        }
         return request_passkey_verification(app, rp_id, is_create, require_password);
     }
-    #[cfg(target_os = "macos")]
-    let _ = (confirmed, require_password);
     // Tests / headless (no AppHandle): the injected consent closure provides
     // user presence only (user_verified = false).
     let _ = app;

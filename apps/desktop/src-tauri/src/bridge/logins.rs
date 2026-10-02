@@ -156,6 +156,7 @@ pub(super) fn list_matches(ctx: &mut Ctx, url: String) -> Response {
                         username: username.clone(),
                         kind: "password".into(),
                         credential_id: Vec::new(),
+                        rp_id: String::new(),
                     });
                 }
                 // Passkeys for this site: surfaced so the picker can
@@ -178,6 +179,7 @@ pub(super) fn list_matches(ctx: &mut Ctx, url: String) -> Response {
                         username: user_name.clone(),
                         kind: "passkey".into(),
                         credential_id: credential_id.clone(),
+                        rp_id: rp_id.clone(),
                     };
                     if rp_id_matches_origin(rp_id, &url) {
                         items.push(entry);

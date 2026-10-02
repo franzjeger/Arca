@@ -307,6 +307,14 @@ pub struct LoginMatch {
     /// with whichever the app found first, and the choice would be theatre.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub credential_id: Vec<u8>,
+    /// The relying party a passkey belongs to. Empty for passwords.
+    ///
+    /// A sign-in can pick the account on one host and run the ceremony on
+    /// another: Microsoft lists the account on login.microsoftonline.com and
+    /// signs on login.microsoft.com. The extension keeps the pick for this
+    /// relying party, so the second page uses it instead of asking again.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub rp_id: String,
     pub title: String,
     pub username: String,
     /// Credential type for the picker UI: "password" for a stored login,
@@ -372,6 +380,7 @@ mod tests {
                     items: vec![LoginMatch {
                         id: "i".into(),
                         credential_id: vec![],
+                        rp_id: String::new(),
                         title: "t".into(),
                         username: "u".into(),
                         kind: "password".into(),
