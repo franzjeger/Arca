@@ -92,6 +92,8 @@ export interface AppInfo {
   build: string;
   platform: string;
   vaultFormat: number;
+  /** How this copy updates: only `inApp` has an updater to check with. */
+  updates: "inApp" | "packageManager" | "source";
 }
 
 export interface BackupStatus {

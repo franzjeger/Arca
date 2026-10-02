@@ -154,6 +154,7 @@ update once. Never embed a GitHub token to make that private endpoint work.
 | macOS, Intel | not built | the release is arm64 only |
 | Linux, AppImage | yes | `*.AppImage` + `.sig` |
 | Linux, `.deb`/`.rpm` | **no** | installed by the package manager |
+| Linux, `scripts/install-linux.sh` | **no** | `git pull`, then `scripts/install-linux.sh --restart` |
 | Windows | not built | no release pipeline yet |
 
 `tauri-plugin-updater` replaces a running **AppImage**, and that is the only
@@ -161,6 +162,12 @@ thing it can do on Linux: a `.deb` or `.rpm` install lives in `/usr/bin` and
 belongs to apt/dnf, so there is no file for the updater to swap. Ship the
 AppImage if in-app updates on Linux are wanted; keep the `.deb`/`.rpm` for
 people who would rather their package manager owned it.
+
+The plugin does not refuse the other cases by itself: for any binary it cannot
+place it takes the AppImage path and overwrites the running file. So Arca
+loads the updater on Linux only when it runs as an AppImage
+(`apps/desktop/src-tauri/src/updates.rs`); a package or a copy built from
+source has no updater, and Settings ▸ Updates says how that copy is updated.
 
 ### The manifest is merged, not rewritten
 

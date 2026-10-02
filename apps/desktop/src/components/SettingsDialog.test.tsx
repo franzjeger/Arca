@@ -11,7 +11,7 @@ vi.mock("../lib/api", async () => {
     checkForUpdate: vi.fn(),
     api: { ...actual.api,
       getSettings: vi.fn(), setSettings: vi.fn(), enableQuickUnlock: vi.fn(),
-      appInfo: vi.fn().mockResolvedValue({ version: "0.5.0", build: "test-build", platform: "linux" }),
+      appInfo: vi.fn().mockResolvedValue({ version: "0.5.0", build: "test-build", platform: "linux", vaultFormat: 5, updates: "inApp" }),
       syncStatus: vi.fn().mockResolvedValue({ connected: false, pending: true, syncing: false }),
       backupStatus: vi.fn().mockResolvedValue({ directory: null, lastSuccessUnix: null, lastError: null }),
       sshImportScan: vi.fn().mockResolvedValue([]),
@@ -55,9 +55,26 @@ it("says in the Updates row why an update check failed, not that it is up to dat
   expect(screen.queryByText("Arca is up to date.")).not.toBeInTheDocument();
 });
 
+// A copy built by install-linux.sh has no updater: offering a check there
+// only ever produced an error about missing platforms.
+it("tells a copy built from source how to update instead of offering a check", async () => {
+  vi.mocked(api.appInfo).mockResolvedValue({ version: "0.8.2", build: "test", platform: "linux", vaultFormat: 5, updates: "source" });
+  show();
+  expect(await screen.findByText(/git pull, then scripts\/install-linux\.sh --restart/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Check…" })).not.toBeInTheDocument();
+  expect(checkForUpdate).not.toHaveBeenCalled();
+});
+
+it("leaves a .deb or .rpm install to the package", async () => {
+  vi.mocked(api.appInfo).mockResolvedValue({ version: "0.8.2", build: "test", platform: "linux", vaultFormat: 5, updates: "packageManager" });
+  show();
+  expect(await screen.findByText(/Install the newer package to update it/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Check…" })).not.toBeInTheDocument();
+});
+
 
 it("keeps an unsuccessful Touch ID upgrade visible for retry", async () => {
-  vi.mocked(api.appInfo).mockResolvedValue({ version: "0.5.0", build: "test", platform: "macos", vaultFormat: 5 });
+  vi.mocked(api.appInfo).mockResolvedValue({ version: "0.5.0", build: "test", platform: "macos", vaultFormat: 5, updates: "inApp" });
   vi.mocked(api.enableQuickUnlock).mockRejectedValue(new Error("Touch ID cancelled"));
   const onStatusChanged = vi.fn();
   const onToast = vi.fn();
@@ -74,7 +91,7 @@ it("keeps an unsuccessful Touch ID upgrade visible for retry", async () => {
 });
 
 it("sets up a USB key after confirming the master password", async () => {
-  vi.mocked(api.appInfo).mockResolvedValue({ version: "0.6.2", build: "test", platform: "linux", vaultFormat: 5 });
+  vi.mocked(api.appInfo).mockResolvedValue({ version: "0.6.2", build: "test", platform: "linux", vaultFormat: 5, updates: "inApp" });
   // Enrollment re-confirms the master password; on Linux the hook asks for it.
   api.vaultStatus = vi.fn().mockResolvedValue({ exists: true, unlocked: true, hasQuickUnlock: false,
     quickUnlockAvailable: false, biometricAvailable: false, keyFile: null });
@@ -104,7 +121,7 @@ it("sets up a USB key after confirming the master password", async () => {
 });
 
 it("shows the enrolled key next to the keychain toggle, and removes it after confirmation", async () => {
-  vi.mocked(api.appInfo).mockResolvedValue({ version: "0.6.2", build: "test", platform: "linux", vaultFormat: 5 });
+  vi.mocked(api.appInfo).mockResolvedValue({ version: "0.6.2", build: "test", platform: "linux", vaultFormat: 5, updates: "inApp" });
   api.vaultStatus = vi.fn().mockResolvedValue({ exists: true, unlocked: true, hasQuickUnlock: false,
     quickUnlockAvailable: false, biometricAvailable: false });
   api.keyfileRevoke = vi.fn().mockResolvedValue(undefined);

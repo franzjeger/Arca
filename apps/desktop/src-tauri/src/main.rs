@@ -26,6 +26,7 @@ mod session;
 mod ssh_import;
 mod state;
 mod sync;
+mod updates;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -133,7 +134,7 @@ fn main() {
         );
         return;
     }
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
@@ -142,11 +143,17 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        // Updates are checked and installed from the UI only, never
-        // automatically: installing restarts the app, which drops an unlocked
-        // vault and any half-finished edit.
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init());
+    // Updates are checked and installed from the UI only, never
+    // automatically: installing restarts the app, which drops an unlocked
+    // vault and any half-finished edit. A copy that cannot replace itself
+    // gets no updater at all, so nothing can overwrite it.
+    let builder = if updates::route() == updates::UpdateRoute::InApp {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
+    builder
         .plugin(tauri_plugin_process::init())
         .setup(setup)
         .on_window_event(lock_on_blur)

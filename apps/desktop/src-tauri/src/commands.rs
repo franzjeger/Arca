@@ -2446,6 +2446,7 @@ pub struct AppInfo {
     build: &'static str,
     platform: &'static str,
     vault_format: u8,
+    updates: crate::updates::UpdateRoute,
 }
 
 #[tauri::command]
@@ -2455,6 +2456,7 @@ pub fn app_info() -> AppInfo {
         build: env!("ARCA_BUILD"),
         platform: std::env::consts::OS,
         vault_format: 5,
+        updates: crate::updates::route(),
     }
 }
 
