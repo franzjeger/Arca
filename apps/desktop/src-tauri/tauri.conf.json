@@ -27,6 +27,9 @@
     }
   },
   "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    },
     "active": true,
     "targets": "all",
     "icon": [
