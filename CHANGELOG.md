@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.4 — 2026-10-02
+
+- Under the hood: Tauri 2.12, Tailwind CSS 4, TypeScript 7 and Vitest 5,
+  plus current versions of the libraries behind the Windows ssh-agent pipe
+  and Windows Hello (same pipe name, same prompt). The interface looks the
+  same: fifteen screens and dialogs were compared with 0.8.3 in both
+  themes, and no pixel differs by more than 3 of 255.
+- Releases: the release script unlocks its signing keychain after a
+  restart, and says so plainly when Apple stops notarizing until an updated
+  agreement is accepted.
+
+The browser extension has no changes in this version.
+
 ## 0.8.3 — 2026-10-02
 
 - Passkeys: signing in with Arca locked takes one fingerprint. On a Mac,
