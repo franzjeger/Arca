@@ -110,7 +110,9 @@ use passkeys::*;
 use server::*;
 
 pub use logins::resolve_consent;
-pub use passkeys::{confirm_verification, resolve_passkey_choice, resolve_verification};
+pub use passkeys::{
+    confirm_verification, discard_passkey_log, resolve_passkey_choice, resolve_verification,
+};
 pub use server::{start, stop};
 
 #[cfg(test)]

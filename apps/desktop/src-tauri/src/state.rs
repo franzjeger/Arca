@@ -45,6 +45,11 @@ pub struct Settings {
     /// the unlocked vault plus one deliberate click as the verification. Off by
     /// default; see `bridge::approve_passkey_inner` for why.
     pub passkey_reprompt: bool,
+    /// Keep `passkey-requests.log` beside the vault: which site asked for a
+    /// passkey, when, and how it ended. For troubleshooting, and off by
+    /// default: it is a plaintext list of the sites the user signs in to,
+    /// outside the encrypted vault, in every backup of the folder.
+    pub log_passkey_requests: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +62,7 @@ impl Default for Settings {
             save_prompt: true,
             handle_passkeys: true,
             passkey_reprompt: false,
+            log_passkey_requests: false,
         }
     }
 }
@@ -291,6 +297,7 @@ mod tests {
             save_prompt: false,
             handle_passkeys: false,
             passkey_reprompt: true,
+            log_passkey_requests: true,
         };
         save_settings(&vault, &s).unwrap();
         assert_eq!(load_settings(&vault), s);
@@ -311,6 +318,7 @@ mod tests {
         assert!(s.lock_on_blur);
         assert!(s.confirm_autofill); // preserved, NOT wiped to default
         assert!(s.save_prompt); // missing field defaults to true
+        assert!(!s.log_passkey_requests); // and a passkey log stays off
     }
 
     #[test]

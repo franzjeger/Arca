@@ -2545,3 +2545,33 @@ fn one_account_the_user_already_approved_needs_no_chooser() {
         assert_eq!(chooser(2, picked, verified, true), Chooser::Window);
     }
 }
+
+/// The passkey log lists the sites the user signs in to, in plaintext beside
+/// the vault, so nothing is written until they turn it on, and discarding it
+/// (at startup, or when the setting goes off) leaves nothing behind.
+#[test]
+fn the_passkey_log_is_kept_only_when_turned_on() {
+    let dir = TempDir::new().unwrap();
+    let state = unlocked_state(&dir);
+    let vault_path = state.lock().unwrap().store.path().to_path_buf();
+    let log = vault_path.with_file_name("passkey-requests.log");
+
+    log_passkey_request(&state, "https://github.com", "github.com", false);
+    log_passkey_outcome(&state, "github.com", "signed");
+    assert!(!log.exists(), "off by default, so nothing is written");
+
+    state.lock().unwrap().settings.log_passkey_requests = true;
+    log_passkey_request(&state, "https://github.com", "github.com", false);
+    log_passkey_outcome(&state, "github.com", "signed");
+    let kept = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        kept.contains("origin=https://github.com\trp_id=github.com"),
+        "{kept}"
+    );
+    assert!(kept.contains("rp_id=github.com\tsigned"), "{kept}");
+
+    discard_passkey_log(&vault_path);
+    assert!(!log.exists());
+    // Nothing left to delete is not an error.
+    discard_passkey_log(&vault_path);
+}

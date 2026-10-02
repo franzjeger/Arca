@@ -726,8 +726,10 @@ pub(super) struct PasskeySuppressedDto {
 /// context we cannot see, and the app recorded nothing at all. A prompt the
 /// user did not expect is exactly the event that needs a paper trail.
 ///
-/// Non-secret by construction — an origin and an rp_id, which the relying party
-/// already knows. Bounded so it cannot grow without limit.
+/// No secret: an origin and an rp_id, which the relying party already knows.
+/// But together they list the user's sites, so nothing is written unless the
+/// log is turned on (see [`discard_passkey_log`]). Bounded so it cannot grow
+/// without limit.
 /// Record how a ceremony ENDED.
 ///
 /// The arrival line alone was not enough the first time it mattered: a UniFi
@@ -748,7 +750,22 @@ pub(super) fn log_passkey_request(
     log_line(state, &format!("{kind}\torigin={origin}\trp_id={rp_id}"));
 }
 
-/// Append one tab-separated line to `passkey-requests.log`, timestamped.
+/// The troubleshooting log of passkey ceremonies, beside the vault.
+const PASSKEY_LOG: &str = "passkey-requests.log";
+
+/// Delete the passkey log beside `vault_path`, if there is one.
+///
+/// Each line names a site the user signs in to, and when: no secret, but a
+/// plaintext list of their accounts outside the encrypted vault, in every
+/// backup of the folder. So it is kept only while the setting is on, and this
+/// runs at startup and whenever the setting is off, which also removes the
+/// log earlier versions kept unasked.
+pub fn discard_passkey_log(vault_path: &std::path::Path) {
+    let _ = std::fs::remove_file(vault_path.with_file_name(PASSKEY_LOG));
+}
+
+/// Append one tab-separated line to `passkey-requests.log`, timestamped, when
+/// the user has turned the log on (Settings ▸ Keep a log of passkey requests).
 ///
 /// The vault's own directory — no extra dependency, and it is where every other
 /// file of ours already lives. The lock is taken and dropped here, never held
@@ -764,11 +781,12 @@ pub(super) fn log_line(state: &Mutex<AppState>, rest: &str) {
     let Some(dir) = state
         .try_lock()
         .ok()
+        .filter(|st| st.settings.log_passkey_requests)
         .and_then(|st| st.store.path().parent().map(|p| p.to_path_buf()))
     else {
         return;
     };
-    let path = dir.join("passkey-requests.log");
+    let path = dir.join(PASSKEY_LOG);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

@@ -527,6 +527,12 @@ export function SettingsDialog({
               onChange={(v) => apply({ passkeyReprompt: v })}
             />
             <ToggleRow
+              label="Keep a log of passkey requests"
+              hint="For troubleshooting: writes which site asked for a passkey, when, and how it ended to passkey-requests.log beside your vault. It is not encrypted, so it is off by default; turning it off deletes the log."
+              checked={settings.logPasskeyRequests}
+              onChange={(v) => apply({ logPasskeyRequests: v })}
+            />
+            <ToggleRow
               label="Confirm before autofill"
               hint="Ask for an explicit Allow/Deny in this app before a password is filled into the browser. On by default, so even a compromised extension cannot take a password without you seeing it."
               checked={settings.confirmAutofill}
