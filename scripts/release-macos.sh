@@ -100,6 +100,13 @@ if [ "$NOTARIZE" = 1 ]; then
   fi
 fi
 
+# Installed before the smoke test, not only before the build: the smoke test
+# builds and tests the frontend with whatever is in node_modules, and a
+# checkout last installed for an older release then tests other packages
+# than the ones that ship. 0.8.4 stopped here on its Tailwind 4 plugin.
+step "Frontend dependencies, exactly as the lockfile has them"
+(cd "$REPO/apps/desktop" && npm ci)
+
 step "Smoke test"
 bash "$REPO/scripts/smoke-test.sh"
 
@@ -108,7 +115,7 @@ step "Building the app"
 # host are inside. For the same reason Tauri makes no updater archive here: its
 # archive would hold the app as it was before they, and the notarization
 # ticket, went in. The archive is made below, from the finished app.
-(cd "$REPO/apps/desktop" && npm ci && npm run tauri build -- --bundles app)
+(cd "$REPO/apps/desktop" && npm run tauri build -- --bundles app)
 APP_BUILD="$CARGO_OUTPUT/release/bundle/macos/Arca.app"
 [ -d "$APP_BUILD" ] || die "no app bundle at $APP_BUILD"
 APP="$WORK/Arca.app"
