@@ -19,7 +19,8 @@ vi.mock("../lib/api", async () => {
   };
 });
 const original: Settings = { autoLockSecs: 300, lockOnBlur: false, clipboardClearSecs: 30,
-  confirmAutofill: true, savePrompt: true, handlePasskeys: true, passkeyReprompt: false };
+  confirmAutofill: true, savePrompt: true, handlePasskeys: true, passkeyReprompt: false,
+  logPasskeyRequests: false };
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(api.getSettings).mockResolvedValue(original); });
 function show() { render(<SettingsDialog status={{ hasQuickUnlock: false } as VaultStatus}
   onClose={vi.fn()} onStatusChanged={vi.fn()} onToast={vi.fn()} />); }
@@ -45,6 +46,16 @@ it("prevents overlapping writes and applies changes only after persistence", asy
   expect(api.setSettings).toHaveBeenCalledTimes(1);
   await act(async () => finish());
   expect(toggle).toHaveAttribute("aria-checked", "true");
+});
+
+it("keeps a passkey log only when asked, and says what it holds", async () => {
+  vi.mocked(api.setSettings).mockResolvedValue(undefined);
+  show();
+  const toggle = await screen.findByRole("switch", { name: "Keep a log of passkey requests" });
+  expect(toggle).toHaveAttribute("aria-checked", "false");
+  expect(screen.getByText(/It is not encrypted, so it is off by default/)).toBeInTheDocument();
+  await userEvent.click(toggle);
+  expect(api.setSettings).toHaveBeenCalledWith({ ...original, logPasskeyRequests: true });
 });
 
 it("says in the Updates row why an update check failed, not that it is up to date", async () => {

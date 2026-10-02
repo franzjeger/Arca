@@ -2425,6 +2425,11 @@ pub fn set_settings(state: St<'_>, settings: Settings) -> Result<(), CmdError> {
     let mut st = guard(state.inner())?;
     crate::state::save_settings(st.store.path(), &settings)
         .map_err(|_| CmdError::new("io", "Could not save settings."))?;
+    // Turning the passkey log off deletes it, rather than leaving the list of
+    // sites it holds behind.
+    if !settings.log_passkey_requests {
+        crate::bridge::discard_passkey_log(st.store.path());
+    }
     st.settings = settings;
     st.touch();
     Ok(())
