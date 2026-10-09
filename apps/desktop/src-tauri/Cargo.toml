@@ -88,4 +88,4 @@ vault-winhello = { path = "../../../crates/vault-winhello" }
 # and forces focus with a synthesized Alt keypress; an interrupted sequence
 # leaves Alt logically held and the keyboard unusable until logout.
 [target.'cfg(target_os = "macos")'.dependencies]
-robius-authentication = "0.1"
+robius-authentication = "0.3"
