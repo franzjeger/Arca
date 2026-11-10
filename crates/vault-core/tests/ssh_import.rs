@@ -8,7 +8,7 @@ use std::process::Command;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use ssh_key::rand_core::OsRng;
-use ssh_key::{Algorithm, EcdsaCurve, HashAlg, LineEnding, PrivateKey};
+use ssh_key::{Algorithm, HashAlg, LineEnding, Mpint, PrivateKey};
 use vault_core::ssh::{self, KeyFileError};
 
 fn openssh(key: &PrivateKey) -> String {
@@ -68,20 +68,27 @@ fn an_encrypted_key_is_known_before_its_passphrase_and_imported_with_it() {
 
 #[test]
 fn other_key_types_and_other_files_are_named_not_imported() {
-    let ecdsa = PrivateKey::random(
-        &mut OsRng,
-        Algorithm::Ecdsa {
-            curve: EcdsaCurve::NistP256,
-        },
+    let one = || Mpint::from_positive_bytes(&[1]).unwrap();
+    let rsa = PrivateKey::new(
+        ssh_key::private::KeypairData::Rsa(ssh_key::private::RsaKeypair {
+            public: ssh_key::public::RsaPublicKey { e: one(), n: one() },
+            private: ssh_key::private::RsaPrivateKey {
+                d: one(),
+                iqmp: one(),
+                p: one(),
+                q: one(),
+            },
+        }),
+        "",
     )
     .unwrap();
-    let text = openssh(&ecdsa);
+    let text = openssh(&rsa);
     let file = ssh::read_key_file(&text).unwrap();
     assert!(!file.supported());
-    assert_eq!(file.key_type, "ecdsa-sha2-nistp256");
+    assert_eq!(file.key_type, "ssh-rsa");
     assert_eq!(
         ssh::import_key_file(&text, None).err(),
-        Some(KeyFileError::Unsupported("ecdsa-sha2-nistp256".into()))
+        Some(KeyFileError::Unsupported("ssh-rsa".into()))
     );
 
     let public_line = ssh::authorized_key_from_blob(&[0; 51], "").unwrap();
