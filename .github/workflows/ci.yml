@@ -336,6 +336,12 @@ jobs:
       - name: Install Rust (pinned by rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # The automatic key names the job and the OS family, not the
+          # release: without this, dependencies compiled on ubuntu-latest were
+          # restored onto 22.04 as a full match and rustc could not load them
+          # ("can't find crate for `tauri`").
+          key: ubuntu-22.04
 
       - name: Install Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
