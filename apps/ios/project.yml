@@ -119,7 +119,6 @@ targets:
       # store — without it a passkey saves but iOS never offers it for sign-in
       # until the app is next opened.
       - path: Arca/CredentialIdentities.swift
-        group: Shared
     settings:
       base:
         PRODUCT_NAME: ArcaAutoFill
