@@ -94,6 +94,7 @@ jobs:
           python3 scripts/test-apple-ci.py
           python3 scripts/test-install-linux.py
           python3 scripts/test-update-manifest.py
+          python3 scripts/test-check-manifest.py
 
       - name: Build frontend (tsc type-check + Vite bundle)
         working-directory: apps/desktop
