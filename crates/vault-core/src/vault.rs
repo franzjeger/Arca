@@ -102,7 +102,7 @@ fn derive(vault_key: &SymmetricKey, info: &[u8]) -> Result<SymmetricKey> {
     Hkdf::<Sha256>::new(None, vault_key.as_bytes())
         .expand(info, key.as_mut_slice())
         .map_err(|_| Error::KeyDerivation)?;
-    Ok(SymmetricKey::from_bytes(*key))
+    Ok(SymmetricKey::from_slice(&mut key))
 }
 
 /// Names the key the header's sealed part is sealed with, and binds that use
@@ -161,8 +161,8 @@ fn open_meta(vault_key: &SymmetricKey, sealed: Option<&AeadBlob>) -> Result<Meta
     Ok(Meta {
         previous_keys: sealed
             .previous_keys
-            .iter()
-            .map(|key| SymmetricKey::from_bytes(*key))
+            .iter_mut()
+            .map(SymmetricKey::from_slice)
             .collect(),
         devices: core::mem::take(&mut sealed.devices),
     })
@@ -199,6 +199,88 @@ const DEVICE_UNLOCK_AAD: &[u8] = b"sybr-vault/device-unlock/v1";
 struct EncryptedItem {
     id: Uuid,
     blob: AeadBlob,
+}
+
+/// Cached ciphertext for a specific `(format_version, item_id, revision)`.
+///
+/// Re-encrypting every unchanged item on every save burned CSPRNG nonces,
+/// serialized and encrypted thousands of items for a 1-field edit, and rewrote
+/// 100% of the container bytes on disk. Reusing a ciphertext when the item's
+/// `revision` and the container's `version` have not changed makes `seal()`
+/// `O(changed)` while preserving nonce uniqueness (no two distinct plaintexts
+/// ever share a nonce).
+struct SealedCache {
+    version: u16,
+    blobs: HashMap<(Uuid, Uuid), AeadBlob>,
+}
+
+impl SealedCache {
+    fn from_encrypted(version: u16, items: &[Item], encrypted: &[EncryptedItem]) -> Self {
+        let mut blobs = HashMap::with_capacity(items.len());
+        for (item, enc) in items.iter().zip(encrypted.iter()) {
+            if !item.revision.is_nil() && item.id == enc.id {
+                blobs.insert((item.id, item.revision), enc.blob.clone());
+            }
+        }
+        Self { version, blobs }
+    }
+}
+
+#[derive(Default)]
+struct CacheSlot(std::sync::Mutex<Option<std::sync::Arc<SealedCache>>>);
+
+impl Clone for CacheSlot {
+    fn clone(&self) -> Self {
+        let current = self.0.lock().ok().and_then(|g| g.clone());
+        Self(std::sync::Mutex::new(current))
+    }
+}
+
+impl CacheSlot {
+    fn new(cache: SealedCache) -> Self {
+        Self(std::sync::Mutex::new(Some(std::sync::Arc::new(cache))))
+    }
+
+    fn get(&self, version: u16) -> Option<std::sync::Arc<SealedCache>> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .filter(|c| c.version == version)
+    }
+
+    fn set(&self, cache: SealedCache) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = Some(std::sync::Arc::new(cache));
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = None;
+        }
+    }
+
+    fn retain_unchanged(&self, prior: &HashMap<Uuid, Item>, current: &[Item]) {
+        let Ok(mut g) = self.0.lock() else {
+            return;
+        };
+        let Some(existing) = g.as_ref() else {
+            return;
+        };
+        let mut blobs = existing.blobs.clone();
+        blobs.retain(|(id, rev), _| {
+            current
+                .iter()
+                .find(|i| i.id == *id && i.revision == *rev)
+                .and_then(|now| prior.get(id).map(|before| now == before))
+                .unwrap_or(false)
+        });
+        *g = Some(std::sync::Arc::new(SealedCache {
+            version: existing.version,
+            blobs,
+        }));
+    }
 }
 
 /// The serialized body following the magic bytes.
@@ -245,6 +327,7 @@ enum VaultState {
         vault_key: SymmetricKey,
         meta: Meta,
         items: Vec<Item>,
+        cache: CacheSlot,
     },
 }
 
@@ -324,6 +407,7 @@ impl Vault {
                 vault_key,
                 meta: Meta::default(),
                 items: Vec::new(),
+                cache: CacheSlot::default(),
             },
         })
     }
@@ -438,6 +522,7 @@ impl Vault {
             vault_key,
             meta,
             items,
+            cache,
         } = &self.state
         else {
             return Err(Error::Locked);
@@ -448,7 +533,9 @@ impl Vault {
             SEALED_SINCE
         };
         let keys = Keys::of(vault_key, version)?;
-        let encrypted = encrypt_items(&keys.items, items)?;
+        let prior = cache.get(version);
+        let encrypted = encrypt_items_cached(&keys.items, items, prior.as_deref())?;
+        cache.set(SealedCache::from_encrypted(version, items, &encrypted));
         let purges = self.purges.clone();
         let (header, body) = if version >= SUBKEYS_SINCE {
             let header = VaultHeader {
@@ -585,9 +672,14 @@ impl Vault {
     /// Common tail of the two unlock paths: decrypt items, transition state.
     fn finish_unlock(&mut self, vault_key: SymmetricKey) -> Result<()> {
         self.verify_authentication(&vault_key)?;
-        let keys = Keys::of(&vault_key, self.container_version())?;
-        let items = match &self.state {
-            VaultState::Locked { items, .. } => decrypt_items(&keys.items, items)?,
+        let container_ver = self.container_version();
+        let keys = Keys::of(&vault_key, container_ver)?;
+        let (items, cache) = match &self.state {
+            VaultState::Locked { items: enc, .. } => {
+                let decrypted = decrypt_items(&keys.items, enc)?;
+                let cached = SealedCache::from_encrypted(container_ver, &decrypted, enc);
+                (decrypted, CacheSlot::new(cached))
+            }
             // unreachable: callers guard on `is_unlocked()` first.
             VaultState::Unlocked { .. } => return Ok(()),
         };
@@ -596,6 +688,7 @@ impl Vault {
             vault_key,
             meta,
             items,
+            cache,
         };
         self.session_id = Uuid::new_v4();
         Ok(())
@@ -761,6 +854,7 @@ impl Vault {
             vault_key: new_key,
             meta: carried,
             items: remote_items,
+            ..
         } = remote.state
         else {
             return Err(Error::Locked);
@@ -781,13 +875,17 @@ impl Vault {
             self.finish_unlock(ours)?;
         }
         let VaultState::Unlocked {
-            vault_key, meta, ..
+            vault_key,
+            meta,
+            cache,
+            ..
         } = &mut self.state
         else {
             return Err(Error::Locked);
         };
         let old_key = core::mem::replace(vault_key, new_key);
         let old_meta = core::mem::replace(meta, carried);
+        cache.clear();
         let known = core::iter::once(old_key).chain(old_meta.previous_keys);
         remember_keys(&mut meta.previous_keys, vault_key, known);
         devices::merge(&mut meta.devices, old_meta.devices);
@@ -811,6 +909,7 @@ impl Vault {
             vault_key,
             meta,
             items,
+            cache,
         } = &mut self.state
         else {
             return Err(Error::Locked);
@@ -819,10 +918,12 @@ impl Vault {
         // has to reach items that only the other side still had.
         self.purges = crate::sync::merge_purges(core::mem::take(&mut self.purges), remote_purges);
         let local = core::mem::take(items);
+        let prior: HashMap<Uuid, Item> = local.iter().cloned().map(|i| (i.id, i)).collect();
         *items = crate::sync::apply_purges(
             crate::sync::merge_versioned(local, remote_items),
             &self.purges,
         );
+        cache.retain_unchanged(&prior, items);
         remember_keys(
             &mut meta.previous_keys,
             vault_key,
@@ -1223,6 +1324,24 @@ impl Vault {
         Ok(())
     }
 
+    /// Restore a single item to its exact pre-mutation state `previous` (or
+    /// remove a newly inserted `id` when `previous` is `None`), without
+    /// recording a [`Purge`] or advancing its revision.
+    pub fn rollback_item(&mut self, id: Uuid, previous: Option<Item>) -> Result<()> {
+        let items = self.unlocked_items_mut()?;
+        match previous {
+            Some(prev) => {
+                if let Some(slot) = items.iter_mut().find(|i| i.id == id) {
+                    *slot = prev;
+                } else {
+                    items.push(prev);
+                }
+            }
+            None => items.retain(|i| i.id != id),
+        }
+        Ok(())
+    }
+
     /// Change the master password. The vault key is replaced too: whoever
     /// knew the old password (with a copy of the old file, say) can read
     /// nothing written from now on, and a device with the new key merges
@@ -1246,13 +1365,17 @@ impl Vault {
         let master_key = crypto::derive_master_key(new_password, &params)?;
         let wrapped = crypto::wrap_key(&master_key, &new_key, &params.master_wrap_aad(true))?;
         let VaultState::Unlocked {
-            vault_key, meta, ..
+            vault_key,
+            meta,
+            cache,
+            ..
         } = &mut self.state
         else {
             return Err(Error::Locked);
         };
         meta.previous_keys
             .insert(0, core::mem::replace(vault_key, new_key));
+        cache.clear();
         self.header.kdf = params;
         self.header.master_wrapped_vault_key = wrapped;
         self.header.device_wrapped_vault_key = None;
@@ -1466,15 +1589,35 @@ fn decode_item_payload<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T
 }
 
 /// Seal every item under the vault key, binding each item's id as AAD.
+#[cfg(test)]
 fn encrypt_items(vault_key: &SymmetricKey, items: &[Item]) -> Result<Vec<EncryptedItem>> {
+    encrypt_items_cached(vault_key, items, None)
+}
+
+/// Seal every item under `item_key`, reusing cached ciphertexts for items
+/// whose `(id, revision)` did not change since the last seal under the same
+/// key and container format version.
+fn encrypt_items_cached(
+    item_key: &SymmetricKey,
+    items: &[Item],
+    cache: Option<&SealedCache>,
+) -> Result<Vec<EncryptedItem>> {
     items
         .iter()
         .map(|item| {
             if !revision_in_bounds(item) {
                 return Err(Error::Serialization);
             }
+            if !item.revision.is_nil() {
+                if let Some(blob) = cache.and_then(|c| c.blobs.get(&(item.id, item.revision))) {
+                    return Ok(EncryptedItem {
+                        id: item.id,
+                        blob: blob.clone(),
+                    });
+                }
+            }
             let plaintext = encode_item_payload(item)?;
-            let blob = crypto::seal(vault_key, &plaintext, item.id.as_bytes())?;
+            let blob = crypto::seal(item_key, &plaintext, item.id.as_bytes())?;
             Ok(EncryptedItem { id: item.id, blob })
         })
         .collect()
@@ -2794,5 +2937,30 @@ mod tests {
         loaded.unlock("pw").unwrap();
         loaded.merge_remote(&v4).unwrap();
         assert_eq!(loaded.list_items(false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn seal_reuses_ciphertext_for_unchanged_items_and_reseals_changed_ones() {
+        let mut vault = Vault::create("pw", cheap_params()).unwrap();
+        vault.upsert_item(login_item(1, "unchanged", 10)).unwrap();
+        vault.upsert_item(login_item(2, "edited", 10)).unwrap();
+        let first = body_of(&vault.to_bytes().unwrap());
+
+        // Unlock from disk and edit only item 2: item 1 must keep its exact
+        // ciphertext and nonce, while item 2 gets a fresh nonce and ciphertext.
+        let mut reopened = open(&vault.to_bytes().unwrap(), "pw");
+        reopened
+            .upsert_item(login_item(2, "edited-v2", 20))
+            .unwrap();
+        let second = body_of(&reopened.to_bytes().unwrap());
+        assert_eq!(first.items[0].blob, second.items[0].blob);
+        assert_ne!(first.items[1].blob, second.items[1].blob);
+
+        // Rotating the master password rotates the item key, invalidating all
+        // cached ciphertexts.
+        reopened.rotate("new-pw", cheap_params()).unwrap();
+        let third = body_of(&reopened.to_bytes().unwrap());
+        assert_ne!(second.items[0].blob, third.items[0].blob);
+        assert_ne!(second.items[1].blob, third.items[1].blob);
     }
 }

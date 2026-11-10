@@ -93,11 +93,9 @@ ed25519-dalek = { version = "3", features = ["zeroize"] }
 # Reading keys people already have in ~/.ssh: the OpenSSH private-key container
 # and its passphrase encryption (bcrypt-pbkdf + AES), RustCrypto. Only parsing;
 # every key it yields is signed with dalek above, like one Arca generated.
-# 0.6 is still on the previous generation of the RustCrypto traits (0.7 is
-# only a release candidate), so Cargo.lock carries both generations for now.
 # Tests take its RNG from the rand_core it re-exports, so nothing here names
 # the old rand_core directly.
-ssh-key = { version = "0.6", default-features = false, features = ["alloc", "encryption"] }
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ecdsa", "encryption"] }
 
 # --- serde / data ---
 serde = { version = "1", features = ["derive"] }

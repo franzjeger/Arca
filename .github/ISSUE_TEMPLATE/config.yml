@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Report (Private)
+    url: https://github.com/franzjeger/Arca/blob/main/SECURITY.md
+    about: Do not open public issues for cryptographic, memory-safety, or authentication vulnerabilities. See SECURITY.md for private disclosure.
+  - name: Threat Model & Architecture
+    url: https://github.com/franzjeger/Arca/blob/main/THREAT_MODEL.md
+    about: Review Arca's trust boundaries, explicit non-goals, and cryptographic design before filing design issues.

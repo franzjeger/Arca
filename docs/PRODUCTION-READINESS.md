@@ -121,3 +121,33 @@ they are local verification artifacts, not signed/published release installers.
   subdirectory alongside this written summary in the repository.
 - Changes are grouped into commits and pushed to the review branch. No release is
   published and no application or vault is replaced by this work.
+
+## Core & FFI hardening — 2026-11-10
+
+Reviewed and hardened on `main` after release `0.8.5` (`4e56c7d`):
+
+- **Eliminated by-value stack copies of raw 32-byte keys:** Added
+  `SymmetricKey::from_slice(&mut [u8; KEY_LEN])` in `vault-core`, which copies
+  raw key bytes directly into `vault-secmem`'s `mlock`/`VirtualLock`-backed
+  `LockedBox` and immediately zeroizes the source buffer in place. Updated all
+  key derivation, unwrapping, keychain decoding and FFI device-key entry points.
+- **Incremental AEAD item sealing (`O(changed)` vs `O(N)`):** Added
+  revision-bound ciphertext caching (`SealedCache` / `CacheSlot`) in
+  `vault-core`. `Vault::seal` reuses existing `AeadBlob`s for items whose
+  `(id, revision)` and container format version have not changed, eliminating
+  redundant CBOR serialization, XChaCha20-Poly1305 encryption and CSPRNG nonce
+  churn for unchanged items. Key rotation (`rotate`, `adopt_rotation`) clears
+  the cache, and `absorb` retains only entries whose post-merge `Item` is
+  identical to its pre-merge state.
+- **Surgical single-item rollback in `vault-ffi`:** Added `Vault::rollback_item`
+  and updated FFI write paths (`vault_ffi_passkey_register`, `upsert`,
+  `vault_ffi_delete_item`, `vault_ffi_restore_password_history`) to snapshot
+  and restore only the single affected item instead of cloning all decrypted
+  items in the vault (`vault.clone()`). Also fixed `vault_ffi_delete_item`'s
+  error rollback path, which previously called `upsert_item` and advanced the
+  item's revision a second time instead of restoring the original revision.
+- **Modularized `vault-ffi`:** Split the 4,847-line `crates/vault-ffi/src/lib.rs`
+  into cohesive modules (`lib.rs`, `passkey.rs`, `write.rs`, `sync.rs`,
+  `tests.rs`) while preserving the C ABI v22 surface and extending
+  `every_export_is_declared_in_the_header` to verify all modules against
+  `include/vault_ffi.h`.

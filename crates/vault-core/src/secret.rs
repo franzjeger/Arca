@@ -28,7 +28,13 @@ impl SymmetricKey {
     /// Wrap raw key bytes, copying them into locked memory and wiping the
     /// caller's array.
     pub fn from_bytes(mut bytes: [u8; KEY_LEN]) -> Self {
-        let key = Self(SecretBytes::from_slice(&bytes));
+        Self::from_slice(&mut bytes)
+    }
+
+    /// Wrap raw key bytes in place, copying them into locked memory and wiping
+    /// `bytes` without copying the secret across stack frames.
+    pub fn from_slice(bytes: &mut [u8; KEY_LEN]) -> Self {
+        let key = Self(SecretBytes::from_slice(bytes));
         bytes.zeroize();
         key
     }

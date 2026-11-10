@@ -32,8 +32,12 @@ fn decode_key(encoded: &str) -> Result<SymmetricKey> {
             .decode(encoded.as_bytes())
             .map_err(|_| Error::Keychain)?,
     );
-    let arr: [u8; vault_core::KEY_LEN] = raw.as_slice().try_into().map_err(|_| Error::Keychain)?;
-    Ok(SymmetricKey::from_bytes(arr))
+    if raw.len() != vault_core::KEY_LEN {
+        return Err(Error::Keychain);
+    }
+    let mut arr = Zeroizing::new([0u8; vault_core::KEY_LEN]);
+    arr.copy_from_slice(&raw);
+    Ok(SymmetricKey::from_slice(&mut arr))
 }
 
 // ---- macOS / iOS: security-framework, plain login-keychain item ------------

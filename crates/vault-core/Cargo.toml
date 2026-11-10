@@ -37,4 +37,4 @@ workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 # Tests make the key files they import (none are checked in).
-ssh-key = { workspace = true, features = ["ed25519", "p256", "getrandom"] }
+ssh-key = { workspace = true, features = ["ed25519", "getrandom"] }
