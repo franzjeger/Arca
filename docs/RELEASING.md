@@ -221,14 +221,38 @@ loads the updater on Linux only when it runs as an AppImage
 (`apps/desktop/src-tauri/src/updates.rs`); a package or a copy built from
 source has no updater, and Settings ▸ Updates says how that copy is updated.
 
-What an AppImage does not carry yet is the browser host. On macOS the host is
-inside the app, and Arca registers it with the browsers at each launch, so an
-update replaces both halves of the bridge (`browser_host.rs`). On Linux that
-registration does not exist: the host comes from the `.deb`/`.rpm` or from
-`extension/install-linux.sh`, and `launch.rs` knows only `~/.local/bin/arca` and
-`/usr/bin/vault-desktop`. An AppImage therefore updates itself, while autofill
-keeps using whichever host was installed separately, which does not update
-with it.
+### The browser host travels with the AppImage
+
+The extension reaches Arca through `vault-native-host`, which browsers start
+from the path a registration file names. On macOS the host is inside the app
+and Arca registers it at each launch, so an update replaces both halves of the
+bridge together (`apps/desktop/src-tauri/src/browser_host.rs`).
+
+An AppImage carries the host too (`usr/bin/vault-native-host`, from
+`bundle.linux.appimage.files`), but cannot register it where it is: the
+AppImage runs from a mount that is gone once it exits, and browsers start the
+host on their own. So at each launch it:
+
+1. copies its host to `~/.local/lib/arca-appimage/vault-native-host`, when it
+   differs, atomically;
+2. links `~/.local/lib/arca-appimage/Arca.AppImage` to its own file, which the
+   host starts when the extension asks for a locked or closed Arca
+   (`extension/native-host/src/launch.rs`);
+3. points each installed browser's per-user registration at the copy: the
+   Chromium browsers `scripts/install-linux.py` registers, and Firefox.
+
+An in-app update replaces the AppImage; the next launch copies the new host,
+so the halves cannot drift. Only an AppImage does this: a binary extracted
+from one and run by hand, a `.deb`/`.rpm` and a source install do not.
+
+An AppImage takes over a registration that names another install's host. A
+registration exists to reach a host built with the app that is running, and
+leaving another one in place is the drift this prevents. Each takeover is
+logged with the host it replaced, and `scripts/install-linux.sh` takes the
+registrations back for a source install when it runs.
+
+CI starts the AppImage in a home of its own and checks the whole chain:
+`scripts/test-appimage-host.sh`.
 
 ### The manifest is merged, not rewritten
 

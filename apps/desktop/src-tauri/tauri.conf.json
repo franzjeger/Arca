@@ -55,6 +55,11 @@
           "/etc/chromium/native-messaging-hosts/no.sybr.vault.json": "../../../target/linux-packaging/no.sybr.vault.chromium.json",
           "/usr/lib/mozilla/native-messaging-hosts/no.sybr.vault.json": "../../../target/linux-packaging/no.sybr.vault.firefox.json"
         }
+      },
+      "appimage": {
+        "files": {
+          "/usr/bin/vault-native-host": "../../../target/linux-packaging/vault-native-host"
+        }
       }
     }
   },
