@@ -70,7 +70,7 @@ pub fn derive_master_key(master_password: &str, params: &KdfParams) -> Result<Sy
         )
         .map_err(|_| Error::KeyDerivation)?;
 
-    Ok(SymmetricKey::from_bytes(*out))
+    Ok(SymmetricKey::from_slice(&mut out))
 }
 
 /// Encrypt `plaintext` under `key`, binding `aad`. Returns nonce + ciphertext.
@@ -134,9 +134,9 @@ pub fn unwrap_key(
     if bytes.len() != KEY_LEN {
         return Err(Error::Decryption);
     }
-    let mut arr = [0u8; KEY_LEN];
+    let mut arr = Zeroizing::new([0u8; KEY_LEN]);
     arr.copy_from_slice(&bytes);
-    Ok(SymmetricKey::from_bytes(arr))
+    Ok(SymmetricKey::from_slice(&mut arr))
 }
 
 #[cfg(test)]

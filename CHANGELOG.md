@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Vault saves: saving an unlocked vault now re-encrypts only the items that
+  changed since the vault was opened or last saved (`SealedCache`), reusing the
+  existing authenticated ciphertext and nonce for unchanged items. A master
+  password change still replaces the vault key and re-encrypts every item.
+- Security: derived, unwrapped and keychain-decoded 256-bit keys are copied
+  directly into page-locked memory (`SymmetricKey::from_slice`) and wiped in
+  place instead of passing 32-byte key arrays by value on the stack.
+- FFI (`vault-ffi`): single-item writes (`vault_ffi_passkey_register`,
+  `vault_ffi_upsert_login`, `vault_ffi_upsert_wifi`,
+  `vault_ffi_upsert_secure_note`, `vault_ffi_delete_item` and
+  `vault_ffi_restore_password_history`) roll back only the touched item
+  (`Vault::rollback_item`) instead of cloning every decrypted item in the
+  vault, and a failed `vault_ffi_delete_item` serialization now restores the
+  item's exact revision instead of advancing it a second time. Split
+  `crates/vault-ffi/src/lib.rs` into focused `lib`, `passkey`, `write`, `sync`
+  and `tests` modules.
+
 ## 0.8.5 — 2026-10-02
 
 - Privacy: Arca no longer keeps a log of passkey sign-ins unless you ask it

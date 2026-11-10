@@ -1,0 +1,73 @@
+name: Bug Report
+description: Report a deterministic bug or regression in Arca (desktop, CLI, extension, or core).
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Security & Privacy Notice:**
+        > - **Do NOT report security vulnerabilities here.** Follow [SECURITY.md](https://github.com/franzjeger/Arca/blob/main/SECURITY.md) (`security@sybr.no`) for responsible disclosure.
+        > - **Never attach `.vault` files, master passwords, recovery phrases, sync pairing codes, or unredacted diagnostic dumps.**
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Arca is affected?
+      options:
+        - Desktop App (macOS / SwiftUI)
+        - CLI (arca-cli)
+        - Browser Extension / Native Messaging Bridge (vault-bridge)
+        - Cryptographic Core / Storage (vault-core / vault-store / vault-secmem)
+        - P2P LAN Sync (vault-sync)
+        - C ABI / FFI (vault-ffi)
+        - Build / CI / Packaging
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Arca Version & Commit
+      description: Output of `arca --version` or commit SHA (`git rev-parse --short HEAD`).
+      placeholder: "0.8.5 (main)"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: OS & Architecture
+      description: Operating system version, CPU architecture, and browser (if extension-related).
+      placeholder: "macOS 15.4 (arm64), Chrome 135"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Exact Steps to Reproduce
+      description: Minimal, deterministic steps starting from a clean state or specific vault state.
+      placeholder: |
+        1. Run `...`
+        2. Click `...`
+        3. Observe error `...`
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What happened instead? Include exact error codes, FFI status codes, or panic/crash traces (redacted).
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened according to the spec or threat model?
+    validations:
+      required: true

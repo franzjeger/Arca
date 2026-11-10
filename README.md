@@ -103,7 +103,7 @@ crates/
 ├── vault-store/      Atomic single-file persistence, rotating snapshots,
 │                     OS-keychain quick unlock.
 ├── vault-ffi/        C ABI over the core, for native platform integrations
-│                     (Swift). ABI v21, including sync and locked read-modify-write.
+│                     (Swift). ABI v22, including sync and locked read-modify-write.
 ├── vault-secmem/     mlock'd buffers for key material.
 ├── vault-appgroup/   macOS App Group container resolution (one isolated
 │                     Objective-C call, so the app crate stays unsafe-free).
@@ -127,10 +127,12 @@ extension/
 ```
 
 **Key hierarchy:** master password ──Argon2id──▶ master key
-──XChaCha20-Poly1305(unwrap)──▶ random 256-bit *vault key* ──per-item AEAD──▶
-each item. The master password is never stored; only *wrapped* keys are
-persisted, which is why changing it does not re-encrypt your data and why a
-forgotten master password is unrecoverable.
+──XChaCha20-Poly1305(unwrap)──▶ random 256-bit *vault key* ──HKDF-SHA256──▶
+domain-separated subkeys (item AEAD, whole-container HMAC-SHA256 tag, and
+sealed metadata). The master password is never stored; changing it rotates the
+vault key and re-seals all items under the new key while keeping the replaced
+key sealed in the header so synced devices can verify and adopt the rotation.
+A forgotten master password is unrecoverable.
 
 ## Prerequisites
 
@@ -271,43 +273,3 @@ use**, and list the accepted residual risks.
 
 Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE), at
 your option.
-
-## Reliability and recovery (0.5.0)
-
-- Password history: the last 20 login/Wi-Fi password changes, encrypted inside
-  each item and synced with it. Desktop and iOS can copy or restore a selected
-  password; this does not change the password at the website/network.
-- Desktop: one app instance, live sync status, and settings that reflect only
-  successful durable writes. Settings → About shows version and build.
-- Settings → Automatic encrypted backups: select an external/backed-up folder.
-  Copies run every 15 minutes while Arca is running; the last 30 plus daily copies for 30 days are retained.
-  A missing drive is reported without recreating its mount point.
-- Settings → Encrypted backup → Restore → Verify only: check a backup with its
-  master password without replacing the current vault.
-- Update every device to 0.5.0 before exchanging V5 vault files. See the
-  [release and validation plan](docs/RELEASE.md), including the outstanding
-  independent audit and real-device checks.
-
-## Verification, updates and sync conflicts (0.6.0)
-
-- On Linux, CSV export, changing the master password and replacing/restoring
-  the vault require the **current** master password. macOS and Windows use
-  system verification. Confirmation expires if the vault locks, is replaced,
-  or its password wrapping changes while verification is pending.
-- The sync-conflict button opens a comparison with choices per field, explicit
-  secret reveal, and revision checks before saving. Choose the original, the
-  conflict copy, selected fields, or keep both. Replaced inputs remain in Trash;
-  snapshots provide an additional recovery path. Older conflict copies require
-  selecting their original manually. Cryptographic credentials stay intact.
-- Linux installation uses `scripts/install-linux.sh` (Python 3.11+). It requires
-  a clean committed checkout, runs the tests, installs the matching app and
-  native host, and verifies the running process through its authenticated bridge.
-  The native host is stored in `~/.local/lib/arca`, independent of Cargo's cache.
-  `install.json` records the exact commit, checksums and verification result.
-- Close Arca and save unfinished edits before updating, or pass `--restart`
-  to permit restarting it. `scripts/install-linux.sh --rollback --restart`
-  restores the preceding app/native-host installation without reverting vault
-  data. A pre-update encrypted vault copy is retained with the previous build.
-
-The 0.6.0 changes retain the V5 file format and ABI v16. The conflict comparison
-is available on desktop; iOS retains the conflict entries and their metadata.

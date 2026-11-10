@@ -56,10 +56,10 @@ custom primitives are implemented.
 | Vault key          | random 256-bit, **wrapped** with the master key           |
 | Subkeys            | **HKDF-SHA256** of the vault key: one seals items, one tags the container, one seals the replaced keys |
 | Wrapping / items   | **XChaCha20-Poly1305** AEAD (`chacha20poly1305`)          |
-| Per-item encryption| each item sealed individually; its UUID bound as **AAD**  |
+| Per-item encryption| each item sealed individually; its UUID bound as **AAD**; unchanged items reuse their revision-bound `AeadBlob` across saves (`SealedCache`) |
 | Randomness         | OS CSPRNG (`getrandom`)                                   |
 | Secret comparison  | constant-time (`subtle`)                                  |
-| Memory hygiene     | keys & plaintext zeroized on drop (`zeroize`)             |
+| Memory hygiene     | keys initialized in-place into `mlock`/`VirtualLock` pages (`SymmetricKey::from_slice`) and zeroized on drop (`zeroize`) |
 
 - **KDF parameters are versioned** in a cleartext header so they can be raised
   over time; the wrap binds those parameters as AAD, so an attacker cannot
