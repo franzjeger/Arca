@@ -21,7 +21,7 @@ fn installed_app() -> Option<PathBuf> {
 /// AppImage, and only that host has the link. A link whose AppImage was moved
 /// or deleted does not exist, and the next candidate is tried. Then a source
 /// install's launcher, then a package's binary.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(unix, test)))]
 fn linux_candidates(exe: Option<PathBuf>, home: Option<PathBuf>) -> Vec<PathBuf> {
     exe.map(|exe| exe.with_file_name("Arca.AppImage"))
         .into_iter()
@@ -98,6 +98,8 @@ fn ensure_ready(
 mod tests {
     use super::*;
 
+    // Symbolic links, which the test makes, are a Unix thing.
+    #[cfg(unix)]
     #[test]
     fn a_host_from_an_appimage_starts_that_appimage_and_others_fall_through() {
         let dir = tempfile::tempdir().unwrap();
