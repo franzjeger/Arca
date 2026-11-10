@@ -23,7 +23,10 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = join(repo, "target", "linux-packaging");
 
 // Where the .deb/.rpm put the host binary. Must stay in sync with the `files`
-// maps in apps/desktop/src-tauri/tauri.conf.json.
+// maps in apps/desktop/src-tauri/tauri.conf.json. The AppImage carries the same
+// binary at the same place inside itself, but needs no manifests from here:
+// the running AppImage copies its host out and registers it per user
+// (apps/desktop/src-tauri/src/browser_host.rs).
 const HOST_PATH = "/usr/bin/vault-native-host";
 
 // Derive the extension id from the pinned public `key` rather than hardcoding
