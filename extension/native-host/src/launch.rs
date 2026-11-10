@@ -8,13 +8,26 @@ fn installed_app() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let candidates = vec![PathBuf::from("/Applications/Arca.app")];
     #[cfg(target_os = "linux")]
-    let candidates = vec![
-        dirs::home_dir()?.join(".local/bin/arca"),
-        PathBuf::from("/usr/bin/vault-desktop"),
-    ];
+    let candidates = linux_candidates(std::env::current_exe().ok(), dirs::home_dir());
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let candidates: Vec<PathBuf> = Vec::new();
     candidates.into_iter().find(|path| path.exists())
+}
+
+/// Where Arca may be on Linux, in order, for a host at `exe`.
+///
+/// First the link an AppImage leaves beside the host it copies out of itself
+/// (apps/desktop/src-tauri/src/browser_host.rs): that host belongs to that
+/// AppImage, and only that host has the link. A link whose AppImage was moved
+/// or deleted does not exist, and the next candidate is tried. Then a source
+/// install's launcher, then a package's binary.
+#[cfg(any(target_os = "linux", test))]
+fn linux_candidates(exe: Option<PathBuf>, home: Option<PathBuf>) -> Vec<PathBuf> {
+    exe.map(|exe| exe.with_file_name("Arca.AppImage"))
+        .into_iter()
+        .chain(home.map(|home| home.join(".local/bin/arca")))
+        .chain([PathBuf::from("/usr/bin/vault-desktop")])
+        .collect()
 }
 
 pub fn available() -> bool {
@@ -84,6 +97,48 @@ fn ensure_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_from_an_appimage_starts_that_appimage_and_others_fall_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let host_dir = dir.path().join(".local/lib/arca-appimage");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        let appimage = dir.path().join("Arca_0.9.0_amd64.AppImage");
+        std::fs::write(&appimage, "appimage").unwrap();
+        std::os::unix::fs::symlink(&appimage, host_dir.join("Arca.AppImage")).unwrap();
+        let exe = Some(host_dir.join("vault-native-host"));
+        let home = Some(dir.path().to_path_buf());
+
+        let candidates = linux_candidates(exe.clone(), home.clone());
+        assert_eq!(
+            candidates,
+            [
+                host_dir.join("Arca.AppImage"),
+                dir.path().join(".local/bin/arca"),
+                PathBuf::from("/usr/bin/vault-desktop"),
+            ]
+        );
+        let found = |candidates: Vec<PathBuf>| candidates.into_iter().find(|path| path.exists());
+        assert_eq!(found(candidates), Some(host_dir.join("Arca.AppImage")));
+
+        // The AppImage was deleted: its link leads nowhere, so the host goes
+        // on to an install that is there.
+        std::fs::remove_file(&appimage).unwrap();
+        let launcher = dir.path().join(".local/bin/arca");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "launcher").unwrap();
+        assert_eq!(found(linux_candidates(exe, home)), Some(launcher));
+
+        // A source install's host has no link beside it at all.
+        let source = Some(dir.path().join(".local/lib/arca/vault-native-host"));
+        assert_eq!(
+            linux_candidates(source, None),
+            [
+                dir.path().join(".local/lib/arca/Arca.AppImage"),
+                PathBuf::from("/usr/bin/vault-desktop"),
+            ]
+        );
+    }
     #[test]
     fn running_app_is_not_launched_again() {
         assert!(ensure_ready(

@@ -6085,6 +6085,7 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+ "tempfile",
  "vault-bridge",
 ]
 

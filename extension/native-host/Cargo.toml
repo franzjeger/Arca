@@ -23,3 +23,8 @@ vault-bridge.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# A throwaway home for the launch-candidate tests, which must never look at the
+# real one.
+tempfile = "3"
