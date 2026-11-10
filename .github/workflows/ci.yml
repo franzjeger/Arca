@@ -331,7 +331,7 @@ jobs:
             libayatana-appindicator3-dev libxdo-dev libssl-dev \
             libdbus-1-dev build-essential file \
             libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
-            rpm patchelf xdg-utils
+            rpm patchelf xdg-utils xvfb
 
       - name: Install Rust (pinned by rust-toolchain.toml)
         run: rustup show
@@ -381,6 +381,16 @@ jobs:
             }
           ' "$info" "$GITHUB_SHA"
           echo "ok: $(basename "${appimages[0]}") starts and reports $GITHUB_SHA"
+
+      # An AppImage's mount is gone once it exits, so the host inside it is no
+      # use to a browser. Started in a home of its own, Arca must copy the host
+      # out, register the copy with Chrome and Firefox, and link back to the
+      # AppImage, and the copy must answer a browser after Arca has exited.
+      - name: The AppImage leaves the browsers a host that works without it
+        run: |
+          shopt -s nullglob
+          appimages=(target/release/bundle/appimage/*.AppImage)
+          scripts/test-appimage-host.sh "${appimages[0]}"
 
       # The point of the job. Every assertion below corresponds to something a
       # user hits directly: a missing binary or manifest means autofill fails
