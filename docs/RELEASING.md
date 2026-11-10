@@ -80,14 +80,66 @@ pass. It also checks that:
 - the disk image is stapled and both it and the app pass Gatekeeper;
 - `latest.json` names only files on this release, carrying the archive's
   signature;
-- `CHANGELOG.md` has a section for the version, which becomes the notes.
+- `CHANGELOG.md` has a section for the version, which becomes the notes;
+- GitHub has the Linux release workflow and its secrets (below), before
+  anything is tagged.
 
-A tag that exists is never replaced: a published version is released again as a
-new one.
+Then it tags, drafts the release with the Mac files, and starts
+`.github/workflows/release-linux.yml` against the draft. That workflow builds
+the Linux release from the tag on GitHub's Ubuntu 22.04 runner with
+`scripts/release-linux.sh`, starts the AppImage to check it is this commit,
+attaches the AppImage, its `.sig`, the `.deb` and the `.rpm`, and merges
+`linux-x86_64` into the draft's `latest.json`. The script waits for it (about
+20 minutes), checks with `scripts/check-manifest.py` that the draft carries
+both platforms, every file and signature the manifest names and nothing else,
+and only then publishes.
+
+The Linux half used to be `release-linux.sh` run by hand on a Linux machine,
+with the results uploaded by hand. Nobody ran it: 0.8.5 and every release
+before it went out with the Mac files alone, so no Linux install could ever
+update itself. A release is now not published without it.
+
+If the Linux build fails, the draft stays a draft and nobody sees it. Fix the
+cause and run `--publish` again: it recognises its own draft at this commit and
+finishes it instead of refusing the tag. Any other existing tag is never
+replaced: a published version is released again as a new one.
 
 Installed copies act on a release the moment it exists. So it is made as a
 draft, filled and checked, then published, and the script reads the public
-`latest.json` back to confirm what installed copies now see.
+`latest.json` back to confirm it offers the version to both platforms.
+
+### One-time setup: the Linux release on GitHub
+
+The workflow signs with the same updater key as the Mac. The key is a secret of
+a GitHub environment, `release`, that only `main` and `v*` tags may deploy to,
+so a pull request's workflow cannot read it. Run this on the Mac, where the key
+is:
+
+```bash
+gh api -X PUT repos/franzjeger/Arca/environments/release \
+  -F 'deployment_branch_policy[protected_branches]=false' \
+  -F 'deployment_branch_policy[custom_branch_policies]=true'
+gh api -X POST repos/franzjeger/Arca/environments/release/deployment-branch-policies -f name=main -f type=branch
+gh api -X POST repos/franzjeger/Arca/environments/release/deployment-branch-policies -f name='v*' -f type=tag
+gh secret set ARCA_UPDATER_KEY --env release < ~/.arca/arca-updater.key
+gh secret set ARCA_GOOGLE_CLIENT_SECRET --env release < ~/.arca/google-client-secret
+gh secret set ARCA_UPDATER_KEY_PASSWORD --env release   # only if the key has a password
+```
+
+### Linux for a release that shipped without it
+
+To attach Linux to a release published before the workflow existed, run it
+from `main` and say that the release is already published:
+
+```bash
+gh workflow run release-linux.yml --ref main -f tag=v0.8.5 -f allow-published=true
+```
+
+This gives Linux users an AppImage to install, and installed AppImages see every
+version after it. It refuses a published release that already has Linux files,
+since a published file is never replaced. GitHub cannot replace a file
+atomically, so while `latest.json` is swapped the endpoint returns nothing for
+a moment; a check that lands then fails and the next one works.
 
 ## Why a release carries restricted entitlements
 
@@ -152,8 +204,8 @@ update once. Never embed a GitHub token to make that private endpoint work.
 |---|---|---|
 | macOS, Apple silicon | yes | `Arca_<version>_aarch64.app.tar.gz` + `.sig` |
 | macOS, Intel | not built | the release is arm64 only |
-| Linux, AppImage | yes | `*.AppImage` + `.sig` |
-| Linux, `.deb`/`.rpm` | **no** | installed by the package manager |
+| Linux, AppImage | yes | `Arca_<version>_amd64.AppImage` + `.sig`, built by `release-linux.yml` |
+| Linux, `.deb`/`.rpm` | **no** | installed by the package manager; attached by `release-linux.yml` |
 | Linux, `scripts/install-linux.sh` | **no** | `git pull`, then `scripts/install-linux.sh --restart` |
 | Windows | not built | no release pipeline yet |
 
@@ -169,6 +221,39 @@ loads the updater on Linux only when it runs as an AppImage
 (`apps/desktop/src-tauri/src/updates.rs`); a package or a copy built from
 source has no updater, and Settings ▸ Updates says how that copy is updated.
 
+### The browser host travels with the AppImage
+
+The extension reaches Arca through `vault-native-host`, which browsers start
+from the path a registration file names. On macOS the host is inside the app
+and Arca registers it at each launch, so an update replaces both halves of the
+bridge together (`apps/desktop/src-tauri/src/browser_host.rs`).
+
+An AppImage carries the host too (`usr/bin/vault-native-host`, from
+`bundle.linux.appimage.files`), but cannot register it where it is: the
+AppImage runs from a mount that is gone once it exits, and browsers start the
+host on their own. So at each launch it:
+
+1. copies its host to `~/.local/lib/arca-appimage/vault-native-host`, when it
+   differs, atomically;
+2. links `~/.local/lib/arca-appimage/Arca.AppImage` to its own file, which the
+   host starts when the extension asks for a locked or closed Arca
+   (`extension/native-host/src/launch.rs`);
+3. points each installed browser's per-user registration at the copy: the
+   Chromium browsers `scripts/install-linux.py` registers, and Firefox.
+
+An in-app update replaces the AppImage; the next launch copies the new host,
+so the halves cannot drift. Only an AppImage does this: a binary extracted
+from one and run by hand, a `.deb`/`.rpm` and a source install do not.
+
+An AppImage takes over a registration that names another install's host. A
+registration exists to reach a host built with the app that is running, and
+leaving another one in place is the drift this prevents. Each takeover is
+logged with the host it replaced, and `scripts/install-linux.sh` takes the
+registrations back for a source install when it runs.
+
+CI starts the AppImage in a home of its own and checks the whole chain:
+`scripts/test-appimage-host.sh`.
+
 ### The manifest is merged, not rewritten
 
 `latest.json` describes **one version across every platform**, so each release
@@ -176,13 +261,15 @@ script merges its own entry with `scripts/update-manifest.py` rather than
 writing the file:
 
 ```
-scripts/release-macos.sh     # adds darwin-aarch64
-scripts/release-linux.sh     # adds linux-x86_64 (or linux-aarch64)
+scripts/release-macos.sh     # adds darwin-aarch64, on the Mac
+scripts/release-linux.sh     # adds linux-x86_64, on GitHub (release-linux.yml)
 ```
 
-Both scripts emit the same `latest.json` path, and each keeps the entries the
-other put there. Publish whichever was produced **last**, since it is the one
-carrying both. When the version changes the old entries are dropped rather than
+The Mac's manifest goes onto the draft first. The Linux workflow downloads it
+from the draft, merges into it, and puts it back, so the draft ends up carrying
+both; `scripts/check-manifest.py` checks the finished file against the files on
+the release before it is published. When the version changes the old entries
+are dropped rather than
 merged — their URLs point at the previous release's files, and a manifest that
 mixes versions hands half its users a download that does not match the version
 it claims.

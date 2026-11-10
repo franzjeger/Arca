@@ -21,7 +21,10 @@ name: CI
 # `tauri build`, which is exactly how the bundles once shipped the desktop app
 # alone: the app worked, but the extension had nothing to talk to and reported
 # "Can't reach Arca". A green `test` job cannot catch that, because the failure
-# is in what gets packaged rather than in what compiles.
+# is in what gets packaged rather than in what compiles. It also bundles the
+# AppImage, on the same Ubuntu image .github/workflows/release-linux.yml builds
+# releases on, and starts it, so the full run a release requires has already
+# made the file the in-app updater installs.
 #
 # NOTE: Headless CI cannot cover interactive cross-application paste on Wayland.
 # That check remains a manual,
@@ -94,6 +97,7 @@ jobs:
           python3 scripts/test-apple-ci.py
           python3 scripts/test-install-linux.py
           python3 scripts/test-update-manifest.py
+          python3 scripts/test-check-manifest.py
 
       - name: Build frontend (tsc type-check + Vite bundle)
         working-directory: apps/desktop
@@ -306,7 +310,10 @@ jobs:
 
   linux-package:
     name: linux .deb/.rpm ship the native host
-    runs-on: ubuntu-latest
+    # The image release-linux.yml builds releases on, so this is the same
+    # build. 22.04's older glibc is what lets the AppImage run on older
+    # distributions; see the comment there.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     # A full release bundle is expensive, so it follows the same minute
     # economics as the other heavy jobs: PR or manual dispatch, never a push.
@@ -324,11 +331,17 @@ jobs:
             libayatana-appindicator3-dev libxdo-dev libssl-dev \
             libdbus-1-dev build-essential file \
             libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
-            rpm
+            rpm patchelf xdg-utils xvfb
 
       - name: Install Rust (pinned by rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # The automatic key names the job and the OS family, not the
+          # release: without this, dependencies compiled on ubuntu-latest were
+          # restored onto 22.04 as a full match and rustc could not load them
+          # ("can't find crate for `tauri`").
+          key: ubuntu-22.04
 
       - name: Install Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -339,9 +352,45 @@ jobs:
 
       - name: Build the Linux bundles
         working-directory: apps/desktop
+        env:
+          # linuxdeploy, which assembles the AppImage, is an AppImage itself.
+          # This runs it without FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
           npm ci
-          npm run tauri build -- --bundles deb,rpm -- --locked
+          npm run tauri build -- --bundles appimage,deb,rpm -- --locked
+
+      # What a release's in-app update installs is this file, so start it: an
+      # AppImage that bundled but cannot run, or carries another build, would
+      # otherwise be found by the first person to update.
+      - name: The AppImage starts and is this commit
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          appimages=(target/release/bundle/appimage/*.AppImage)
+          [ ${#appimages[@]} = 1 ] || { echo "expected one AppImage, found: ${appimages[*]}"; exit 1; }
+          info="$("${appimages[0]}" --build-info)"
+          echo "AppImage build info: $info"
+          node -e '
+            const info = JSON.parse(process.argv[1]);
+            if (info.commit !== process.argv[2]) {
+              console.error(`the AppImage was built from ${info.commit}, not ${process.argv[2]}`);
+              process.exit(1);
+            }
+          ' "$info" "$GITHUB_SHA"
+          echo "ok: $(basename "${appimages[0]}") starts and reports $GITHUB_SHA"
+
+      # An AppImage's mount is gone once it exits, so the host inside it is no
+      # use to a browser. Started in a home of its own, Arca must copy the host
+      # out, register the copy with Chrome and Firefox, and link back to the
+      # AppImage, and the copy must answer a browser after Arca has exited.
+      - name: The AppImage leaves the browsers a host that works without it
+        run: |
+          shopt -s nullglob
+          appimages=(target/release/bundle/appimage/*.AppImage)
+          scripts/test-appimage-host.sh "${appimages[0]}"
 
       # The point of the job. Every assertion below corresponds to something a
       # user hits directly: a missing binary or manifest means autofill fails

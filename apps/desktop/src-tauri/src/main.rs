@@ -243,6 +243,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(home) = app.path().home_dir() {
         std::thread::spawn(move || browser_host::register(&home));
     }
+    // On Linux only an AppImage does this; it copies the host out of itself
+    // first, since the mount it runs from is gone once it exits.
+    #[cfg(target_os = "linux")]
+    if let (Ok(home), Ok(config)) = (app.path().home_dir(), app.path().config_dir()) {
+        std::thread::spawn(move || browser_host::register_appimage(&home, &config));
+    }
 
     // ssh-agent: expose vault SSH keys to ssh/git (Unix socket).
     agent::start(app.handle().clone());

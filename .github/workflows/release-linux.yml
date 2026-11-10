@@ -1,0 +1,305 @@
+name: Release (Linux)
+
+# Builds the Linux half of a release and attaches it to that release on GitHub:
+# the AppImage the in-app updater installs, its signature, the .deb and .rpm,
+# and latest.json with linux-x86_64 merged in beside the Mac's entry.
+#
+# Why it exists: the Linux half used to be scripts/release-linux.sh, run by hand
+# on a Linux machine after publishing from the Mac, with the results uploaded by
+# hand. It was never run, so no release carried a linux-x86_64 entry and
+# "Check for updates" on Linux could only fail. scripts/publish-release.sh now
+# dispatches this against its draft and publishes only once both halves are on
+# it, so the step cannot be forgotten.
+#
+# Dispatched, never triggered by a tag push. The draft, carrying the Mac's
+# latest.json, has to exist before this merges into that file, and a tag-push
+# trigger would race the draft's creation.
+#
+#   gh workflow run release-linux.yml --ref v0.8.6 -f tag=v0.8.6
+#
+# Attaching to a release that is already published changes the latest.json
+# installed copies are reading, so it has to be asked for. It is for releases
+# that shipped before this workflow existed:
+#
+#   gh workflow run release-linux.yml --ref main -f tag=v0.8.5 -f allow-published=true
+#
+# The update signing key and the Google client secret are secrets of the
+# `release` environment, which only main and v* tags may deploy to, so a pull
+# request's workflow cannot read them. One-time setup: docs/RELEASING.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release tag to build, e.g. v0.8.6"
+        required: true
+        type: string
+      allow-published:
+        description: "Attach to a release that is already published (backfill only)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-linux-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  linux:
+    name: build, sign and attach the Linux release
+    # The oldest supported Ubuntu, on purpose: an AppImage runs only where glibc
+    # is at least as new as the one it was built against. 22.04 (glibc 2.35)
+    # covers Ubuntu 22.04+, Debian 12, Fedora 36+ and the rolling
+    # distributions. ci.yml's linux-package job builds on the same image, so the
+    # full CI run a release requires has already bundled exactly this. When
+    # GitHub retires the image, move both, and say in the changelog which
+    # distributions that leaves behind.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    environment: release
+    permissions:
+      contents: write # attach the files to the release
+      actions: read # check-release.py reads this commit's full CI run
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      TAG: ${{ inputs.tag }}
+      ALLOW_PUBLISHED: ${{ inputs.allow-published }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Refuse anything but a version tag
+        working-directory: .
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::'$TAG' is not a version tag (vX.Y.Z)"; exit 1; }
+          # Dispatched on a tag, it must be the same one: the workflow that
+          # builds a release is then the one that release carries.
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$TAG" ]; then
+            echo "::error::dispatched on $GITHUB_REF_NAME but asked to build $TAG"
+            exit 1
+          fi
+
+      - name: Find the release, and refuse one installed copies already read
+        working-directory: .
+        run: |
+          draft="$(gh release view "$TAG" --json isDraft -q .isDraft)" || {
+            echo "::error::there is no release $TAG. scripts/publish-release.sh drafts it first."
+            exit 1
+          }
+          if [ "$draft" != true ] && [ "$ALLOW_PUBLISHED" != true ]; then
+            echo "::error::$TAG is already published. Installed copies read its latest.json now; attaching to it is a backfill and has to be asked for with allow-published."
+            exit 1
+          fi
+          echo "DRAFT=$draft" >> "$GITHUB_ENV"
+
+      # The source being released, from its tag, in a folder of its own so the
+      # checkout stays clean for check-release.py beside the tooling below.
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          path: source
+          # The build info is `git describe`: it needs the history and tags.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # This workflow's own checks, from the commit the workflow ran from. A
+      # backfill builds a tag older than them, so they cannot come from there.
+      - name: Check out this workflow's tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: tooling
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check-manifest.py
+            apps/desktop/src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
+
+      - name: The tag is the version the app declares
+        run: |
+          version="$(python3 -c 'import json; print(json.load(open("apps/desktop/src-tauri/tauri.conf.json"))["version"])')"
+          [ "v$version" = "$TAG" ] || { echo "::error::$TAG holds Arca $version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install the system dependencies of the Linux bundles
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            libdbus-1-dev build-essential file patchelf xdg-utils rpm
+
+      # No build caches in a release: what is signed is compiled here, from the
+      # lockfiles, and nothing from an earlier run is reused.
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        run: rustup show
+
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Start from the manifest already on the release
+        run: |
+          bundle="$(python3 scripts/cargo-target-dir.py)/release/bundle"
+          echo "BUNDLE=$bundle" >> "$GITHUB_ENV"
+          mkdir -p "$bundle"
+          gh release view "$TAG" --json assets -q '.assets[].name' > "$RUNNER_TEMP/assets-before.txt"
+          # A published file is never replaced, only a draft's.
+          if [ "$DRAFT" != true ] && grep -qE '\.(AppImage|deb|rpm)$' "$RUNNER_TEMP/assets-before.txt"; then
+            echo "::error::$TAG is published and already carries Linux files. A published file is never replaced; release a new version."
+            exit 1
+          fi
+          # release-linux.sh merges into this file rather than writing it, so
+          # the Mac's entry survives. Without it every installed Mac would stop
+          # seeing updates.
+          if grep -qx latest.json "$RUNNER_TEMP/assets-before.txt"; then
+            gh release download "$TAG" --pattern latest.json --dir "$bundle" --clobber
+            jq -r '.platforms | keys[]' "$bundle/latest.json" > "$RUNNER_TEMP/platforms-before.txt"
+          else
+            : > "$RUNNER_TEMP/platforms-before.txt"
+          fi
+          echo "platforms on $TAG before this build: $(paste -sd, "$RUNNER_TEMP/platforms-before.txt")"
+
+      - name: Put the update signing key where release-linux.sh looks for it
+        env:
+          UPDATER_KEY: ${{ secrets.ARCA_UPDATER_KEY }}
+        run: |
+          [ -n "$UPDATER_KEY" ] || {
+            echo "::error::the release environment has no ARCA_UPDATER_KEY secret (docs/RELEASING.md)"
+            exit 1
+          }
+          umask 077
+          printf '%s' "$UPDATER_KEY" > "$RUNNER_TEMP/arca-updater.key"
+          echo "ARCA_UPDATER_KEY=$RUNNER_TEMP/arca-updater.key" >> "$GITHUB_ENV"
+
+      - name: Build and sign (scripts/release-linux.sh)
+        env:
+          ARCA_UPDATER_KEY_PASSWORD: ${{ secrets.ARCA_UPDATER_KEY_PASSWORD }}
+          ARCA_GOOGLE_CLIENT_SECRET: ${{ secrets.ARCA_GOOGLE_CLIENT_SECRET }}
+          # linuxdeploy, which assembles the AppImage, is an AppImage itself.
+          # This runs it without FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          [ -n "$ARCA_GOOGLE_CLIENT_SECRET" ] || {
+            echo "::error::the release environment has no ARCA_GOOGLE_CLIENT_SECRET secret; the build would ship with Drive sync compiled out (docs/SYNC.md)"
+            exit 1
+          }
+          scripts/release-linux.sh
+
+      - name: Forget the signing key
+        if: always()
+        working-directory: .
+        run: rm -f "$RUNNER_TEMP/arca-updater.key"
+
+      - name: Check that what was built is this tag, clean, and starts
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          # What the updater installs is the file the manifest names.
+          updater="$BUNDLE/appimage/$(jq -r '.platforms["linux-x86_64"].url | split("/") | last' "$BUNDLE/latest.json")"
+          [ -f "$updater" ] && [ -f "$updater.sig" ] \
+            || { echo "::error::latest.json names $updater, which was not built and signed"; exit 1; }
+          shopt -s nullglob
+          appimages=("$BUNDLE"/appimage/*.AppImage)
+          debs=("$BUNDLE"/deb/*.deb)
+          rpms=("$BUNDLE"/rpm/*.rpm)
+          [ ${#appimages[@]} = 1 ] && [ ${#debs[@]} = 1 ] && [ ${#rpms[@]} = 1 ] || {
+            echo "::error::expected one AppImage, .deb and .rpm; found: ${appimages[*]} ${debs[*]} ${rpms[*]}"
+            exit 1
+          }
+          # Run the AppImage itself, not the binary it was made from: this is
+          # what a user downloads and what the updater swaps in.
+          info="$("${appimages[0]}" --build-info)"
+          echo "AppImage build info: $info"
+          python3 - "$info" "$VERSION" "$(git rev-parse HEAD)" <<'PY'
+          import json, sys
+          info, version, commit = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
+          problems = []
+          if info["version"] != version:
+              problems.append(f"it is Arca {info['version']}, not {version}")
+          if info["commit"] != commit:
+              problems.append(f"it was built from {info['commit']}, not {commit}")
+          if info["build"].endswith("-dirty"):
+              problems.append(f"it was built from a modified checkout ({info['build']})")
+          for problem in problems:
+              print(f"::error::the AppImage is not this release: {problem}")
+          sys.exit(1 if problems else 0)
+          PY
+          files=("$updater" "$updater.sig" "${debs[0]}" "${rpms[0]}")
+          [ "${appimages[0]}" = "$updater" ] || files+=("${appimages[0]}")
+          printf '%s\n' "${files[@]}" > "$RUNNER_TEMP/upload.txt"
+
+      - name: Check the merged manifest before anyone can read it
+        run: |
+          { cat "$RUNNER_TEMP/assets-before.txt"; xargs -d '\n' -n1 basename < "$RUNNER_TEMP/upload.txt"; echo latest.json; } \
+            | sort -u > "$RUNNER_TEMP/assets-after.txt"
+          expect=()
+          while read -r platform; do expect+=(--expect "$platform"); done \
+            < <({ cat "$RUNNER_TEMP/platforms-before.txt"; echo linux-x86_64; } | sort -u)
+          python3 ../tooling/scripts/check-manifest.py --manifest "$BUNDLE/latest.json" \
+            --version "$VERSION" --assets "$RUNNER_TEMP/assets-after.txt" \
+            --sig-dir "$BUNDLE/appimage" --verify linux-x86_64 "${expect[@]}"
+
+      - name: Attach to the release
+        run: |
+          mapfile -t files < "$RUNNER_TEMP/upload.txt"
+          # The files first and the manifest last, so that no moment exists in
+          # which latest.json names a download that is not there yet.
+          gh release upload "$TAG" "${files[@]}" --clobber
+          gh release upload "$TAG" "$BUNDLE/latest.json" --clobber
+
+      - name: Check what is on the release now
+        run: |
+          check="$RUNNER_TEMP/on-release"
+          mkdir -p "$check"
+          gh release view "$TAG" --json assets -q '.assets[].name' > "$check/assets.txt"
+          updater="$(jq -r '.platforms["linux-x86_64"].url | split("/") | last' "$BUNDLE/latest.json")"
+          gh release download "$TAG" --pattern latest.json --pattern "$updater.sig" --dir "$check"
+          cmp -s "$check/latest.json" "$BUNDLE/latest.json" \
+            || { echo "::error::the latest.json on $TAG is not the one this run merged"; exit 1; }
+          expect=()
+          while read -r platform; do expect+=(--expect "$platform"); done \
+            < <(jq -r '.platforms | keys[]' "$BUNDLE/latest.json")
+          python3 ../tooling/scripts/check-manifest.py --manifest "$check/latest.json" \
+            --version "$VERSION" --assets "$check/assets.txt" --sig-dir "$check" \
+            --verify linux-x86_64 "${expect[@]}"
+          # A backfill is live at once; confirm the endpoint installed copies
+          # poll offers Linux. (A draft is published by publish-release.sh,
+          # which checks this itself afterwards.)
+          if [ "$DRAFT" != true ]; then
+            endpoint="$(jq -r '.plugins.updater.endpoints[0]' apps/desktop/src-tauri/tauri.conf.json)"
+            for attempt in 1 2 3 4 5 6; do
+              live="$(curl -fsSL "$endpoint" || true)"
+              if jq -e --arg v "$VERSION" '.version == $v and (.platforms | has("linux-x86_64"))' <<<"$live" >/dev/null 2>&1; then
+                echo "the public endpoint offers $VERSION to linux-x86_64"
+                break
+              fi
+              [ "$attempt" = 6 ] && { echo "::error::the public endpoint does not offer $VERSION to linux-x86_64"; exit 1; }
+              sleep 10
+            done
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Arca $VERSION for Linux attached to $TAG"
+            echo
+            [ "$DRAFT" = true ] && echo "The release is still a draft; scripts/publish-release.sh publishes it." \
+              || echo "Backfill: the release was already published, and installed AppImages now see this version."
+            echo
+            echo '| File | Size |'
+            echo '|---|---|'
+            while read -r f; do echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"; done < "$RUNNER_TEMP/upload.txt"
+            echo "| latest.json | $(jq -r '.platforms | keys | join(", ")' "$BUNDLE/latest.json") |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Linux: releases include an AppImage, and an installed AppImage updates
+  itself from Settings ▸ Updates. No release so far carried anything for
+  Linux: the Linux half had to be built by hand after the Mac's, and never
+  was, so "Check for updates" on Linux could only fail. It is now built on
+  GitHub as part of every release, which is not published without it. The
+  AppImage needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, or
+  later). The `.deb` and `.rpm` are attached to each release as well; those,
+  and copies built from source, are still updated outside the app.
+- Linux: browser autofill works with the AppImage, and keeps working after it
+  updates. The AppImage carries the extension's native host and, each time it
+  starts, puts a copy in `~/.local/lib/arca-appimage` and points Chrome,
+  Chromium, Brave, Edge, Vivaldi and Firefox at it, so the host is always the
+  one built with the app. It takes those registrations over from a source
+  install; running `scripts/install-linux.sh` again takes them back.
+
 ## 0.8.5 — 2026-11-10
 
 - Privacy: Arca no longer keeps a log of passkey sign-ins unless you ask it

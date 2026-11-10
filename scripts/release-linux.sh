@@ -57,7 +57,8 @@ command -v xdg-open >/dev/null 2>&1 || die "xdg-open is missing (package: xdg-ut
 VERSION="$(python3 -c "import json;print(json.load(open('$REPO/apps/desktop/src-tauri/tauri.conf.json'))['version'])")"
 
 # What ships is what package-lock.json says, not whatever the checkout last
-# installed; the build below bundles the frontend from node_modules.
+# installed; the build below bundles the frontend from node_modules. The Rust
+# side is held to Cargo.lock the same way, by --locked below.
 step "Frontend dependencies, exactly as the lockfile has them"
 (cd "$REPO/apps/desktop" && npm ci)
 
@@ -68,7 +69,7 @@ step "Building the Linux bundles ($BUNDLES)"
 export TAURI_SIGNING_PRIVATE_KEY="$UPDATER_KEY"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${ARCA_UPDATER_KEY_PASSWORD:-}"
 (cd "$REPO/apps/desktop" && npm run tauri build -- --bundles "$BUNDLES" \
-  --config '{"bundle":{"createUpdaterArtifacts":true}}')
+  --config '{"bundle":{"createUpdaterArtifacts":true}}' -- --locked)
 
 step "Locating the signed updater artifact"
 # Tauri has changed which file carries the AppImage update between versions
@@ -116,13 +117,8 @@ for kind in deb rpm; do
 done
 cat <<NOTE
 
-Publish on the v$VERSION GitHub release: the AppImage, its .sig, and latest.json
-(plus the .deb/.rpm as downloads). If a macOS release for this same version was
-built first, upload ITS latest.json only after this one — this file now carries
-both, and the last upload wins.
-
-The updater fetches the manifest with no credentials. While the repository is
-private that request 404s for everyone, so publishing alone will not make
-"Check for updates" work; the manifest and artifacts have to be reachable
-anonymously.
+Releases are not published from here. .github/workflows/release-linux.yml runs
+this script on GitHub and attaches the result to the draft that
+scripts/publish-release.sh makes, merging into the Mac's latest.json there; a
+local run is for checking that the build works. See docs/RELEASING.md.
 NOTE
