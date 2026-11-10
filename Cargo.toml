@@ -128,6 +128,11 @@ panic = "abort"
 strip = true
 lto = true
 
+# Proc-macro .dylibs loaded by rustc at compile time on Apple Silicon must keep
+# their linker-emitted symbols and ad-hoc Mach-O signature.
+[profile.release.build-override]
+strip = "none"
+
 # The Apple apps' static library. vault-ffi turns a panic into an error code
 # with `catch_unwind`, which only works when panics unwind; under `abort` a
 # panic kills the app or AutoFill extension instead. vault-ffi refuses to
