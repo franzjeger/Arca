@@ -546,7 +546,7 @@ export function SettingsDialog({
             />
             <Row
               label="Import passwords"
-              hint="From Safari/Apple Passwords, Chrome, Brave, Edge, Firefox, or any CSV export. Safe to re-import: duplicates are skipped."
+              hint="From Bitwarden, 1Password, Safari/Apple Passwords, Chrome, Brave, Edge, Firefox, or any CSV export. Safe to re-import: duplicates are skipped."
             >
               <button
                 type="button"

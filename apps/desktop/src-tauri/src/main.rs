@@ -15,6 +15,7 @@ mod clipboard;
 mod commands;
 mod conflicts;
 mod duplicates;
+mod import;
 mod keyfile_unlock;
 mod pending_change;
 #[cfg(target_os = "macos")]

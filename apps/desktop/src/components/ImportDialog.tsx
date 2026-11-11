@@ -3,7 +3,8 @@ import { useState } from "react";
 import { api, errorMessage, type ImportSummary } from "../lib/api";
 import { toastError, type ToastMessage } from "../lib/toast";
 
-/** Per-browser export walkthroughs. The CSV parser auto-detects all formats. */
+/** Where the passwords are now, and how to get them out. Arca tells the
+ *  formats apart by what is in the file. */
 const SOURCES: {
   id: string;
   name: string;
@@ -45,21 +46,59 @@ const SOURCES: {
     ],
   },
   {
+    id: "bitwarden",
+    name: "Bitwarden",
+    steps: [
+      "In the web vault or the app: Tools → Export vault.",
+      'Choose the format ".json", not ".json (Encrypted)", and save the file.',
+      "Logins come with their one-time codes, custom fields and notes. Cards and identities become secure notes. Passkeys stay in Bitwarden for now.",
+    ],
+  },
+  {
+    id: "1password",
+    name: "1Password",
+    steps: [
+      "In the 1Password app: File → Export, and pick the account.",
+      'Choose the format "1PUX" and save the file.',
+      "Logins come with their one-time codes, extra fields and notes. Cards, identities and other items become secure notes. Attached files are not imported.",
+    ],
+  },
+  {
     id: "other",
     name: "Other (any CSV)",
     steps: [
-      "Export a CSV with site, username and password columns (1Password, Bitwarden, KeePass exports work).",
+      "Export a CSV with site, username and password columns (KeePass and most others can).",
       "Column names are detected automatically; otpauth:// TOTP columns import too.",
     ],
   },
 ];
 
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
 function summaryText(s: ImportSummary): string {
-  const parts = [`Imported ${s.imported}`];
+  const parts = [`Imported ${count(s.imported, "login", "logins")}`];
+  if (s.notes) parts.push(count(s.notes, "note", "notes"));
   if (s.updated) parts.push(`updated ${s.updated}`);
   if (s.duplicates) parts.push(`${s.duplicates} already present`);
-  if (s.skipped) parts.push(`skipped ${s.skipped}`);
+  if (s.skipped) parts.push(`skipped ${s.skipped} empty`);
   return parts.join(", ");
+}
+
+/** What the file held that did not come along, or null. It stays on screen:
+ *  a toast is gone before anyone has moved their passkeys. */
+function leftOutText(s: ImportSummary): string | null {
+  const parts = [];
+  if (s.passkeysLeftOut) {
+    parts.push(
+      `${count(s.passkeysLeftOut, "passkey was", "passkeys were")} not imported: keep the old app until you have made new passkeys in Arca on those sites.`,
+    );
+  }
+  if (s.attachmentsLeftOut) {
+    parts.push(
+      `${count(s.attachmentsLeftOut, "attached file was", "attached files were")} not imported: save ${s.attachmentsLeftOut === 1 ? "it" : "them"} from the old app first.`,
+    );
+  }
+  return parts.length ? parts.join(" ") : null;
 }
 
 export function ImportDialog({
@@ -73,13 +112,15 @@ export function ImportDialog({
 }) {
   const [open, setOpen] = useState<string>("safari");
   const [busy, setBusy] = useState(false);
+  const [leftOut, setLeftOut] = useState<string | null>(null);
 
-  const importCsv = async () => {
+  const importFile = async () => {
     setBusy(true);
     try {
-      const summary = await api.pickAndImportCsv();
+      const summary = await api.pickAndImport();
       if (summary) {
         onToast(summaryText(summary));
+        setLeftOut(leftOutText(summary));
         onImported();
       }
     } catch (e) {
@@ -133,10 +174,10 @@ export function ImportDialog({
                       <button
                         type="button"
                         disabled={busy}
-                        onClick={() => void importCsv()}
+                        onClick={() => void importFile()}
                         className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white hover:bg-accent/90 disabled:opacity-50"
                       >
-                        Choose CSV…
+                        Choose file…
                       </button>
                       {src.action && (
                         <button
@@ -162,10 +203,19 @@ export function ImportDialog({
           })}
         </div>
 
+        {leftOut && (
+          <p
+            role="status"
+            className="border-t border-hairline px-5 py-3 text-[12px] leading-snug text-amber-400"
+          >
+            {leftOut}
+          </p>
+        )}
+
         <div className="flex items-center justify-between border-t border-hairline px-5 py-3">
           <p className="pr-4 text-[11px] leading-snug text-amber-400/90">
-            Delete the CSV after importing — it holds your passwords in plain
-            text.
+            Delete the export after importing — it holds your passwords in
+            plain text.
           </p>
           <button
             onClick={onClose}
