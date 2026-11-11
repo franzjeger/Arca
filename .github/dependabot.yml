@@ -46,6 +46,14 @@ updates:
           - signature
           - ssh-key
         update-types: [major]
+    # vault-winhello's `windows` and `windows-future` follow the version
+    # Tauri's own Windows stack (tao, wry, webview2-com) is on, so Windows
+    # builds one copy of the bindings and the WinRT types agree: a newer
+    # windows-future alone does not compile against it. Move them by hand
+    # when a Tauri update moves `windows` in Cargo.lock.
+    ignore:
+      - dependency-name: windows
+      - dependency-name: windows-future
     open-pull-requests-limit: 5
   - package-ecosystem: npm
     directory: /apps/desktop
