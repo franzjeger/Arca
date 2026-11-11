@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- iPhone: "Arca…" at the foot of the Passwords list opens a list you can
+  use. On a page that also takes a passkey it opened a blank half-sheet and
+  stayed there, and from Safari it found no login for any site, because it
+  compared the page's whole address with the host a login is saved under.
+  The list now shows the site's passkeys and logins first, including those
+  saved on a subdomain or on the parent site, then every other login, with
+  a search field over all of them.
+
 ## 0.8.6 — 2026-11-11
 
 - Linux: releases include an AppImage, and an installed AppImage updates

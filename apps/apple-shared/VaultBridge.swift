@@ -803,6 +803,45 @@ struct VaultIdentity: Decodable, Sendable, Identifiable {
     let label: String
 }
 
+/// Which saved logins belong to the site AutoFill is filling.
+///
+/// The system names the site two ways: a bare domain for an app, and the whole
+/// page address for a browser ("https://accounts.example.com/signin?next=…").
+/// A login carries a host. Comparing the two as strings matches nothing a
+/// browser ever asks for.
+enum AutoFillSite {
+
+    /// The host in a service identifier, lower case; `nil` when it has none.
+    static func host(of identifier: String) -> String? {
+        let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let address = trimmed.contains("://") ? trimmed : "https://" + trimmed
+        guard let host = URLComponents(string: address)?.host, !host.isEmpty else { return nil }
+        return host
+    }
+
+    /// Whether a login saved for `domain` is one to suggest on `host`: the same
+    /// host, or one a subdomain of the other, so a login saved on example.com
+    /// is offered on accounts.example.com and the other way round. The shorter
+    /// name must have a dot in it: "com" is not a site.
+    static func suggests(_ domain: String, on host: String) -> Bool {
+        let domain = domain.lowercased()
+        if domain.isEmpty || host.isEmpty { return false }
+        if domain == host { return true }
+        let (short, long) = domain.count < host.count ? (domain, host) : (host, domain)
+        return short.contains(".") && long.hasSuffix("." + short)
+    }
+}
+
+extension VaultIdentity {
+    /// Whether `query`, already trimmed and lower case, finds this login.
+    func matches(_ query: String) -> Bool {
+        query.isEmpty
+            || user.lowercased().contains(query)
+            || label.lowercased().contains(query)
+            || domain.lowercased().contains(query)
+    }
+}
+
 /// An unlocked vault.
 ///
 /// `@unchecked Sendable` because `OpaquePointer` isn't: the invariant that makes

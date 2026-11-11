@@ -30,6 +30,9 @@ For each candidate, verify on a device:
 - Edit a login and Wi-Fi password, sync to desktop, copy an older password and
   restore it. Confirm account, site, notes and TOTP remain unchanged.
 - Exercise password AutoFill, passkey creation/assertion and device-key renewal.
+- Open "Arca…" from the foot of the Passwords list in Safari, on a page with
+  a saved login and on a page that also offers a passkey: the site's entries
+  come first, and search finds a login saved for another site.
 - Disconnect/reconnect Drive and test a real two-device concurrent edit.
 - After both devices have synced, Options → Synced devices lists this iPhone
   and the computer, each with a recent time.
