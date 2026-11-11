@@ -67,7 +67,7 @@ pub fn authenticate(_app: Option<&tauri::AppHandle>, reason: &str) -> Result<(),
         // Allow the login password / Apple Watch as a fallback when a finger
         // isn't recognised, so the user is never locked out of quick unlock.
         .password(true)
-        .watch(true)
+        .companion(true)
         .build()
         .ok_or_else(|| "Biometric authentication is not available on this device.".to_string())?;
 
@@ -84,9 +84,22 @@ pub fn authenticate(_app: Option<&tauri::AppHandle>, reason: &str) -> Result<(),
             .unwrap_or_else(|| WindowsText::new_truncated("Arca", reason)),
     };
 
-    Context::new(())
-        .blocking_authenticate(text, &policy)
-        .map_err(|e| format!("Verification was not confirmed ({e:?})."))
+    // robius 0.3 answers through a callback; this function's contract is to
+    // block until the user has. The context stays alive until then. If the
+    // prompt is torn down without an answer the sender drops, and that is a
+    // refusal, never a success and never a hang.
+    let (answered, answer) = std::sync::mpsc::channel();
+    let context = Context::new(());
+    context
+        .authenticate(text, &policy, move |result| {
+            let _ = answered.send(result);
+        })
+        .map_err(|e| format!("Verification could not start ({e:?})."))?;
+    match answer.recv() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("Verification was not confirmed ({e:?}).")),
+        Err(_) => Err("Verification ended without an answer.".to_string()),
+    }
 }
 
 /// On platforms without a biometric provider wired up yet, this is a no-op so
