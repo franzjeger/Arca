@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.6 — 2026-11-11
 
 - Linux: releases include an AppImage, and an installed AppImage updates
   itself from Settings ▸ Updates. No release so far carried anything for
