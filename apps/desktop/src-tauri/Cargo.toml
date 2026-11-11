@@ -48,6 +48,10 @@ url.workspace = true
 arboard = { version = "3", features = ["wayland-data-control"] }
 # RFC 4180 CSV parsing for importing exports from other password managers.
 csv = "1"
+# Reads a 1Password .1pux export (a zip). Already in the tree through the
+# updater; only deflate, the one method 1Password writes with, through the
+# flate2 that is in the tree too, so the lockfile gains no crate.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # Wi-Fi join QR codes, rendered to SVG in Rust (keeps the plaintext
 # passphrase out of the webview — only the image crosses).
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

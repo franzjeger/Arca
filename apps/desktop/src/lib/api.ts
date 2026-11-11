@@ -266,6 +266,12 @@ export interface ImportSummary {
   /** Rows identical to an existing login, skipped (safe to re-import). */
   duplicates: number;
   skipped: number;
+  /** Secure notes added, cards and identities kept as notes among them. */
+  notes: number;
+  /** Passkeys the export held; they are not imported yet. */
+  passkeysLeftOut: number;
+  /** File attachments the export held; they are not imported. */
+  attachmentsLeftOut: number;
 }
 
 export interface Totp {
@@ -593,13 +599,15 @@ export const api = {
    * lock-on-blur and lock the vault mid-import; we suppress that around the
    * dialog.
    */
-  pickAndImportCsv: async (): Promise<ImportSummary | null> => {
+  pickAndImport: async (): Promise<ImportSummary | null> => {
     await invoke<void>("set_blur_lock_suppressed", { suppressed: true });
     try {
       const path = await openDialog({
         multiple: false,
         directory: false,
-        filters: [{ name: "CSV", extensions: ["csv"] }],
+        // Arca tells the formats apart by what is in the file; the filter
+        // only keeps the picker from offering everything else.
+        filters: [{ name: "Password export", extensions: ["csv", "json", "1pux"] }],
       });
       if (typeof path !== "string") return null;
       return await invoke<ImportSummary>("import_logins", { path });

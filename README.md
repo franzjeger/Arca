@@ -62,8 +62,10 @@ the new version's source, or reload it. See
   only ever holds ciphertext. See [`docs/SYNC.md`](./docs/SYNC.md).
 - Automatic local snapshots before every save, an off-device encrypted backup,
   and restore. See [`docs/BACKUP.md`](./docs/BACKUP.md).
-- CSV import (Safari/Apple Passwords, Chrome, Brave, Edge, Firefox, generic) and
-  a biometric-gated CSV export
+- Import from Bitwarden (`.json`) and 1Password (`.1pux`) with one-time codes,
+  custom fields and notes, cards and identities kept as secure notes, and from
+  CSV (Safari/Apple Passwords, Chrome, Brave, Edge, Firefox, generic); and a
+  biometric-gated CSV export
 
 **Elsewhere**
 - Built-in ssh-agent: vault SSH keys serve `ssh` and `git` over a Unix socket

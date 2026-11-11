@@ -111,7 +111,7 @@ pub struct SecurityIssueDto {
     pub issues: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportSummary {
     /// Logins added to the vault.
@@ -124,6 +124,14 @@ pub struct ImportSummary {
     pub duplicates: usize,
     /// Rows skipped (blank, or no username and no password).
     pub skipped: usize,
+    /// Secure notes added: the export's own, and the items Arca has no kind
+    /// for (cards, identities), kept as notes with every field.
+    pub notes: usize,
+    /// Passkeys in the export. Their private keys are not imported yet, so
+    /// the user is told to keep them where they are.
+    pub passkeys_left_out: usize,
+    /// File attachments in the export, which are not imported.
+    pub attachments_left_out: usize,
 }
 
 #[derive(Deserialize)]
@@ -335,112 +343,6 @@ pub(crate) fn persist(st: &mut WriteGuard<'_>) -> Result<(), CmdError> {
     save_state(st)?;
     st.committed = true;
     Ok(())
-}
-
-/// A login parsed from one CSV row. `totp` is raw (Base32 or `otpauth://`),
-/// normalized later via `vault_core::edit::normalize_totp`.
-struct ParsedLogin {
-    title: String,
-    username: String,
-    password: String,
-    url: String,
-    totp: String,
-    notes: String,
-}
-
-/// Column indices discovered from the CSV header.
-#[derive(Default)]
-struct ColumnMap {
-    title: Option<usize>,
-    url: Option<usize>,
-    username: Option<usize>,
-    password: Option<usize>,
-    totp: Option<usize>,
-    notes: Option<usize>,
-}
-
-/// Derive a title when the export has none: site host, else username, else a
-/// generic label.
-fn title_from(url: &str, username: &str) -> String {
-    let host = url
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .trim();
-    if !host.is_empty() {
-        host.to_string()
-    } else if !username.is_empty() {
-        username.to_string()
-    } else {
-        "Imported".to_string()
-    }
-}
-
-/// Parse a password-export CSV (Chrome/Brave/Edge, Apple Passwords, Firefox,
-/// Bitwarden, and common generic layouts) by mapping header names
-/// case-insensitively. Returns the parsed logins plus the count of skipped
-/// (blank / credential-less) rows.
-fn parse_logins_csv(text: &str) -> (Vec<ParsedLogin>, usize) {
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_reader(text.as_bytes());
-
-    let headers = match reader.headers() {
-        Ok(h) => h.clone(),
-        Err(_) => return (Vec::new(), 0),
-    };
-
-    let mut map = ColumnMap::default();
-    for (i, h) in headers.iter().enumerate() {
-        match h.trim().to_ascii_lowercase().as_str() {
-            "title" | "name" => _ = map.title.get_or_insert(i),
-            "url" | "urls" | "website" | "login_uri" | "loginuri" => _ = map.url.get_or_insert(i),
-            "username" | "user" | "login" | "email" | "login_username" => {
-                _ = map.username.get_or_insert(i)
-            }
-            "password" | "pwd" | "login_password" => _ = map.password.get_or_insert(i),
-            "notes" | "note" | "comment" | "comments" => _ = map.notes.get_or_insert(i),
-            "otpauth" | "otp" | "totp" | "otp_auth" | "totpauth" | "2fa" | "login_totp" => {
-                _ = map.totp.get_or_insert(i)
-            }
-            _ => {}
-        }
-    }
-
-    let mut logins = Vec::new();
-    let mut skipped = 0usize;
-    for record in reader.records().flatten() {
-        let cell = |col: Option<usize>| -> String {
-            col.and_then(|i| record.get(i))
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        };
-        let username = cell(map.username);
-        let password = cell(map.password);
-        if username.is_empty() && password.is_empty() {
-            skipped += 1;
-            continue;
-        }
-        let url = cell(map.url);
-        let mut title = cell(map.title);
-        if title.is_empty() {
-            title = title_from(&url, &username);
-        }
-        logins.push(ParsedLogin {
-            title,
-            username,
-            password,
-            url,
-            totp: cell(map.totp),
-            notes: cell(map.notes),
-        });
-    }
-    (logins, skipped)
 }
 
 fn secret_field(item: &Item, field: &str) -> Result<String, CmdError> {
@@ -1797,18 +1699,18 @@ fn do_security_report(state: &Mutex<AppState>) -> Result<Vec<SecurityIssueDto>, 
         .collect())
 }
 
-/// Import logins from a CSV export at `path` (Chrome/Brave/Edge, Apple
-/// Passwords, Firefox, or a generic header-mapped layout). The file is read in
-/// Rust, so the exported plaintext passwords never pass through the webview.
+/// Import the export at `path`: a CSV (browsers, Apple Passwords, generic), a
+/// Bitwarden `.json` or a 1Password `.1pux`, told apart by content. The file
+/// is read in Rust, so the exported plaintext passwords never pass through
+/// the webview.
 #[tauri::command]
 pub fn import_logins(state: St<'_>, path: String) -> Result<ImportSummary, CmdError> {
     do_import_logins(state.inner(), &path)
 }
 
 fn do_import_logins(state: &Mutex<AppState>, path: &str) -> Result<ImportSummary, CmdError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|_| CmdError::new("io", "Could not read the selected file."))?;
-    let (parsed, skipped) = parse_logins_csv(&text);
+    let parsed = crate::import::parse_file(std::path::Path::new(path))
+        .map_err(|e| CmdError::new("import", e.message()))?;
 
     let mut st = write_guard(state)?;
     st.touch();
@@ -1818,16 +1720,46 @@ fn do_import_logins(state: &Mutex<AppState>, path: &str) -> Result<ImportSummary
         imported: 0,
         updated: 0,
         duplicates: 0,
-        skipped,
+        skipped: parsed.skipped,
+        notes: 0,
+        passkeys_left_out: parsed.left_out.passkeys,
+        attachments_left_out: parsed.left_out.attachments,
     };
-    for row in parsed {
+    for row in parsed.logins {
         match import_login(st.vault_mut()?, &mut known, row, now)? {
             Imported::New => summary.imported += 1,
             Imported::Updated => summary.updated += 1,
             Imported::Unchanged => summary.duplicates += 1,
         }
     }
-    if summary.imported > 0 || summary.updated > 0 {
+    // A note is the same note when its title and text are: importing the same
+    // export twice adds nothing.
+    let mut held: std::collections::HashSet<(String, String)> = st
+        .vault()?
+        .active_items()?
+        .filter_map(|item| match &item.data {
+            VaultItem::SecureNote { title, body } => Some((title.clone(), body.clone())),
+            _ => None,
+        })
+        .collect();
+    for note in parsed.notes {
+        let title = if note.title.is_empty() {
+            "Untitled note".to_string()
+        } else {
+            note.title
+        };
+        if !held.insert((title.clone(), note.body.clone())) {
+            summary.duplicates += 1;
+            continue;
+        }
+        let edit = vault_core::NoteEdit {
+            title,
+            body: note.body,
+        };
+        st.vault_mut()?.save_note(None, edit, now)?;
+        summary.notes += 1;
+    }
+    if summary.imported > 0 || summary.updated > 0 || summary.notes > 0 {
         persist(&mut st)?;
     }
     Ok(summary)
@@ -1871,7 +1803,7 @@ fn logins_by_site_and_user(
 fn import_login(
     vault: &mut Vault,
     known: &mut std::collections::HashMap<LoginKey, Uuid>,
-    row: ParsedLogin,
+    row: crate::import::ParsedLogin,
     now: i64,
 ) -> Result<Imported, CmdError> {
     // A bad or unsupported TOTP value shouldn't drop the whole login: keep the

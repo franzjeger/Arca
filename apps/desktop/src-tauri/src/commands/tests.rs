@@ -511,33 +511,6 @@ fn security_report_flags_weak_and_reused() {
     assert!(a_issues.contains(&"reused".to_string()));
 }
 
-#[test]
-fn parse_chrome_csv() {
-    let csv = "name,url,username,password,note\n\
-               GitHub,https://github.com,frank-lia,p4ss,my note\n\
-               ,https://x.com/login,user2,pw2,\n";
-    let (logins, skipped) = parse_logins_csv(csv);
-    assert_eq!(skipped, 0);
-    assert_eq!(logins.len(), 2);
-    assert_eq!(logins[0].title, "GitHub");
-    assert_eq!(logins[0].username, "frank-lia");
-    assert_eq!(logins[0].notes, "my note");
-    // No title column value -> derived from the URL host.
-    assert_eq!(logins[1].title, "x.com");
-}
-
-#[test]
-fn parse_apple_csv_keeps_otpauth_and_skips_blank_rows() {
-    let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
-               Bank,https://bank.com,me,secret,\"a, b\",otpauth://totp/Bank?secret=GEZDGNBVGY3TQOJQ\n\
-               ,,,,,\n";
-    let (logins, skipped) = parse_logins_csv(csv);
-    assert_eq!(logins.len(), 1);
-    assert_eq!(skipped, 1); // the empty row
-    assert_eq!(logins[0].notes, "a, b"); // quoted comma preserved
-    assert!(logins[0].totp.starts_with("otpauth://"));
-}
-
 /// Bitwarden's export, as its documentation lays it out. The authenticator key
 /// sits in `login_totp`, which the importer used to skip, so every code was
 /// silently lost. A secure note has no login to import.
@@ -563,6 +536,46 @@ fn do_import_logins_reads_bitwarden_exports() {
     assert!(twitter.has_totp);
     let bank = list.iter().find(|i| i.title == "My Bank").unwrap();
     assert!(!bank.has_totp);
+}
+
+/// Bitwarden's own format rather than its CSV: the login with its code, the
+/// secure note and the card all arrive, the passkey is reported, and the same
+/// file a second time adds nothing.
+#[test]
+fn a_bitwarden_json_export_imports_logins_and_notes_once() {
+    let dir = TempDir::new().unwrap();
+    let (state, _) = unlocked(&dir);
+    let path = dir.path().join("whatever-it-is-called.txt");
+    std::fs::write(
+        &path,
+        r#"{"encrypted": false, "items": [
+          {"type": 1, "name": "GitHub", "notes": null,
+           "login": {"uris": [{"uri": "https://github.com"}], "username": "frank", "password": "pw",
+                     "totp": "JBSWY3DPEHPK3PXP", "fido2Credentials": [{"rpId": "github.com"}]}},
+          {"type": 2, "name": "Gate code", "notes": "4711", "secureNote": {"type": 0}},
+          {"type": 3, "name": "Visa", "notes": null, "card": {"number": "4111111111111111"}}]}"#,
+    )
+    .unwrap();
+
+    let first = do_import_logins(&state, path.to_str().unwrap()).unwrap();
+    assert_eq!((first.imported, first.notes, first.duplicates), (1, 2, 0));
+    assert_eq!(
+        (first.passkeys_left_out, first.attachments_left_out),
+        (1, 0)
+    );
+    let list = do_list_items(&state, false).unwrap();
+    assert!(list.iter().find(|i| i.title == "GitHub").unwrap().has_totp);
+    assert!(list.iter().any(|i| i.title == "Gate code"));
+    assert!(list.iter().any(|i| i.title == "Visa"));
+
+    let again = do_import_logins(&state, path.to_str().unwrap()).unwrap();
+    assert_eq!((again.imported, again.notes, again.duplicates), (0, 0, 3));
+    assert_eq!(do_list_items(&state, false).unwrap().len(), 3);
+
+    let encrypted = dir.path().join("encrypted.json");
+    std::fs::write(&encrypted, r#"{"encrypted": true, "data": "2.x"}"#).unwrap();
+    let refused = do_import_logins(&state, encrypted.to_str().unwrap()).unwrap_err();
+    assert!(refused.message.contains("encrypted"), "{}", refused.message);
 }
 
 #[test]
