@@ -1,4 +1,5 @@
-// The extension's UI: a password field, then the logins matching the site.
+// The extension's UI: a password field, then the site's passkeys and logins
+// above every other login, under a search field.
 
 import SwiftUI
 
@@ -6,6 +7,8 @@ struct UnlockPickerView: View {
     // Plain `let` is correct for an @Observable model — reading its properties
     // inside `body` is what registers the dependency.
     let model: AutoFillModel
+
+    @State private var query = ""
 
     var body: some View {
         NavigationStack {
@@ -31,40 +34,89 @@ struct UnlockPickerView: View {
         }
     }
 
+    /// The site's passkeys and logins first, then every other login, all under
+    /// a search field: a login saved under another address, or with none, is
+    /// one search away instead of a dead end.
     @ViewBuilder
     private var picker: some View {
-        if model.identities.isEmpty {
-            ContentUnavailableView(
-                "No matching logins",
-                systemImage: "key",
-                description: Text("This vault has no login saved for this site."))
-        } else {
-            List(model.identities) { identity in
-                Button {
-                    Task { await model.pick(identity) }
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "person.crop.circle")
-                            .font(.title2)
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(title(for: identity))
-                            Text(identity.domain)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+        let logins = model.logins(matching: query)
+        let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
+        List {
+            if let failure = model.failure {
+                Text(failure)
+                    .font(.callout)
+                    .foregroundStyle(.red)
             }
-            .listStyle(.plain)
+            if !searching && !model.passkeys.isEmpty {
+                Section("Passkeys") {
+                    ForEach(model.passkeys) { passkey in
+                        row(
+                            icon: "person.badge.key",
+                            title: passkey.userName.isEmpty ? passkey.rpID : passkey.userName,
+                            detail: passkey.rpID
+                        ) { await model.pick(passkey) }
+                    }
+                }
+            }
+            if !logins.site.isEmpty {
+                Section(model.site.map { "For \($0)" } ?? "For this site") {
+                    ForEach(logins.site) { login in row(for: login) }
+                }
+            } else if !searching && model.passkeys.isEmpty {
+                Text(model.site.map { "No login saved for \($0)." } ?? "No login saved for this site.")
+                    .foregroundStyle(.secondary)
+            }
+            if !logins.others.isEmpty {
+                Section(logins.site.isEmpty && searching ? "Logins" : "Other logins") {
+                    ForEach(logins.others) { login in row(for: login) }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .searchable(
+            text: $query,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "Search all logins")
+        .textInputAutocapitalization(.never)
+        .autocorrectionDisabled()
+        .overlay {
+            if searching && logins.site.isEmpty && logins.others.isEmpty {
+                ContentUnavailableView.search(text: query)
+            }
         }
     }
 
-    private func title(for identity: VaultIdentity) -> String {
-        [identity.user, identity.label].first { !$0.isEmpty } ?? identity.domain
+    private func row(for login: VaultIdentity) -> some View {
+        row(
+            icon: "person.crop.circle",
+            title: [login.user, login.label].first { !$0.isEmpty } ?? login.domain,
+            detail: login.domain.isEmpty ? login.label : login.domain
+        ) { await model.pick(login) }
+    }
+
+    private func row(
+        icon: String, title: String, detail: String,
+        action: @escaping @MainActor () async -> Void
+    ) -> some View {
+        Button {
+            Task { await action() }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

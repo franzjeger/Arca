@@ -38,9 +38,27 @@ final class AutoFillModel {
             excludedCredentialIDs: [Data])
     }
 
+    /// A sign-in the site will also take a passkey for, when the OS asked for
+    /// a list rather than naming one credential.
+    struct PasskeyRequest {
+        let rpID: String
+        let clientDataHash: Data
+        /// The credentials the site will accept; empty means any of its own.
+        let allowed: [Data]
+    }
+
     private(set) var phase: Phase = .locked
+    /// Every login in the vault, sorted. The list shows the site's own first
+    /// and the rest under a search field, so a login saved under another
+    /// address is still one search away.
     private(set) var identities: [VaultIdentity] = []
+    /// The passkeys this sign-in accepts.
+    private(set) var passkeys: [VaultSession.VaultPasskeyIdentity] = []
     private(set) var failure: String?
+
+    /// The site being filled, for the list's headings; `nil` when the OS did
+    /// not say.
+    var site: String? { passkey?.rpID ?? hosts.min() }
 
     /// Whether the password field should offer a biometric retry.
     ///
@@ -52,7 +70,8 @@ final class AutoFillModel {
     /// retry button appears a moment late.
     private(set) var canUseDeviceKey = false
 
-    private let domains: Set<String>
+    private let hosts: Set<String>
+    private let passkey: PasskeyRequest?
     private let direct: DirectRequest?
     private let onFill: @MainActor (ASPasswordCredential) -> Void
     private let onFillPasskey: @MainActor (ASPasskeyAssertionCredential) -> Void
@@ -65,7 +84,8 @@ final class AutoFillModel {
     private var session: VaultSession?
 
     init(
-        domains: Set<String>,
+        hosts: Set<String>,
+        passkey: PasskeyRequest? = nil,
         direct: DirectRequest?,
         onFill: @escaping @MainActor (ASPasswordCredential) -> Void,
         onFillPasskey: @escaping @MainActor (ASPasskeyAssertionCredential) -> Void = { _ in },
@@ -73,7 +93,8 @@ final class AutoFillModel {
         onDeclineExcluded: @escaping @MainActor () -> Void = {},
         onCancel: @escaping @MainActor () -> Void
     ) {
-        self.domains = domains
+        self.hosts = hosts
+        self.passkey = passkey
         self.direct = direct
         self.onFill = onFill
         self.onFillPasskey = onFillPasskey
@@ -182,12 +203,16 @@ final class AutoFillModel {
                 break
             }
 
-            identities = try await session.identities()
-                .filter { domains.isEmpty || domains.contains($0.domain) }
-                .sorted {
-                    ($0.domain.lowercased(), $0.user.lowercased())
-                        < ($1.domain.lowercased(), $1.user.lowercased())
+            identities = try await session.identities().sorted {
+                ($0.domain.lowercased(), $0.user.lowercased())
+                    < ($1.domain.lowercased(), $1.user.lowercased())
+            }
+            if let passkey {
+                passkeys = try await session.passkeyIdentities().filter {
+                    $0.rpID == passkey.rpID
+                        && (passkey.allowed.isEmpty || passkey.allowed.contains($0.credentialID))
                 }
+            }
             phase = .picking
         } catch {
             log.error("unlock failed: \(vaultLogMessage(for: error), privacy: .public)")
@@ -198,8 +223,37 @@ final class AutoFillModel {
         }
     }
 
+    /// The logins `query` finds, split into the site's own and the rest.
+    func logins(matching query: String) -> (site: [VaultIdentity], others: [VaultIdentity]) {
+        let query = query.trimmingCharacters(in: .whitespaces).lowercased()
+        var site: [VaultIdentity] = []
+        var others: [VaultIdentity] = []
+        for identity in identities where identity.matches(query) {
+            if hosts.contains(where: { AutoFillSite.suggests(identity.domain, on: $0) }) {
+                site.append(identity)
+            } else {
+                others.append(identity)
+            }
+        }
+        return (site, others)
+    }
+
     func pick(_ identity: VaultIdentity) async {
+        failure = nil
         await fill(recordID: identity.id, user: identity.user)
+    }
+
+    func pick(_ identity: VaultSession.VaultPasskeyIdentity) async {
+        guard let passkey else { return }
+        failure = nil
+        await assertPasskey(
+            recordID: identity.id, clientDataHash: passkey.clientDataHash, rpID: passkey.rpID)
+    }
+
+    /// Where a failed fill goes back to: the list when there is one to show,
+    /// otherwise the password field.
+    private var phaseAfterFailure: Phase {
+        identities.isEmpty && passkeys.isEmpty ? .locked : .picking
     }
 
     private func fill(recordID: String, user: String) async {
@@ -210,8 +264,7 @@ final class AutoFillModel {
         } catch {
             log.error("fill failed: \(vaultLogMessage(for: error), privacy: .public)")
             failure = Self.message(error, fallback: "Couldn't read that password.")
-            // Back to the list if there is one, otherwise to the password field.
-            phase = identities.isEmpty ? .locked : .picking
+            phase = phaseAfterFailure
         }
     }
 
@@ -238,7 +291,7 @@ final class AutoFillModel {
         } catch {
             log.error("passkey assert failed: \(vaultLogMessage(for: error), privacy: .public)")
             failure = Self.message(error, fallback: "Couldn't sign in with that passkey.")
-            phase = .locked
+            phase = phaseAfterFailure
         }
     }
 

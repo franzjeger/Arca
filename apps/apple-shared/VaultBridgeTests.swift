@@ -136,6 +136,51 @@ final class VaultBridgeTests: XCTestCase {
         XCTAssertEqual(identities.first?.label, "GitHub")
     }
 
+    // MARK: AutoFill site matching
+
+    /// A browser hands AutoFill the whole page address, an app a bare domain.
+    func testTheSiteIsTheHostOfWhatTheSystemNames() {
+        XCTAssertEqual(
+            AutoFillSite.host(of: "https://Accounts.Example.com/signin?next=%2F"),
+            "accounts.example.com")
+        XCTAssertEqual(AutoFillSite.host(of: "example.com"), "example.com")
+        XCTAssertEqual(AutoFillSite.host(of: "example.com:8443/path"), "example.com")
+        XCTAssertNil(AutoFillSite.host(of: ""))
+        XCTAssertNil(AutoFillSite.host(of: "   "))
+    }
+
+    func testALoginIsSuggestedOnItsHostAndItsSubdomains() {
+        XCTAssertTrue(AutoFillSite.suggests("example.com", on: "example.com"))
+        XCTAssertTrue(AutoFillSite.suggests("example.com", on: "accounts.example.com"))
+        XCTAssertTrue(AutoFillSite.suggests("login.example.com", on: "example.com"))
+        XCTAssertTrue(AutoFillSite.suggests("Example.com", on: "www.example.com"))
+        XCTAssertTrue(AutoFillSite.suggests("localhost", on: "localhost"))
+    }
+
+    func testALoginIsNotSuggestedOnAnotherSite() {
+        XCTAssertFalse(AutoFillSite.suggests("example.com", on: "notexample.com"))
+        XCTAssertFalse(AutoFillSite.suggests("example.com", on: "example.com.evil.test"))
+        XCTAssertFalse(AutoFillSite.suggests("a.example.com", on: "b.example.com"))
+        XCTAssertFalse(AutoFillSite.suggests("com", on: "example.com"))
+        XCTAssertFalse(AutoFillSite.suggests("", on: "example.com"))
+        XCTAssertFalse(AutoFillSite.suggests("example.com", on: ""))
+    }
+
+    func testSearchReadsTheAccountTheTitleAndTheSite() throws {
+        let json = """
+            [{"id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301",\
+            "user":"Alice@example.test","domain":"github.com","label":"Work Git"}]
+            """
+        let login = try XCTUnwrap(
+            JSONDecoder().decode([VaultIdentity].self, from: Data(json.utf8)).first)
+
+        XCTAssertTrue(login.matches(""))
+        XCTAssertTrue(login.matches("alice"))
+        XCTAssertTrue(login.matches("work"))
+        XCTAssertTrue(login.matches("github"))
+        XCTAssertFalse(login.matches("gitlab"))
+    }
+
     /// The shape `vault_ffi_devices` documents. Rust writes the id in lower
     /// case; Swift's own `uuidString` is upper case.
     func testDecodesTheDocumentedDeviceJSON() throws {

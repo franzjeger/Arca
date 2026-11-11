@@ -94,7 +94,6 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
                 return
             }
             present(
-                domains: [],
                 direct: .passkey(
                     recordID: recordID,
                     clientDataHash: request.clientDataHash,
@@ -107,23 +106,50 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
                 cancel(.credentialIdentityNotFound)
                 return
             }
-            present(
-                domains: [],
-                direct: .password(recordID: recordID, user: identity.user))
+            present(direct: .password(recordID: recordID, user: identity.user))
         }
     }
 
     override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
+        present(hosts: Self.hosts(of: serviceIdentifiers))
+    }
+
+    /// The list for a sign-in that also takes a passkey, which is what the OS
+    /// asks for on any page that offers one. Left to Apple's default it was the
+    /// blank half-sheet described under "Entry points Arca cannot service":
+    /// "Arca…" at the foot of the Passwords list opened it and nothing came.
+    override func prepareCredentialList(
+        for serviceIdentifiers: [ASCredentialServiceIdentifier],
+        requestParameters: ASPasskeyCredentialRequestParameters
+    ) {
+        // The relying party is a site to suggest logins for too: the OS can
+        // name it and no page address at all.
+        var hosts = Self.hosts(of: serviceIdentifiers)
+        if let host = AutoFillSite.host(of: requestParameters.relyingPartyIdentifier) {
+            hosts.insert(host)
+        }
         present(
-            domains: Set(serviceIdentifiers.map { $0.identifier.lowercased() }),
-            direct: nil)
+            hosts: hosts,
+            passkey: AutoFillModel.PasskeyRequest(
+                rpID: requestParameters.relyingPartyIdentifier,
+                clientDataHash: requestParameters.clientDataHash,
+                allowed: requestParameters.allowedCredentials))
+    }
+
+    private static func hosts(of serviceIdentifiers: [ASCredentialServiceIdentifier]) -> Set<String> {
+        Set(serviceIdentifiers.compactMap { AutoFillSite.host(of: $0.identifier) })
     }
 
     // MARK: Containment
 
-    private func present(domains: Set<String>, direct: AutoFillModel.DirectRequest?) {
+    private func present(
+        hosts: Set<String> = [],
+        passkey: AutoFillModel.PasskeyRequest? = nil,
+        direct: AutoFillModel.DirectRequest? = nil
+    ) {
         let model = AutoFillModel(
-            domains: domains,
+            hosts: hosts,
+            passkey: passkey,
             direct: direct,
             onFill: { [weak self] credential in
                 self?.extensionContext.completeRequest(withSelectedCredential: credential)
@@ -252,7 +278,6 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
             excluded = (request.excludedCredentials ?? []).map(\.credentialID)
         }
         present(
-            domains: [],
             direct: .registerPasskey(
                 rpID: identity.relyingPartyIdentifier,
                 userName: identity.userName,
